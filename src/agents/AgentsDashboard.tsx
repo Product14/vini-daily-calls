@@ -24,6 +24,19 @@ type AgentRowBase = {
   total_sms: number | null;
   leads_with_calls: number | null;
   leads_with_sms: number | null;
+
+  // Top-of-funnel pipeline (added in the latest Metabase card revision).
+  // `new_leads_created` / `leads_contacted_from_new` are *rolling-window
+  // rooftop×service_type totals*, NOT daily counts — every daily row for the
+  // same (rooftop × service_type) carries the same constant value. Summing
+  // them across days would multi-count; sum across rooftops is meaningful.
+  // `capture_rate` = leads_contacted_from_new / new_leads_created.
+  // `abr` (Appointment Booking Rate) = appointments / qualified_leads — this
+  // one IS per-row (varies day to day in daily, varies per agent in totals).
+  new_leads_created: number | null;
+  leads_contacted_from_new: number | null;
+  capture_rate: number | null;
+  abr: number | null;
 };
 // Index signature for the `pld.` prefixed fields (TS can't express dotted keys
 // in a closed type; we just hand-roll the access).
@@ -161,10 +174,17 @@ type Bucket = {
   totalSms: number;
   leadsWithCalls: number;
   leadsWithSms: number;
+  // Top-of-funnel — see comment on AgentRowBase. Additive ACROSS rooftops,
+  // NOT additive across daily rows of the same rooftop. We handle that at
+  // the aggregation site (rooftopRows) by collapsing daily → rooftop with
+  // max instead of sum for these two.
+  newLeads: number;
+  contactedFromNew: number;
 };
 const EMPTY: Bucket = {
   touched: 0, qualified: 0, appts: 0, apptValue: 0,
   totalCalls: 0, totalSms: 0, leadsWithCalls: 0, leadsWithSms: 0,
+  newLeads: 0, contactedFromNew: 0,
 };
 
 function projectRow(r: AnyAgentRow): Bucket {
@@ -177,6 +197,8 @@ function projectRow(r: AnyAgentRow): Bucket {
     totalSms: num(r.total_sms),
     leadsWithCalls: num(r.leads_with_calls),
     leadsWithSms: num(r.leads_with_sms),
+    newLeads: num(r.new_leads_created),
+    contactedFromNew: num(r.leads_contacted_from_new),
   };
 }
 function add(a: Bucket, b: Bucket): Bucket {
@@ -189,7 +211,31 @@ function add(a: Bucket, b: Bucket): Bucket {
     totalSms: a.totalSms + b.totalSms,
     leadsWithCalls: a.leadsWithCalls + b.leadsWithCalls,
     leadsWithSms: a.leadsWithSms + b.leadsWithSms,
+    newLeads: a.newLeads + b.newLeads,
+    contactedFromNew: a.contactedFromNew + b.contactedFromNew,
   };
+}
+// Collapse one rooftop's daily rows into a per-rooftop total. Most fields
+// are additive (touched, qualified, calls, etc.), but new_leads_created and
+// leads_contacted_from_new are constants per (rooftop × service_type)
+// repeated on every daily row — those must be MAX'd, not summed, or we'd
+// inflate them N× for N days in range.
+function collapseDailyForRooftop(daily: Bucket[]): Bucket {
+  if (daily.length === 0) return { ...EMPTY };
+  const out: Bucket = { ...EMPTY };
+  for (const d of daily) {
+    out.touched          += d.touched;
+    out.qualified        += d.qualified;
+    out.appts            += d.appts;
+    out.apptValue        += d.apptValue;
+    out.totalCalls       += d.totalCalls;
+    out.totalSms         += d.totalSms;
+    out.leadsWithCalls   += d.leadsWithCalls;
+    out.leadsWithSms     += d.leadsWithSms;
+    if (d.newLeads         > out.newLeads)         out.newLeads         = d.newLeads;
+    if (d.contactedFromNew > out.contactedFromNew) out.contactedFromNew = d.contactedFromNew;
+  }
+  return out;
 }
 
 const fmtNum = (n: number) => n.toLocaleString();
@@ -352,6 +398,13 @@ function AgentsDashboard() {
     if (name && rooftopToStage.has(name)) return rooftopToStage.get(name)!;
     return r.rooftop_stage ?? null;
   };
+  // Stage shown to the user — depends on data-mode. In "no-sheet" mode we
+  // deliberately ignore BOTH Google sheets, so filtering and displaying must
+  // both fall back to Metabase's rooftop_stage. Without this, picking "Live"
+  // (a sheet-only stage label) in no-sheet mode would still pass rows whose
+  // displayed stage is "Onboarding" — a confusing filter/display mismatch.
+  const displayStage = (r: AnyAgentRow): string | null =>
+    dataMode === "sheet" ? effectiveStage(r) : (r.rooftop_stage ?? null);
 
   // MRR for a specific (rooftop × agent_type). The master sheet stores MRR per
   // agent row, so this is the right granularity for the rooftop table when
@@ -367,17 +420,19 @@ function AgentsDashboard() {
   useEffect(() => { setSort({ label: null, dir: "desc" }); }, [activeAgent]);
 
   // Stages observed in the data after sheet override is applied. Read from
-  // totals (one row per team × agent_type — already deduplicated).
+  // totals (one row per team × agent_type — already deduplicated). Routed
+  // through displayStage so the dropdown options match whatever the user
+  // currently sees in the table (sheet stages vs raw Metabase stages).
   const observedStages = useMemo(() => {
     const s = new Set<string>();
     totalsRows.forEach(r => {
-      const eff = effectiveStage(r);
+      const eff = displayStage(r);
       if (eff) s.add(eff);
     });
     return s;
-  // effectiveStage closes over rooftopToStage; declare that as the dep.
+  // displayStage closes over rooftopToStage + dataMode + accounts maps.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalsRows, rooftopToStage]);
+  }, [totalsRows, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
   // Master list = sheet order first (preserves the curated order), then any observed
   // stages not in the sheet appended at the end (highlighted as "(unlisted)").
@@ -413,7 +468,7 @@ function AgentsDashboard() {
     const m = new Map<string, { key: string; label: string; enterprise: string }>();
     for (const r of totalsRows) {
       if (r.agent_type !== activeAgent) continue;
-      if (stageFilter.size > 0 && !stageFilter.has(effectiveStage(r) ?? "")) continue;
+      if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) continue;
       const key = rowKey(r);
       if (!m.has(key)) {
         m.set(key, { key, label: rooftopLabel(r), enterprise: enterpriseLabel(r) });
@@ -421,13 +476,17 @@ function AgentsDashboard() {
     }
     return Array.from(m.values()).sort((a, b) => a.label.localeCompare(b.label));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalsRows, activeAgent, stageFilter, rooftopToStage]);
+  }, [totalsRows, activeAgent, stageFilter, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
   // Filter predicate shared by both daily and totals pipelines (minus the date
   // check, which only applies to daily — totals are all-time per Metabase scope).
+  // Stage check uses displayStage so the filter matches whatever the user sees
+  // in the table — and so picking a sheet-only label like "Live" while in
+  // no-sheet mode (where Metabase reports "Onboarding") doesn't quietly admit
+  // the row.
   const matchesAgentStageRooftopSearch = (r: AnyAgentRow): boolean => {
     if (r.agent_type !== activeAgent) return false;
-    if (stageFilter.size > 0 && !stageFilter.has(effectiveStage(r) ?? "")) return false;
+    if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) return false;
     if (selectedRooftops.size > 0 && !selectedRooftops.has(rowKey(r))) return false;
     const q = search.trim().toLowerCase();
     if (q) {
@@ -443,33 +502,23 @@ function AgentsDashboard() {
       if (!inRange(r.day, dateRange, customRange)) return false;
       return true;
     });
+  // dataMode + accounts maps are pulled in because matchesAgentStageRooftopSearch
+  // now reads displayStage, which closes over them.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dailyRows, activeAgent, dateRange, customRange, stageFilter, search, selectedRooftops, rooftopToStage]);
+  }, [dailyRows, activeAgent, dateRange, customRange, stageFilter, search, selectedRooftops, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
   const filteredTotals = useMemo(() => {
     return totalsRows.filter(matchesAgentStageRooftopSearch);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalsRows, activeAgent, stageFilter, search, selectedRooftops, rooftopToStage]);
+  }, [totalsRows, activeAgent, stageFilter, search, selectedRooftops, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
-  const days = useMemo(
-    () => Array.from(new Set(filteredDaily.map(r => r.day))).sort(),
-    [filteredDaily]
-  );
-
-  // KPI strip totals — branch by date filter so the cards actually move when
-  // the user changes the date range:
-  //   • dateRange === "ALL" → sum the totals card (lead-level deduped, exact).
-  //   • any other range     → sum the (date-filtered) daily card. Daily rows
-  //     are deduped within a day but not across days, so distinct counts
-  //     (touched / qualified / appts) can be slightly inflated when a lead
-  //     re-engages on multiple days within the range. Volume fields (calls,
-  //     sms, $ value) are exact. We accept the small inflation in exchange for
-  //     responsiveness to the date filter — the alternative is KPIs that
-  //     silently ignore the date selector, which the user just flagged.
-  const totals = useMemo(() => {
-    const source = dateRange === "ALL" ? filteredTotals : filteredDaily;
-    return source.reduce((acc, r) => add(acc, projectRow(r)), { ...EMPTY });
-  }, [filteredTotals, filteredDaily, dateRange]);
+  // KPI strip totals — sum the already-aggregated per-rooftop totals so the
+  // KPI scope matches the table exactly (incl. MRR / sheet filters), and so
+  // rolling-window fields (newLeads / contactedFromNew) aren't N×-inflated
+  // by being repeated across each day's daily row. For dateRange==="ALL" each
+  // rooftop's total is the totals-card row (lead-level deduped, exact); for
+  // any narrower range it's collapseDailyForRooftop's sum-for-counts /
+  // max-for-rolling-totals output over the in-range daily rows.
 
   type RooftopAgg = {
     key: string;
@@ -519,7 +568,9 @@ function AgentsDashboard() {
     if (dateRange !== "ALL") {
       for (const e of m.values()) {
         if (e.daily.length === 0) { m.delete(e.key); continue; }
-        e.total = e.daily.reduce((acc, d) => add(acc, d), { ...EMPTY });
+        // Sum-for-counts, max-for-rolling-totals (new_leads / contacted).
+        // See collapseDailyForRooftop's docstring.
+        e.total = collapseDailyForRooftop(e.daily);
       }
     }
     let out = Array.from(m.values());
@@ -541,6 +592,15 @@ function AgentsDashboard() {
     return out;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredTotals, filteredDaily, rooftopToStage, accountsByTeamAgent, accountsByNameAgent, mrrRange, dataMode, dateRange]);
+
+  // Sum each rooftop's already-correctly-collapsed `total` into the KPI strip
+  // figure. Doing it here (rather than re-summing daily / totals rows) keeps
+  // the KPI scope in lockstep with the table (incl. MRR & sheet filters), and
+  // ensures newLeads / contactedFromNew aren't multi-counted across days.
+  const totals = useMemo(
+    () => rooftopRows.reduce((acc, rt) => add(acc, rt.total), { ...EMPTY }),
+    [rooftopRows]
+  );
 
   const sortedRooftopRows = useMemo(() => {
     const rows = [...rooftopRows];
@@ -576,17 +636,25 @@ function AgentsDashboard() {
     return rows;
   }, [rooftopRows, sort, activeAgent]);
 
-  // Day-on-day series for the chart — aggregate daily across rooftops in scope.
-  // Per-day distinct counts are NOT summable across days, but ARE summable
-  // across teams within the same day (different teams = different leads).
-  const daily = useMemo(() => {
+  // Day-on-day series — aggregated from the already-filtered per-rooftop
+  // daily buckets so the chart honors every filter the table does
+  // (incl. MRR range and sheet/no-sheet mode). Per-day distinct counts are
+  // NOT summable across days, but ARE summable across rooftops within the
+  // same day (different rooftops = different leads).
+  const { daily, days } = useMemo(() => {
     const byDay = new Map<string, Bucket>();
-    for (const r of filteredDaily) {
-      const prev = byDay.get(r.day) ?? EMPTY;
-      byDay.set(r.day, add(prev, projectRow(r)));
+    for (const rt of rooftopRows) {
+      for (const d of rt.daily) {
+        const prev = byDay.get(d.day) ?? EMPTY;
+        byDay.set(d.day, add(prev, d));
+      }
     }
-    return days.map(d => byDay.get(d) ?? { ...EMPTY });
-  }, [filteredDaily, days]);
+    const sortedDays = Array.from(byDay.keys()).sort();
+    return {
+      days: sortedDays,
+      daily: sortedDays.map(d => byDay.get(d) ?? { ...EMPTY }),
+    };
+  }, [rooftopRows]);
 
   const { liveRooftops, churnedRooftops } = useMemo(() => {
     let live = 0, churned = 0;
@@ -852,10 +920,14 @@ function KpiStrip({ totals, liveRooftops, churnedRooftops, totalRooftops, loadin
 }) {
   const channelMix = (b: Bucket) => `${fmtNum(b.leadsWithCalls)} via calls · ${fmtNum(b.leadsWithSms)} via SMS`;
 
-  // V3 funnel — Touched → Qualified → Appointments. No "Total" tier (total_leads
-  // is gone since activity-day anchoring made it not meaningful). Same shape
-  // across all four agent tabs so the numbers compare cleanly.
+  // V3 funnel, now extended with a top-of-funnel "New Leads" tier from the
+  // updated Metabase query: New → Touched → Qualified → Appointments. Same
+  // shape across all four agent tabs so the numbers compare cleanly.
   const main: KpiSpec[] = [
+    { label: "New Leads", value: fmtNum(totals.newLeads), color: "#8b5cf6",
+      sub: totals.contactedFromNew > 0
+        ? `${fmtNum(totals.contactedFromNew)} contacted (${fmtRate(totals.contactedFromNew, totals.newLeads)})`
+        : undefined },
     { label: "Touched", value: fmtNum(totals.touched), color: "#0ea5e9", sub: channelMix(totals) },
     { label: "Qualified", value: fmtNum(totals.qualified), color: "#0d9488",
       sub: fmtRate(totals.qualified, totals.touched) + " of touched" },
@@ -869,7 +941,11 @@ function KpiStrip({ totals, liveRooftops, churnedRooftops, totalRooftops, loadin
       sub: totals.leadsWithCalls > 0 ? `${fmtNum(totals.leadsWithCalls)} unique leads` : undefined },
     { label: "Total SMS", value: fmtNum(totals.totalSms), color: "#0ea5e9",
       sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined },
+    { label: "Capture Rate", value: fmtRate(totals.contactedFromNew, totals.newLeads), color: "#7c3aed",
+      sub: "contacted / new leads" },
     { label: "Conversion Rate", value: fmtRate(totals.appts, totals.touched), color: "#15803d", sub: "appts / touched" },
+    { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
+      sub: "appts / qualified" },
     { label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569", sub: accountsSub },
     { label: "Appointment Value", value: fmtCurrency(totals.apptValue), color: "#ea580c" },
   ];
@@ -1034,8 +1110,12 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                   <td style={{ ...dayCellStyle, paddingLeft: 36, color: "#6b7280" }}>{fmtDay(d.day)}</td>
                   <td style={dayCellStyle} />
                   {cols.map(c => (
-                    <td key={c.label} style={{ ...dayCellStyle, textAlign: "right", color: "#4b5563" }}>
-                      {c.render(d)}
+                    <td
+                      key={c.label}
+                      style={{ ...dayCellStyle, textAlign: "right", color: "#4b5563" }}
+                      title={c.rollingPerRooftop ? "Rolling rooftop total — see the collapsed row" : undefined}
+                    >
+                      {c.rollingPerRooftop ? "—" : c.render(d)}
                     </td>
                   ))}
                 </tr>
@@ -1048,14 +1128,6 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
   );
 }
 
-type Col = {
-  label: string;
-  render: (b: Bucket) => string;
-  sortValue: (b: Bucket) => number;
-  minWidth?: number;
-  emphasize?: boolean;
-};
-
 // Compact "calls / sms" leads cell.
 const fmtChannelMix = (b: Bucket): string =>
   b.leadsWithCalls === 0 && b.leadsWithSms === 0
@@ -1064,14 +1136,31 @@ const fmtChannelMix = (b: Bucket): string =>
 
 const safeRate = (n: number, d: number) => (d > 0 ? n / d : -1); // -1 sinks "—" to bottom on desc
 
+type Col = {
+  label: string;
+  render: (b: Bucket) => string;
+  sortValue: (b: Bucket) => number;
+  minWidth?: number;
+  emphasize?: boolean;
+  // True for fields whose value is a rolling rooftop×service_type total —
+  // constant across all daily rows for the same rooftop. We render "—" in
+  // the per-day expanded rows so the user doesn't misread the rolling
+  // figure as a daily value.
+  rollingPerRooftop?: boolean;
+};
+
 function columnsFor(_agent: AgentType): Col[] {
   // V3 uniform column set across all four agent tabs (the SQL schema is now
   // uniform, no Eligible/Targeted/Engaged/Intent/Coverage/Followups/Quality).
+  // New (post-Metabase-update) columns: New Leads, Capture %, ABR.
   return [
+    { label: "New Leads", render: b => fmtNum(b.newLeads), sortValue: b => b.newLeads, minWidth: 90, rollingPerRooftop: true },
+    { label: "Capture %", render: b => fmtRate(b.contactedFromNew, b.newLeads), sortValue: b => safeRate(b.contactedFromNew, b.newLeads), minWidth: 90, rollingPerRooftop: true },
     { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
     { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
     { label: "Conv. Rate", render: b => fmtRate(b.appts, b.touched), sortValue: b => safeRate(b.appts, b.touched), minWidth: 90 },
+    { label: "ABR", render: b => fmtRate(b.appts, b.qualified), sortValue: b => safeRate(b.appts, b.qualified), minWidth: 80 },
     { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
     { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
     { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },

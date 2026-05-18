@@ -1271,10 +1271,35 @@ const AGENT_NUMERIC_FIELDS = [
   "total_calls", "total_sms", "total_sms_conversations",
   "total_inbound_human_msgs",
 ];
+// Fields that are NOT additive across dupes — rolling-window totals
+// (new_leads_created, leads_contacted_from_new) are constant across all
+// daily rows of the same (rooftop × service_type), and rates (capture_rate,
+// abr) can't be summed. Take MAX so a real-row + zero-ghost pair collapses
+// to the real value.
+const AGENT_MAX_FIELDS = [
+  "new_leads_created", "leads_contacted_from_new", "capture_rate", "abr",
+];
 const AGENT_KEEP_FIELDS = [
   "enterprise_id", "enterprise_name", "rooftop_name", "rooftop_stage",
   "service_type", "direction", "pld.team_id", "pld.enterprise_id",
 ];
+// Read a field with a sibling-key fallback — the totals card emits team_id /
+// enterprise_id as `pld.team_id` / `pld.enterprise_id`, the daily card emits
+// them bare. Without the fallback every totals row collapses to "::<agent>"
+// and you get one merged row per agent_type (heavily over-summed).
+const KEY_FIELD_FALLBACKS = {
+  team_id: ["pld.team_id"],
+  enterprise_id: ["pld.enterprise_id"],
+};
+function readKeyField(row, field) {
+  const direct = row?.[field];
+  if (direct != null && direct !== "") return direct;
+  for (const alt of KEY_FIELD_FALLBACKS[field] ?? []) {
+    const v = row?.[alt];
+    if (v != null && v !== "") return v;
+  }
+  return "";
+}
 // Merge agent rows by composite key (e.g. team_id+agent_type[+day]). Numeric
 // fields are summed; identity/string fields take the first non-empty value;
 // `conversion_rate` is recomputed (appointments / touched_leads) when both
@@ -1284,13 +1309,14 @@ const AGENT_KEEP_FIELDS = [
 function mergeAgentRows(rows, keyFields) {
   const m = new Map();
   for (const r of rows) {
-    const k = keyFields.map(f => String(r?.[f] ?? "")).join("::");
+    const k = keyFields.map(f => String(readKeyField(r, f))).join("::");
     let acc = m.get(k);
     if (!acc) {
       acc = {};
       for (const f of keyFields) acc[f] = r[f];
       for (const f of AGENT_KEEP_FIELDS) if (r[f] != null && r[f] !== "") acc[f] = r[f];
       for (const f of AGENT_NUMERIC_FIELDS) acc[f] = 0;
+      for (const f of AGENT_MAX_FIELDS) acc[f] = null;
       acc.agent_type = r.agent_type;
       m.set(k, acc);
     }
@@ -1300,6 +1326,14 @@ function mergeAgentRows(rows, keyFields) {
       if (v == null) continue;
       const n = Number(v);
       if (Number.isFinite(n)) acc[f] = (acc[f] ?? 0) + n;
+    }
+    // Max-preserve for non-additive fields (rolling totals + rates).
+    for (const f of AGENT_MAX_FIELDS) {
+      const v = r[f];
+      if (v == null) continue;
+      const n = Number(v);
+      if (!Number.isFinite(n)) continue;
+      if (acc[f] == null || n > acc[f]) acc[f] = n;
     }
     // Backfill identity fields if the first row had blanks.
     for (const f of AGENT_KEEP_FIELDS) {
