@@ -273,8 +273,21 @@ function AgentsDashboard() {
   // Group" in Metabase but resolve to "World Car Hyundai South" / "World
   // Car Kia Mazda" in the sheet).
   type AccountInfo = { stage: string; mrr: number | null; subStage: string; rooftopName: string };
+  // Sheet entries kept in their full per-(team_id × agent_type) form so the
+  // "sheet" data-mode can render zero-usage accounts that have no Metabase
+  // activity at all — they'd otherwise never appear in the table.
+  type SheetEntry = {
+    teamId: string;
+    agentType: AgentType;
+    rooftopName: string;
+    enterpriseName: string;
+    stage: string;
+    mrr: number | null;
+    subStage: string;
+  };
   const [accountsByTeamAgent, setAccountsByTeamAgent] = useState<Map<string, AccountInfo>>(new Map());
   const [accountsByNameAgent, setAccountsByNameAgent] = useState<Map<string, AccountInfo>>(new Map());
+  const [sheetEntries, setSheetEntries] = useState<SheetEntry[]>([]);
   const [search, setSearch] = useState("");
   const [selectedRooftops, setSelectedRooftops] = useState<Set<string>>(new Set());
   // MRR range filter (inclusive). null on either side means unbounded.
@@ -345,9 +358,11 @@ function AgentsDashboard() {
         if (!j || !Array.isArray(j.rows)) return;
         const byTeam = new Map<string, AccountInfo>();
         const byName = new Map<string, AccountInfo>();
+        const entries: SheetEntry[] = [];
         for (const row of j.rows) {
-          const name = String(row.rooftopName ?? "").toLowerCase().trim();
-          const agent = String(row.agentType ?? "").trim().toLowerCase();
+          const nameLower = String(row.rooftopName ?? "").toLowerCase().trim();
+          const agentRaw = String(row.agentType ?? "").trim();
+          const agent = agentRaw.toLowerCase();
           const teamId = String(row.rooftopId ?? "").trim();
           if (!agent) continue;
           const info: AccountInfo = {
@@ -361,10 +376,25 @@ function AgentsDashboard() {
           // "Lambert Buick GMC Inc"). Skip empty team_ids; those rooftops will
           // be reachable only by name.
           if (teamId) byTeam.set(`${teamId}::${agent}`, info);
-          if (name)   byName.set(`${name}::${agent}`, info);
+          if (nameLower) byName.set(`${nameLower}::${agent}`, info);
+          // Only keep entries whose agentType matches one of the four dashboard
+          // tabs — anything else can't seed a synthetic rooftop on the active
+          // tab in sheet mode.
+          if (AGENT_TYPES.includes(agentRaw as AgentType)) {
+            entries.push({
+              teamId,
+              agentType: agentRaw as AgentType,
+              rooftopName: info.rooftopName,
+              enterpriseName: String(row.enterpriseName ?? "").trim(),
+              stage: info.stage,
+              mrr: info.mrr,
+              subStage: info.subStage,
+            });
+          }
         }
         setAccountsByTeamAgent(byTeam);
         setAccountsByNameAgent(byName);
+        setSheetEntries(entries);
       })
       .catch(() => { /* sheet may be unconfigured / unreachable — silent fallback */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -603,12 +633,53 @@ function AgentsDashboard() {
     // Total Accounts KPI reflects "accounts with activity in range".
     if (dateRange !== "ALL") {
       for (const e of m.values()) {
-        if (e.daily.length === 0) { m.delete(e.key); continue; }
+        if (e.daily.length === 0) {
+          // In sheet mode every sheet account is meaningful even with zero
+          // activity in range — keep it and zero out the total. In no-sheet
+          // mode the only signal is Metabase activity, so dropping is correct.
+          if (dataMode === "sheet") {
+            e.total = { ...EMPTY };
+            continue;
+          }
+          m.delete(e.key);
+          continue;
+        }
         // Sum-for-counts, max-for-rolling-totals (new_leads / contacted).
         // See collapseDailyForRooftop's docstring.
         e.total = collapseDailyForRooftop(e.daily);
       }
     }
+
+    // Sheet-mode: seed accounts that exist in the master sheet for the active
+    // agent type but have no Metabase activity at all. The user explicitly
+    // wants these visible (with zero metrics) so the sheet view is exhaustive
+    // and a 0-usage account isn't silently invisible.
+    if (dataMode === "sheet") {
+      for (const entry of sheetEntries) {
+        if (entry.agentType !== activeAgent) continue;
+        const key = entry.teamId || `${entry.enterpriseName}::${entry.rooftopName}`;
+        if (m.has(key)) continue;
+        // Same filter predicate as Metabase rows, but on the sheet's fields.
+        if (stageFilter.size > 0 && !stageFilter.has(entry.stage || "")) continue;
+        if (selectedRooftops.size > 0 && !selectedRooftops.has(key)) continue;
+        const q = search.trim().toLowerCase();
+        if (q) {
+          const hay = `${entry.rooftopName} ${entry.enterpriseName}`.toLowerCase();
+          if (!hay.includes(q)) continue;
+        }
+        m.set(key, {
+          key,
+          rooftop: entry.rooftopName || entry.enterpriseName || "Unknown",
+          enterprise: entry.enterpriseName,
+          stage: entry.stage || null,
+          mrr: entry.mrr,
+          inSheet: true,
+          daily: [],
+          total: { ...EMPTY },
+        });
+      }
+    }
+
     let out = Array.from(m.values());
     // In "sheet" mode, restrict the rooftop universe to those listed in the
     // master accounts sheet for the active (rooftop × agent_type). "no-sheet"
@@ -627,7 +698,7 @@ function AgentsDashboard() {
     }
     return out;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredTotals, filteredDaily, rooftopToStage, accountsByTeamAgent, accountsByNameAgent, mrrRange, dataMode, dateRange]);
+  }, [filteredTotals, filteredDaily, rooftopToStage, accountsByTeamAgent, accountsByNameAgent, mrrRange, dataMode, dateRange, sheetEntries, activeAgent, stageFilter, selectedRooftops, search]);
 
   // Sum each rooftop's already-correctly-collapsed `total` into the KPI strip
   // figure. Doing it here (rather than re-summing daily / totals rows) keeps
