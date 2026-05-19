@@ -267,7 +267,12 @@ function AgentsDashboard() {
   // We index two ways so we can match Metabase rows that disagree with the sheet
   // on rooftop_name spelling (e.g. Metabase "Lambert Buick GMC" vs sheet
   // "Lambert Buick GMC Inc") — team_id is the strong key, name is the fallback.
-  type AccountInfo = { stage: string; mrr: number | null; subStage: string };
+  // `rooftopName` is the master-sheet's name for this team_id × agent_type.
+  // We use it to override Metabase's rooftop_name when Metabase fell back to
+  // the enterprise name (e.g. all 5 World Car team_ids show "World Car Auto
+  // Group" in Metabase but resolve to "World Car Hyundai South" / "World
+  // Car Kia Mazda" in the sheet).
+  type AccountInfo = { stage: string; mrr: number | null; subStage: string; rooftopName: string };
   const [accountsByTeamAgent, setAccountsByTeamAgent] = useState<Map<string, AccountInfo>>(new Map());
   const [accountsByNameAgent, setAccountsByNameAgent] = useState<Map<string, AccountInfo>>(new Map());
   const [search, setSearch] = useState("");
@@ -349,6 +354,7 @@ function AgentsDashboard() {
             stage: String(row.currentStage ?? "").trim(),
             subStage: String(row.subStage ?? "").trim(),
             mrr: typeof row.agentMrr === "number" ? row.agentMrr : null,
+            rooftopName: String(row.rooftopName ?? "").trim(),
           };
           // Index by team_id first (the strong join key — survives name drift
           // between Metabase and the sheet, e.g. "Lambert Buick GMC" vs
@@ -377,9 +383,15 @@ function AgentsDashboard() {
       const hit = accountsByTeamAgent.get(`${tid}::${agent}`);
       if (hit) return hit;
     }
-    const name = (r.rooftop_name ?? "").toLowerCase().trim();
-    if (name) {
-      const hit = accountsByNameAgent.get(`${name}::${agent}`);
+    const name = (r.rooftop_name ?? "").trim();
+    const ent  = (r.enterprise_name ?? "").trim();
+    // SAFETY: when Metabase has put the enterprise name into rooftop_name
+    // (e.g. all 5 World Car team_ids carry rooftop_name="World Car Auto
+    // Group"), the name fallback would match the FIRST sheet row with that
+    // label and return its stage/MRR for every team_id — wrong rooftop, wrong
+    // numbers. Suppress the fallback in this case; team_id alone decides.
+    if (name && name.toLowerCase() !== ent.toLowerCase()) {
+      const hit = accountsByNameAgent.get(`${name.toLowerCase()}::${agent}`);
       if (hit) return hit;
     }
     return null;
@@ -405,6 +417,27 @@ function AgentsDashboard() {
   // displayed stage is "Onboarding" — a confusing filter/display mismatch.
   const displayStage = (r: AnyAgentRow): string | null =>
     dataMode === "sheet" ? effectiveStage(r) : (r.rooftop_stage ?? null);
+
+  // Rooftop label override — Metabase's `rooftop_name` is the enterprise name
+  // (e.g. "World Car Auto Group") for several team_ids, which collapses
+  // distinct rooftops in the table. Three-tier fallback:
+  //   1. Master sheet's rooftopName for this (team_id × agent_type)
+  //   2. Metabase's rooftop_name, UNLESS it equals enterprise_name — in
+  //      which case append a short team_id so 5 different team_ids don't
+  //      all render as "World Car Auto Group" in the table.
+  //   3. The default rooftopLabel chain (enterprise_name → team_id → Unknown)
+  // Applied in both data-modes since it's a purely cosmetic disambiguation.
+  const displayRooftopLabel = (r: AnyAgentRow): string => {
+    const info = accountInfoFor(r);
+    if (info?.rooftopName) return info.rooftopName;
+    const name = (r.rooftop_name ?? "").trim();
+    const ent  = (r.enterprise_name ?? "").trim();
+    if (name && ent && name.toLowerCase() === ent.toLowerCase()) {
+      const tid = teamId(r);
+      if (tid) return `${name} · ${tid.slice(0, 8)}`;
+    }
+    return rooftopLabel(r);
+  };
 
   // MRR for a specific (rooftop × agent_type). The master sheet stores MRR per
   // agent row, so this is the right granularity for the rooftop table when
@@ -471,7 +504,7 @@ function AgentsDashboard() {
       if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) continue;
       const key = rowKey(r);
       if (!m.has(key)) {
-        m.set(key, { key, label: rooftopLabel(r), enterprise: enterpriseLabel(r) });
+        m.set(key, { key, label: displayRooftopLabel(r), enterprise: enterpriseLabel(r) });
       }
     }
     return Array.from(m.values()).sort((a, b) => a.label.localeCompare(b.label));
@@ -490,7 +523,10 @@ function AgentsDashboard() {
     if (selectedRooftops.size > 0 && !selectedRooftops.has(rowKey(r))) return false;
     const q = search.trim().toLowerCase();
     if (q) {
-      const hay = `${rooftopLabel(r)} ${enterpriseLabel(r)}`.toLowerCase();
+      // Include both the displayed (sheet-override) and raw (Metabase) names
+      // so the search box matches whether the user typed the real rooftop
+      // name or the "World Car Auto Group" placeholder.
+      const hay = `${displayRooftopLabel(r)} ${rooftopLabel(r)} ${enterpriseLabel(r)}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -543,7 +579,7 @@ function AgentsDashboard() {
       const useSheet = dataMode === "sheet";
       const info = useSheet ? accountInfoFor(r) : null;
       m.set(key, {
-        key, rooftop: rooftopLabel(r), enterprise: enterpriseLabel(r),
+        key, rooftop: displayRooftopLabel(r), enterprise: enterpriseLabel(r),
         stage: useSheet ? effectiveStage(r) : (r.rooftop_stage ?? null),
         mrr: info?.mrr ?? null,
         inSheet: info != null,
