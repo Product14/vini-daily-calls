@@ -161,6 +161,20 @@ const rooftopLabel = (r: AnyAgentRow) =>
   r.rooftop_name?.trim() || r.enterprise_name?.trim() || teamId(r) || "Unknown";
 const enterpriseLabel = (r: AnyAgentRow) => r.enterprise_name?.trim() || "";
 
+// Normalize a rooftop name for cross-system matching: lowercase, replace any
+// non-alphanumeric run with a space, drop the corporate-form filler tokens
+// (LLC, Inc, …), token-sort, and join. "I 40 Autos" and "I-40 Autos, LLC"
+// both normalize to "40 autos i", and "Dream Nissan Lawrence" and "Dream
+// Lawrence Nissan" both normalize to "dream lawrence nissan". Used as a
+// last-resort fallback (after team_id and exact name) — the join site still
+// guards against ambiguity by requiring a single candidate.
+const NAME_FILLER_TOKENS = new Set(["llc", "inc", "incorporated", "corp", "ltd", "co", "dba"]);
+function normalizeRooftopName(s: string): string {
+  if (!s) return "";
+  const toks = s.toLowerCase().split(/[^a-z0-9]+/).filter(t => t && !NAME_FILLER_TOKENS.has(t));
+  return toks.sort().join(" ");
+}
+
 // V3 Bucket — funnel is Touched → Qualified → Appointments (no "Total" tier).
 // Volume fields (calls / SMS / appt $) are sum-friendly across days; distinct-
 // count fields (touched/qualified/appts) are NOT — sum them only when reading
@@ -287,6 +301,13 @@ function AgentsDashboard() {
   };
   const [accountsByTeamAgent, setAccountsByTeamAgent] = useState<Map<string, AccountInfo>>(new Map());
   const [accountsByNameAgent, setAccountsByNameAgent] = useState<Map<string, AccountInfo>>(new Map());
+  // Normalized-name index — used to bridge naming drift between Metabase
+  // and the sheet that exact-match misses (e.g. "Dream Nissan Lawrence" vs
+  // "Dream Lawrence Nissan", or "I 40 Autos" vs "I-40 Autos, LLC"). Maps
+  // each normalized name → array of candidate AccountInfo; we only use it
+  // when there's exactly one candidate so an ambiguous normalization can't
+  // attach the wrong sheet row.
+  const [accountsByNormNameAgent, setAccountsByNormNameAgent] = useState<Map<string, AccountInfo[]>>(new Map());
   const [sheetEntries, setSheetEntries] = useState<SheetEntry[]>([]);
   const [search, setSearch] = useState("");
   const [selectedRooftops, setSelectedRooftops] = useState<Set<string>>(new Set());
@@ -358,9 +379,12 @@ function AgentsDashboard() {
         if (!j || !Array.isArray(j.rows)) return;
         const byTeam = new Map<string, AccountInfo>();
         const byName = new Map<string, AccountInfo>();
+        const byNormName = new Map<string, AccountInfo[]>();
         const entries: SheetEntry[] = [];
         for (const row of j.rows) {
-          const nameLower = String(row.rooftopName ?? "").toLowerCase().trim();
+          const nameRaw = String(row.rooftopName ?? "").trim();
+          const nameLower = nameRaw.toLowerCase();
+          const normName = normalizeRooftopName(nameRaw);
           const agentRaw = String(row.agentType ?? "").trim();
           const agent = agentRaw.toLowerCase();
           const teamId = String(row.rooftopId ?? "").trim();
@@ -369,7 +393,7 @@ function AgentsDashboard() {
             stage: String(row.currentStage ?? "").trim(),
             subStage: String(row.subStage ?? "").trim(),
             mrr: typeof row.agentMrr === "number" ? row.agentMrr : null,
-            rooftopName: String(row.rooftopName ?? "").trim(),
+            rooftopName: nameRaw,
           };
           // Index by team_id first (the strong join key — survives name drift
           // between Metabase and the sheet, e.g. "Lambert Buick GMC" vs
@@ -377,6 +401,12 @@ function AgentsDashboard() {
           // be reachable only by name.
           if (teamId) byTeam.set(`${teamId}::${agent}`, info);
           if (nameLower) byName.set(`${nameLower}::${agent}`, info);
+          if (normName) {
+            const k = `${normName}::${agent}`;
+            const arr = byNormName.get(k) ?? [];
+            arr.push(info);
+            byNormName.set(k, arr);
+          }
           // Only keep entries whose agentType matches one of the four dashboard
           // tabs — anything else can't seed a synthetic rooftop on the active
           // tab in sheet mode.
@@ -394,11 +424,59 @@ function AgentsDashboard() {
         }
         setAccountsByTeamAgent(byTeam);
         setAccountsByNameAgent(byName);
+        setAccountsByNormNameAgent(byNormName);
         setSheetEntries(entries);
       })
       .catch(() => { /* sheet may be unconfigured / unreachable — silent fallback */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Names that appear on more than one Metabase team_id within the same
+  // agent_type (e.g. 5 different team_ids all labeled "World Car Auto
+  // Group" on Sales Inbound). For these, a name-based fallback into the
+  // accounts sheet would yank one arbitrary sheet row's stage/MRR onto
+  // every Metabase team_id — wrong rooftop, wrong numbers. We suppress
+  // the fallback only for ambiguous names; legitimate single-team-id
+  // matches like "Bridgeton Auto Mall" (different team_ids in Metabase
+  // vs the sheet, but the name uniquely identifies the rooftop) still
+  // join via name.
+  const ambiguousMetabaseNames = useMemo(() => {
+    const counts = new Map<string, Set<string>>();
+    for (const r of totalsRows) {
+      const name = (r.rooftop_name ?? "").trim().toLowerCase();
+      const agent = (r.agent_type ?? "").trim().toLowerCase();
+      const tid = teamId(r);
+      if (!name || !agent || !tid) continue;
+      const key = `${name}::${agent}`;
+      let s = counts.get(key);
+      if (!s) { s = new Set(); counts.set(key, s); }
+      s.add(tid);
+    }
+    const out = new Set<string>();
+    for (const [k, s] of counts) if (s.size > 1) out.add(k);
+    return out;
+  }, [totalsRows]);
+
+  // Same ambiguity check for the normalized-name fallback. We need a
+  // separate set because two different Metabase rooftop_names can collide
+  // after normalization (e.g. punctuation / word-order differences) — in
+  // which case the normalized fallback shouldn't be used.
+  const ambiguousMetabaseNormNames = useMemo(() => {
+    const counts = new Map<string, Set<string>>();
+    for (const r of totalsRows) {
+      const norm = normalizeRooftopName(r.rooftop_name ?? "");
+      const agent = (r.agent_type ?? "").trim().toLowerCase();
+      const tid = teamId(r);
+      if (!norm || !agent || !tid) continue;
+      const key = `${norm}::${agent}`;
+      let s = counts.get(key);
+      if (!s) { s = new Set(); counts.set(key, s); }
+      s.add(tid);
+    }
+    const out = new Set<string>();
+    for (const [k, s] of counts) if (s.size > 1) out.add(k);
+    return out;
+  }, [totalsRows]);
 
   // Per (rooftop × agent_type) lookup. We deliberately do NOT collapse across
   // agent types: Sales-OB stage stays Sales-OB stage, even when Sales-IB on the
@@ -413,16 +491,22 @@ function AgentsDashboard() {
       const hit = accountsByTeamAgent.get(`${tid}::${agent}`);
       if (hit) return hit;
     }
-    const name = (r.rooftop_name ?? "").trim();
-    const ent  = (r.enterprise_name ?? "").trim();
-    // SAFETY: when Metabase has put the enterprise name into rooftop_name
-    // (e.g. all 5 World Car team_ids carry rooftop_name="World Car Auto
-    // Group"), the name fallback would match the FIRST sheet row with that
-    // label and return its stage/MRR for every team_id — wrong rooftop, wrong
-    // numbers. Suppress the fallback in this case; team_id alone decides.
-    if (name && name.toLowerCase() !== ent.toLowerCase()) {
-      const hit = accountsByNameAgent.get(`${name.toLowerCase()}::${agent}`);
+    const nameRaw = (r.rooftop_name ?? "").trim();
+    const name = nameRaw.toLowerCase();
+    // Tier 2: exact name match, only when this Metabase name is uniquely
+    // owned by one team_id (otherwise multiple rooftops would map to the
+    // same sheet row).
+    if (name && !ambiguousMetabaseNames.has(`${name}::${agent}`)) {
+      const hit = accountsByNameAgent.get(`${name}::${agent}`);
       if (hit) return hit;
+    }
+    // Tier 3: normalized-name fallback (word order / corporate-form drift).
+    // Same ambiguity guard, plus we only accept it when the sheet has
+    // exactly one candidate under this normalized form for this agent_type.
+    const norm = normalizeRooftopName(nameRaw);
+    if (norm && !ambiguousMetabaseNormNames.has(`${norm}::${agent}`)) {
+      const cands = accountsByNormNameAgent.get(`${norm}::${agent}`);
+      if (cands && cands.length === 1) return cands[0];
     }
     return null;
   };
@@ -448,21 +532,21 @@ function AgentsDashboard() {
   const displayStage = (r: AnyAgentRow): string | null =>
     dataMode === "sheet" ? effectiveStage(r) : (r.rooftop_stage ?? null);
 
-  // Rooftop label override — Metabase's `rooftop_name` is the enterprise name
-  // (e.g. "World Car Auto Group") for several team_ids, which collapses
-  // distinct rooftops in the table. Three-tier fallback:
+  // Rooftop label override — Metabase's `rooftop_name` is the same string
+  // for several team_ids in some cases (e.g. 5 World Car team_ids all
+  // labeled "World Car Auto Group"), which collapses distinct rooftops in
+  // the table. Three-tier fallback:
   //   1. Master sheet's rooftopName for this (team_id × agent_type)
-  //   2. Metabase's rooftop_name, UNLESS it equals enterprise_name — in
-  //      which case append a short team_id so 5 different team_ids don't
-  //      all render as "World Car Auto Group" in the table.
+  //   2. Metabase's rooftop_name; suffix a short team_id when the same
+  //      name is shared by multiple Metabase team_ids (the ambiguous case)
   //   3. The default rooftopLabel chain (enterprise_name → team_id → Unknown)
   // Applied in both data-modes since it's a purely cosmetic disambiguation.
   const displayRooftopLabel = (r: AnyAgentRow): string => {
     const info = accountInfoFor(r);
     if (info?.rooftopName) return info.rooftopName;
     const name = (r.rooftop_name ?? "").trim();
-    const ent  = (r.enterprise_name ?? "").trim();
-    if (name && ent && name.toLowerCase() === ent.toLowerCase()) {
+    const agent = (r.agent_type ?? "").trim().toLowerCase();
+    if (name && ambiguousMetabaseNames.has(`${name.toLowerCase()}::${agent}`)) {
       const tid = teamId(r);
       if (tid) return `${name} · ${tid.slice(0, 8)}`;
     }
@@ -1017,7 +1101,7 @@ function AgentsDashboard() {
 
 type KpiSpec = { label: string; value: string | number; color: string; sub?: string };
 
-function KpiStrip({ totals, liveRooftops, churnedRooftops, totalRooftops, loading }: {
+function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops, loading }: {
   agent: AgentType;
   totals: Bucket;
   liveRooftops: number;
@@ -1026,6 +1110,13 @@ function KpiStrip({ totals, liveRooftops, churnedRooftops, totalRooftops, loadin
   loading: boolean;
 }) {
   const channelMix = (b: Bucket) => `${fmtNum(b.leadsWithCalls)} via calls · ${fmtNum(b.leadsWithSms)} via SMS`;
+  // For Outbound agents the meaningful "conversion" denominator is qualified
+  // leads (we deliberately filter to qualified before pursuing OB), so swap
+  // the formula on those two tabs. Inbound keeps appts/touched.
+  const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
+  const convNumer = totals.appts;
+  const convDenom = isOutbound ? totals.qualified : totals.touched;
+  const convDenomLabel = isOutbound ? "qualified" : "touched";
 
   // V3 funnel, now extended with a top-of-funnel "New Leads" tier from the
   // updated Metabase query: New → Touched → Qualified → Appointments. Same
@@ -1039,7 +1130,7 @@ function KpiStrip({ totals, liveRooftops, churnedRooftops, totalRooftops, loadin
     { label: "Qualified", value: fmtNum(totals.qualified), color: "#0d9488",
       sub: fmtRate(totals.qualified, totals.touched) + " of touched" },
     { label: "Appointments", value: fmtNum(totals.appts), color: "#22c55e",
-      sub: fmtRate(totals.appts, totals.touched) + " of touched" },
+      sub: fmtRate(convNumer, convDenom) + " of " + convDenomLabel },
   ];
 
   const accountsSub = `${liveRooftops} live · ${churnedRooftops} churned`;
@@ -1050,7 +1141,8 @@ function KpiStrip({ totals, liveRooftops, churnedRooftops, totalRooftops, loadin
       sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined },
     { label: "Capture Rate", value: fmtRate(totals.contactedFromNew, totals.newLeads), color: "#7c3aed",
       sub: "contacted / new leads" },
-    { label: "Conversion Rate", value: fmtRate(totals.appts, totals.touched), color: "#15803d", sub: "appts / touched" },
+    { label: "Conversion Rate", value: fmtRate(convNumer, convDenom), color: "#15803d",
+      sub: `appts / ${convDenomLabel}` },
     { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
       sub: "appts / qualified" },
     { label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569", sub: accountsSub },
@@ -1256,17 +1348,19 @@ type Col = {
   rollingPerRooftop?: boolean;
 };
 
-function columnsFor(_agent: AgentType): Col[] {
-  // V3 uniform column set across all four agent tabs (the SQL schema is now
-  // uniform, no Eligible/Targeted/Engaged/Intent/Coverage/Followups/Quality).
-  // New (post-Metabase-update) columns: New Leads, Capture %, ABR.
+function columnsFor(agent: AgentType): Col[] {
+  // V3 uniform column set across all four agent tabs. Conv. Rate's denominator
+  // switches between touched (IB) and qualified (OB) — see KpiStrip for the
+  // rationale.
+  const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
+  const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
   return [
     { label: "New Leads", render: b => fmtNum(b.newLeads), sortValue: b => b.newLeads, minWidth: 90, rollingPerRooftop: true },
     { label: "Capture %", render: b => fmtRate(b.contactedFromNew, b.newLeads), sortValue: b => safeRate(b.contactedFromNew, b.newLeads), minWidth: 90, rollingPerRooftop: true },
     { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
     { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
-    { label: "Conv. Rate", render: b => fmtRate(b.appts, b.touched), sortValue: b => safeRate(b.appts, b.touched), minWidth: 90 },
+    { label: "Conv. Rate", render: b => fmtRate(b.appts, convDenom(b)), sortValue: b => safeRate(b.appts, convDenom(b)), minWidth: 90 },
     { label: "ABR", render: b => fmtRate(b.appts, b.qualified), sortValue: b => safeRate(b.appts, b.qualified), minWidth: 80 },
     { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
     { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
