@@ -1229,15 +1229,10 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
   const convDenom = isOutbound ? totals.qualified : totals.touched;
   const convDenomLabel = isOutbound ? "qualified" : "touched";
 
-  // V3 funnel, now extended with a top-of-funnel "New Leads" tier from the
-  // updated Metabase query: New → Touched → Qualified → Appointments. Same
-  // shape across all four agent tabs so the numbers compare cleanly.
+  // V3 funnel: Touched → Qualified → Appointments. The upstream Metabase query
+  // also emits a top-of-funnel "New Leads" tier and a "Capture Rate" derived
+  // metric — both are currently hidden from the UI (data plumbing kept intact).
   const main: KpiSpec[] = [
-    { label: "New Leads", value: fmtNum(totals.newLeads), color: "#8b5cf6",
-      sub: totals.contactedFromNew > 0
-        ? `${fmtNum(totals.contactedFromNew)} contacted (${fmtRate(totals.contactedFromNew, totals.newLeads)})`
-        : undefined,
-      info: KPI_INFO["New Leads"] },
     { label: "Touched", value: fmtNum(totals.touched), color: "#0ea5e9", sub: channelMix(totals),
       info: KPI_INFO["Touched"] },
     { label: "Qualified", value: fmtNum(totals.qualified), color: "#0d9488",
@@ -1256,8 +1251,6 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
     { label: "Total SMS", value: fmtNum(totals.totalSms), color: "#0ea5e9",
       sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined,
       info: KPI_INFO["Total SMS"] },
-    { label: "Capture Rate", value: fmtRate(totals.contactedFromNew, totals.newLeads), color: "#7c3aed",
-      sub: "contacted / new leads", info: KPI_INFO["Capture Rate"] },
     { label: "Conversion Rate", value: fmtRate(convNumer, convDenom), color: "#15803d",
       sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
     { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
@@ -1475,8 +1468,6 @@ function columnsFor(agent: ActiveAgent): Col[] {
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
   const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
   return [
-    { label: "New Leads", render: b => fmtNum(b.newLeads), sortValue: b => b.newLeads, minWidth: 90, rollingPerRooftop: true },
-    { label: "Capture %", render: b => fmtRate(b.contactedFromNew, b.newLeads), sortValue: b => safeRate(b.contactedFromNew, b.newLeads), minWidth: 90, rollingPerRooftop: true },
     { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
     { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
