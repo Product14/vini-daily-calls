@@ -72,19 +72,45 @@ const AGENT_COLORS: Record<AgentType, string> = {
   "Service Outbound": "#0ea5e9",
 };
 
+// Tab selection extends AgentType with an "All" pseudo-value that aggregates
+// every agent type for the same rooftop. Per-agent KPIs sum across agents,
+// the rooftop table collapses per (team_id) instead of per (team_id × agent),
+// and the chart's funnel shows the combined Touched/Qualified/Appts series.
+type ActiveAgent = AgentType | "All";
+const ALL_AGENT_COLOR = "#0f172a";
+
+// Stage priority for the "All Agents" merge — when one rooftop has different
+// stages on different agent_types (e.g. Live on Sales-IB but Onboarding on
+// Service-OB), we surface the most active label. Higher number wins.
+const STAGE_PRIORITY: Record<string, number> = {
+  "Live": 6,
+  "Onboarding": 5,
+  "Contract-Initiated": 4,
+  "Contracted": 4,
+  "New": 3,
+  "In OB": 2,
+  "Churned": 1,
+};
+function preferStage(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return (STAGE_PRIORITY[b] ?? 0) > (STAGE_PRIORITY[a] ?? 0) ? b : a;
+}
+
 const num = (v: unknown): number => {
   if (v == null) return 0;
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 };
 
-type DateRange = "ALL" | "TODAY" | "WEEK" | "MTD" | "D30" | "CUSTOM";
+type DateRange = "ALL" | "TODAY" | "WEEK" | "MTD" | "D30" | "D90" | "CUSTOM";
 const DATE_RANGES: { key: DateRange; label: string }[] = [
   { key: "ALL", label: "All" },
   { key: "TODAY", label: "Today" },
   { key: "WEEK", label: "This Week" },
   { key: "MTD", label: "MTD" },
   { key: "D30", label: "Last 30D" },
+  { key: "D90", label: "Last 90D" },
   { key: "CUSTOM", label: "Custom" },
 ];
 
@@ -133,6 +159,11 @@ function inRange(iso: string, range: DateRange, custom: CustomRange): boolean {
   }
   if (range === "D30") {
     const start = new Date(today); start.setDate(start.getDate() - 29);
+    const end = new Date(today); end.setDate(end.getDate() + 1);
+    return day >= start && day < end;
+  }
+  if (range === "D90") {
+    const start = new Date(today); start.setDate(start.getDate() - 89);
     const end = new Date(today); end.setDate(end.getDate() + 1);
     return day >= start && day < end;
   }
@@ -264,7 +295,7 @@ function AgentsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
 
-  const [activeAgent, setActiveAgent] = useState<AgentType>("Sales Inbound");
+  const [activeAgent, setActiveAgent] = useState<ActiveAgent>("All");
   const [dateRange, setDateRange] = useState<DateRange>("D30");
   const [customRange, setCustomRange] = useState<CustomRange>(() => ({ from: "", to: todayIso() }));
   const [stageFilter, setStageFilter] = useState<Set<string>>(new Set());
@@ -614,7 +645,7 @@ function AgentsDashboard() {
   const availableRooftops = useMemo(() => {
     const m = new Map<string, { key: string; label: string; enterprise: string }>();
     for (const r of totalsRows) {
-      if (r.agent_type !== activeAgent) continue;
+      if (activeAgent !== "All" && r.agent_type !== activeAgent) continue;
       if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) continue;
       const key = rowKey(r);
       if (!m.has(key)) {
@@ -632,7 +663,7 @@ function AgentsDashboard() {
   // no-sheet mode (where Metabase reports "Onboarding") doesn't quietly admit
   // the row.
   const matchesAgentStageRooftopSearch = (r: AnyAgentRow): boolean => {
-    if (r.agent_type !== activeAgent) return false;
+    if (activeAgent !== "All" && r.agent_type !== activeAgent) return false;
     if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) return false;
     if (selectedRooftops.size > 0 && !selectedRooftops.has(rowKey(r))) return false;
     const q = search.trim().toLowerCase();
@@ -681,20 +712,31 @@ function AgentsDashboard() {
     total: Bucket;  // sourced from totals card, NOT from summing daily
   };
   const rooftopRows: RooftopAgg[] = useMemo(() => {
+    const isAll = activeAgent === "All";
     const m = new Map<string, RooftopAgg>();
-    // Seed from totals — the authoritative summary row per rooftop.
+    // Seed from totals — the authoritative summary row per rooftop. In "All
+    // Agents" mode multiple totals rows can share a rowKey (one per
+    // agent_type) — they get merged: totals sum, MRR sums, Stage picks the
+    // highest-priority label across agents.
     for (const r of filteredTotals) {
       const key = rowKey(r);
-      if (m.has(key)) continue; // shouldn't happen — totals is unique per team × agent_type
-      // "no-sheet" mode bypasses BOTH Google sheets: stage falls back to
-      // Metabase's rooftop_stage and MRR is unavailable (no data source). Used
-      // to audit reality when the master accounts sheet is suspected to be
-      // out of sync with the current Live roster.
       const useSheet = dataMode === "sheet";
       const info = useSheet ? accountInfoFor(r) : null;
+      const rowStage = useSheet ? effectiveStage(r) : (r.rooftop_stage ?? null);
+      const existing = m.get(key);
+      if (existing) {
+        // "All" mode collision — merge.
+        existing.total = add(existing.total, projectRow(r));
+        existing.stage = preferStage(existing.stage, rowStage);
+        if (info?.mrr != null) {
+          existing.mrr = (existing.mrr ?? 0) + info.mrr;
+        }
+        if (info != null) existing.inSheet = true;
+        continue;
+      }
       m.set(key, {
         key, rooftop: displayRooftopLabel(r), enterprise: enterpriseLabel(r),
-        stage: useSheet ? effectiveStage(r) : (r.rooftop_stage ?? null),
+        stage: rowStage,
         mrr: info?.mrr ?? null,
         inSheet: info != null,
         daily: [],
@@ -702,12 +744,25 @@ function AgentsDashboard() {
       });
     }
     // Attach per-day breakdown from daily, only for rooftops already in the
-    // totals universe (so a daily-only ghost row doesn't sneak in).
+    // totals universe (so a daily-only ghost row doesn't sneak in). In "All"
+    // mode, daily entries for the same (rooftop × day) but different
+    // agent_types are summed into one entry — otherwise the chart would
+    // double-count a rooftop's funnel per agent.
     for (const r of filteredDaily) {
       const key = rowKey(r);
       const entry = m.get(key);
       if (!entry) continue;
-      entry.daily.push({ day: (r as AgentRowDaily).day, ...projectRow(r) });
+      const day = (r as AgentRowDaily).day;
+      const bucket = projectRow(r);
+      if (isAll) {
+        const dup = entry.daily.find(d => d.day === day);
+        if (dup) {
+          const merged = add(dup, bucket);
+          Object.assign(dup, merged);
+          continue;
+        }
+      }
+      entry.daily.push({ day, ...bucket });
     }
     for (const e of m.values()) e.daily.sort((a, b) => a.day.localeCompare(b.day));
     // When a date filter is active, recompute each rooftop's `total` from its
@@ -737,12 +792,24 @@ function AgentsDashboard() {
     // Sheet-mode: seed accounts that exist in the master sheet for the active
     // agent type but have no Metabase activity at all. The user explicitly
     // wants these visible (with zero metrics) so the sheet view is exhaustive
-    // and a 0-usage account isn't silently invisible.
+    // and a 0-usage account isn't silently invisible. In "All Agents" mode
+    // every sheet entry counts (any agent_type), and MRR / Stage merge the
+    // same way as the Metabase-totals merge above.
     if (dataMode === "sheet") {
       for (const entry of sheetEntries) {
-        if (entry.agentType !== activeAgent) continue;
+        if (!isAll && entry.agentType !== activeAgent) continue;
         const key = entry.teamId || `${entry.enterpriseName}::${entry.rooftopName}`;
-        if (m.has(key)) continue;
+        const existing = m.get(key);
+        if (existing) {
+          if (isAll) {
+            existing.stage = preferStage(existing.stage, entry.stage || null);
+            if (entry.mrr != null) {
+              existing.mrr = (existing.mrr ?? 0) + entry.mrr;
+            }
+            existing.inSheet = true;
+          }
+          continue;
+        }
         // Same filter predicate as Metabase rows, but on the sheet's fields.
         if (stageFilter.size > 0 && !stageFilter.has(entry.stage || "")) continue;
         if (selectedRooftops.size > 0 && !selectedRooftops.has(key)) continue;
@@ -883,16 +950,17 @@ function AgentsDashboard() {
         .agent-shimmer { background:linear-gradient(90deg,#eef0f3 25%,#e2e5ea 50%,#eef0f3 75%); background-size:200% 100%; animation:agentShimmer 1.3s ease-in-out infinite; border-radius:6px; color:transparent !important; }
         .agent-refreshing { animation: agentSpin 1s linear infinite; }
         @keyframes agentSpin { to { transform: rotate(360deg); } }
+        .info-tip:hover .info-tip-bubble, .info-tip:focus .info-tip-bubble { opacity: 1; visibility: visible; }
       `}</style>
 
       <div style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#111827", margin: 0 }}>
-            Agents — Per-Agent Campaign Metrics
+            Conversational AI — Performance Dashboard
           </h1>
           <p style={{ fontSize: 13, color: "#6b7280", margin: "4px 0 0", maxWidth: 820 }}>
-            One tab per agent (Sales / Service × Inbound / Outbound). Date filter applies to
-            the chart and per-day breakdown; KPIs and the rooftop summary show all-time totals.
+            Switch agents (Sales / Service × Inbound / Outbound) or pick <b>All Agents</b> for the
+            roll-up. Date filter applies to every card, chart and the per-day breakdown.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 4 }}>
@@ -916,11 +984,16 @@ function AgentsDashboard() {
         </div>
       )}
 
-      {/* Agent tabs */}
+      {/* Agent tabs — "All Agents" rolls every agent_type together for the
+          active rooftop (KPIs sum, table merges per team_id, stage/MRR pick
+          across agents). */}
       <div style={{ display: "flex", gap: 4, marginBottom: 12, borderBottom: "1px solid #e5e7eb" }}>
-        {AGENT_TYPES.map(t => {
+        {(["All", ...AGENT_TYPES] as ActiveAgent[]).map(t => {
           const active = t === activeAgent;
-          const hasData = presentAgents.has(t) || totalsRows.length === 0;
+          const isAllTab = t === "All";
+          const hasData = isAllTab || presentAgents.has(t as AgentType) || totalsRows.length === 0;
+          const color = isAllTab ? ALL_AGENT_COLOR : AGENT_COLORS[t as AgentType];
+          const label = isAllTab ? "All Agents" : AGENT_LABELS[t as AgentType];
           return (
             <button
               key={t}
@@ -929,16 +1002,16 @@ function AgentsDashboard() {
               title={!hasData ? `No ${t} rows in current data` : undefined}
               style={{
                 padding: "10px 16px", border: "none", background: "transparent",
-                borderBottom: `2px solid ${active ? AGENT_COLORS[t] : "transparent"}`,
-                color: active ? AGENT_COLORS[t] : hasData ? "#374151" : "#d1d5db",
+                borderBottom: `2px solid ${active ? color : "transparent"}`,
+                color: active ? color : hasData ? "#374151" : "#d1d5db",
                 fontSize: 13, fontWeight: active ? 700 : 600,
                 cursor: hasData ? "pointer" : "not-allowed",
                 marginBottom: -1,
                 transition: "color 0.15s, border-color 0.15s",
               }}
             >
-              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: AGENT_COLORS[t], marginRight: 8, verticalAlign: "middle" }} />
-              {AGENT_LABELS[t]}
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: color, marginRight: 8, verticalAlign: "middle" }} />
+              {label}
             </button>
           );
         })}
@@ -991,14 +1064,22 @@ function AgentsDashboard() {
         <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search enterprise…"
           style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, minWidth: 180 }} />
         <MrrRangeFilter value={mrrRange} onChange={setMrrRange} />
-        <SegmentedControl
-          options={[
-            { key: "sheet" as const,    label: "In sheet" },
-            { key: "no-sheet" as const, label: "No sheet" },
-          ]}
-          value={dataMode}
-          onChange={setDataMode}
-        />
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Accounts</span>
+          <InfoTip text={
+            "Master sheet only: show just the rooftops listed on the All-Accounts Google Sheet for this agent — uses the sheet's Stage and MRR. " +
+            "All Metabase activity: ignore the sheet and show every rooftop that has activity in Metabase (Stage falls back to Metabase, MRR is unavailable). " +
+            "Switch to ‘All Metabase activity’ when you suspect the sheet is out of sync with reality."
+          } />
+          <SegmentedControl
+            options={[
+              { key: "sheet" as const,    label: "Master sheet only" },
+              { key: "no-sheet" as const, label: "All Metabase activity" },
+            ]}
+            value={dataMode}
+            onChange={setDataMode}
+          />
+        </div>
         <div style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>
           {rooftopRows.length} rooftop{rooftopRows.length === 1 ? "" : "s"} · {days.length} day{days.length === 1 ? "" : "s"}
         </div>
@@ -1028,8 +1109,15 @@ function AgentsDashboard() {
         return (
           <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e5e7eb", padding: 16, marginBottom: 20, position: "relative" }}>
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>
-                Day-on-day — {spec.title}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, fontWeight: 700, color: "#111827" }}>
+                <span>Day-on-day — {spec.title}</span>
+                <InfoTip text={
+                  "Each line is a daily count of distinct leads at that funnel stage. " +
+                  "Touched is typically 10× larger than Qualified, which is 10× larger than Appointments — " +
+                  "so Touched rides the left axis and the smaller two share the right. " +
+                  "Click a series chip below to hide/show it; remaining axes auto-rescale. " +
+                  "Honors every filter (date range, stage, rooftops, MRR, accounts toggle)."
+                } size={13} />
               </div>
               <div style={{ fontSize: 12, color: "#6b7280" }}>
                 Left axis: {spec.leftLabel}. Right axis: {spec.rightLabel}. Hover for day-level details.
@@ -1068,7 +1156,7 @@ function AgentsDashboard() {
       <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e5e7eb", overflow: "hidden" }}>
         <div style={{ padding: "12px 16px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>
-            Rooftop breakdown — {AGENT_LABELS[activeAgent]} · expand for daily detail
+            Rooftop breakdown — {activeAgent === "All" ? "All Agents (combined)" : AGENT_LABELS[activeAgent]} · expand for daily detail
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={expandAll}
@@ -1099,10 +1187,56 @@ function AgentsDashboard() {
 
 // ─── Per-agent KPI strip ─────────────────────────────────────────────────────
 
-type KpiSpec = { label: string; value: string | number; color: string; sub?: string };
+type KpiSpec = { label: string; value: string | number; color: string; sub?: string; info?: string };
+
+// Plain-English descriptions for the KPI tooltips. Keep these phrased so a
+// stakeholder skim-reading the card understands what the number means, how
+// it's computed, and what's worth acting on — these are the source of truth
+// for the ⓘ icons.
+const KPI_INFO: Record<string, string> = {
+  "New Leads":
+    "Top of the funnel. Distinct leads created in the selected window — one count per lead, " +
+    "regardless of how many times the agent contacted them afterwards. " +
+    "Source: new_leads_created from Metabase, per (rooftop × service_type). " +
+    "The sub-label shows how many of those leads the agent actually managed to reach.",
+  "Touched":
+    "Distinct leads the agent placed at least one outbound call or sent at least one SMS to " +
+    "during the window. A lead that got 20 calls still counts once. " +
+    "This is the agent's \"reach\" — and the denominator we use for Inbound Conversion Rate.",
+  "Qualified":
+    "Distinct leads the agent moved into the qualified stage (real buying intent confirmed — " +
+    "budget, timeline, model interest, or test-drive request). " +
+    "Denominator for ABR and for Outbound Conversion Rate.",
+  "Appointments":
+    "Distinct leads that booked an appointment during the window — the funnel's bottom-line " +
+    "outcome. Counted once per lead even if they rescheduled. " +
+    "Numerator for both Conversion Rate and ABR.",
+  "Total Calls":
+    "Sum of every individual call placed or received in the window. Unlike Touched, this " +
+    "includes repeat calls to the same lead — pair it with Touched to read average dials per lead.",
+  "Total SMS":
+    "Sum of every SMS exchanged in the window (both directions). Includes the full back-and-forth " +
+    "with the same lead — pair with Touched to read average messages per conversation.",
+  "Capture Rate":
+    "leads_contacted_from_new ÷ new_leads_created. The share of fresh top-of-funnel volume the " +
+    "agent reached at least once. Sub-100% means leads are slipping through with zero contact " +
+    "attempts — usually a staffing/coverage signal, not an agent-quality one.",
+  "Conversion Rate":
+    "Inbound: Appointments ÷ Touched. Outbound: Appointments ÷ Qualified (because OB only pursues " +
+    "qualified leads). All Agents view uses Touched as the denominator since the funnels mix. " +
+    "This is the single most important per-agent efficiency metric.",
+  "ABR":
+    "Appointment Booking Rate = Appointments ÷ Qualified. How well qualified leads convert into " +
+    "a booked appointment. Usually higher than Conversion Rate because every qualified lead is, " +
+    "by definition, already a strong prospect — a low ABR points to closing/scheduling friction.",
+  "Total Accounts":
+    "Distinct rooftops in scope after all filters, split into Live vs Churned per the master " +
+    "accounts sheet. In \"All Metabase activity\" mode the sheet is bypassed, so Churned isn't " +
+    "tracked and the count reflects rooftops with any activity in the window.",
+};
 
 function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops, loading }: {
-  agent: AgentType;
+  agent: ActiveAgent;
   totals: Bucket;
   liveRooftops: number;
   churnedRooftops: number;
@@ -1112,7 +1246,9 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
   const channelMix = (b: Bucket) => `${fmtNum(b.leadsWithCalls)} via calls · ${fmtNum(b.leadsWithSms)} via SMS`;
   // For Outbound agents the meaningful "conversion" denominator is qualified
   // leads (we deliberately filter to qualified before pursuing OB), so swap
-  // the formula on those two tabs. Inbound keeps appts/touched.
+  // the formula on those two tabs. Inbound keeps appts/touched. "All Agents"
+  // rolls IB and OB together, so we fall back to the broader Touched
+  // denominator (qualified-only would understate the mixed funnel).
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
   const convNumer = totals.appts;
   const convDenom = isOutbound ? totals.qualified : totals.touched;
@@ -1125,28 +1261,37 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
     { label: "New Leads", value: fmtNum(totals.newLeads), color: "#8b5cf6",
       sub: totals.contactedFromNew > 0
         ? `${fmtNum(totals.contactedFromNew)} contacted (${fmtRate(totals.contactedFromNew, totals.newLeads)})`
-        : undefined },
-    { label: "Touched", value: fmtNum(totals.touched), color: "#0ea5e9", sub: channelMix(totals) },
+        : undefined,
+      info: KPI_INFO["New Leads"] },
+    { label: "Touched", value: fmtNum(totals.touched), color: "#0ea5e9", sub: channelMix(totals),
+      info: KPI_INFO["Touched"] },
     { label: "Qualified", value: fmtNum(totals.qualified), color: "#0d9488",
-      sub: fmtRate(totals.qualified, totals.touched) + " of touched" },
+      sub: fmtRate(totals.qualified, totals.touched) + " of touched",
+      info: KPI_INFO["Qualified"] },
     { label: "Appointments", value: fmtNum(totals.appts), color: "#22c55e",
-      sub: fmtRate(convNumer, convDenom) + " of " + convDenomLabel },
+      sub: fmtRate(convNumer, convDenom) + " of " + convDenomLabel,
+      info: KPI_INFO["Appointments"] },
   ];
 
   const accountsSub = `${liveRooftops} live · ${churnedRooftops} churned`;
   const secondary: KpiSpec[] = [
     { label: "Total Calls", value: fmtNum(totals.totalCalls), color: "#6366f1",
-      sub: totals.leadsWithCalls > 0 ? `${fmtNum(totals.leadsWithCalls)} unique leads` : undefined },
+      sub: totals.leadsWithCalls > 0 ? `${fmtNum(totals.leadsWithCalls)} unique leads` : undefined,
+      info: KPI_INFO["Total Calls"] },
     { label: "Total SMS", value: fmtNum(totals.totalSms), color: "#0ea5e9",
-      sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined },
+      sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined,
+      info: KPI_INFO["Total SMS"] },
     { label: "Capture Rate", value: fmtRate(totals.contactedFromNew, totals.newLeads), color: "#7c3aed",
-      sub: "contacted / new leads" },
+      sub: "contacted / new leads", info: KPI_INFO["Capture Rate"] },
     { label: "Conversion Rate", value: fmtRate(convNumer, convDenom), color: "#15803d",
-      sub: `appts / ${convDenomLabel}` },
+      sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
     { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
-      sub: "appts / qualified" },
-    { label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569", sub: accountsSub },
-    { label: "Appointment Value", value: fmtCurrency(totals.apptValue), color: "#ea580c" },
+      sub: "appts / qualified", info: KPI_INFO["ABR"] },
+    { label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569", sub: accountsSub,
+      info: KPI_INFO["Total Accounts"] },
+    // Appointment Value intentionally omitted — Metabase currently emits a flat
+    // $100-per-appointment placeholder (appointment_value === appointments * 100
+    // for every row), so the figure carries no information beyond the appt count.
   ];
 
   return (
@@ -1154,13 +1299,13 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
       {/* MAIN — large headline cards (V3 funnel: Touched · Qualified · Appts) */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
         {main.map(c => (
-          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="main" />
+          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="main" info={c.info} />
         ))}
       </div>
       {/* SECONDARY — volume + conv rate + accounts */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         {secondary.map(c => (
-          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="secondary" />
+          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="secondary" info={c.info} />
         ))}
       </div>
     </div>
@@ -1180,7 +1325,7 @@ type ChartSpec = {
   leftLabel: string;
   rightLabel: string;
 };
-function chartSpecFor(_agent: AgentType, daily: Bucket[]): ChartSpec {
+function chartSpecFor(_agent: ActiveAgent, daily: Bucket[]): ChartSpec {
   // V3 funnel — three lines: Touched · Qualified · Appointments. Touched is
   // typically ~10x larger than Qualified, which is ~10x larger than Appts —
   // Touched rides the left axis, the two smaller series share the right.
@@ -1206,7 +1351,7 @@ type RooftopRowData = {
 };
 
 function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }: {
-  agent: AgentType;
+  agent: ActiveAgent;
   rows: RooftopRowData[];
   expanded: Set<string>;
   onToggle: (k: string) => void;
@@ -1348,10 +1493,10 @@ type Col = {
   rollingPerRooftop?: boolean;
 };
 
-function columnsFor(agent: AgentType): Col[] {
+function columnsFor(agent: ActiveAgent): Col[] {
   // V3 uniform column set across all four agent tabs. Conv. Rate's denominator
   // switches between touched (IB) and qualified (OB) — see KpiStrip for the
-  // rationale.
+  // rationale. "All Agents" mixes the two and falls back to Touched.
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
   const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
   return [
@@ -1365,7 +1510,7 @@ function columnsFor(agent: AgentType): Col[] {
     { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
     { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
     { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },
-    { label: "Appt $", render: b => fmtCurrency(b.apptValue), sortValue: b => b.apptValue, minWidth: 90 },
+    // Appt $ column dropped — see KpiStrip note. Re-add once Metabase emits real values.
   ];
 }
 
@@ -1664,9 +1809,43 @@ const thStyle: CSSProperties = {
 const tdStyle: CSSProperties = { padding: "8px 12px", fontSize: 13, color: "#374151", whiteSpace: "nowrap" };
 const dayCellStyle: CSSProperties = { padding: "3px 12px", fontSize: 12, color: "#4b5563", whiteSpace: "nowrap", lineHeight: 1.3 };
 
-function KpiCard({ label, value, color, loading, sub, size = "main" }: {
+// Tiny ⓘ glyph with a hover/focus tooltip. CSS-only — uses a sibling div that
+// becomes visible via the `.info-tip:hover` selector defined in the global
+// style block on the dashboard root.
+function InfoTip({ text, size = 12 }: { text: string; size?: number }) {
+  return (
+    <span
+      className="info-tip"
+      tabIndex={0}
+      aria-label={text}
+      style={{
+        position: "relative",
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: size + 2, height: size + 2, borderRadius: "50%",
+        border: "1px solid #cbd5e1", color: "#64748b",
+        fontSize: Math.max(9, size - 3), fontWeight: 700, lineHeight: 1,
+        background: "#f8fafc", cursor: "help", userSelect: "none",
+      }}
+    >
+      i
+      <span className="info-tip-bubble" style={{
+        position: "absolute", bottom: "calc(100% + 6px)", left: "50%",
+        transform: "translateX(-50%)", background: "#111827", color: "#fff",
+        padding: "10px 12px", borderRadius: 8, fontSize: 11.5, fontWeight: 500,
+        lineHeight: 1.5, width: 300, textAlign: "left", letterSpacing: 0,
+        textTransform: "none", boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
+        pointerEvents: "none", opacity: 0, visibility: "hidden",
+        transition: "opacity 0.12s", zIndex: 50, whiteSpace: "normal",
+      }}>
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function KpiCard({ label, value, color, loading, sub, size = "main", info }: {
   label: string; value: string | number; color: string; loading: boolean; sub?: string;
-  size?: "main" | "secondary";
+  size?: "main" | "secondary"; info?: string;
 }) {
   const isMain = size === "main";
   return (
@@ -1679,6 +1858,7 @@ function KpiCard({ label, value, color, loading, sub, size = "main" }: {
       minWidth: isMain ? 200 : 140,
     }}>
       <div style={{
+        display: "flex", alignItems: "center", gap: 4,
         fontSize: isMain ? 12 : 11,
         color: isMain ? "#374151" : "#6b7280",
         fontWeight: 600,
@@ -1686,7 +1866,8 @@ function KpiCard({ label, value, color, loading, sub, size = "main" }: {
         textTransform: isMain ? "none" : "uppercase",
         letterSpacing: isMain ? 0 : 0.4,
       }}>
-        {label}
+        <span>{label}</span>
+        {info && <InfoTip text={info} size={isMain ? 13 : 11} />}
       </div>
       {loading ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
@@ -1761,7 +1942,15 @@ function LineChart({ days, series, leftLabel, rightLabel }: {
     padT + plotH - (v / (axis === "L" ? leftMax : rightMax)) * plotH;
 
   const yTicks = 5;
+  // Cap labels at ~10 across the axis so longer ranges (90D, ALL) don't smear
+  // overlapping dates onto each other. With 90 days the step lands at 9; with
+  // 240+ days it lands at 24 — both readable without rotation.
   const labelStep = Math.max(1, Math.ceil(days.length / 10));
+  // Hide the per-point circles once the axis gets dense — at >45 days the
+  // spacing drops below ~16px and the dots merge into a thick line. The hover
+  // crosshair still draws a single highlighted dot at the active day so the
+  // user never loses the read-out.
+  const showStaticDots = days.length <= 45;
 
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -1841,9 +2030,13 @@ function LineChart({ days, series, leftLabel, rightLabel }: {
           return (
             <g key={s.name}>
               <path d={d} fill="none" stroke={s.color} strokeWidth={2.25} />
-              {s.values.map((v, i) => (
-                <circle key={i} cx={xFor(i)} cy={yForAxis(v, s.axis)} r={hoverIdx === i ? 4.5 : 3} fill={s.color} stroke="#fff" strokeWidth={hoverIdx === i ? 1.5 : 0} />
-              ))}
+              {showStaticDots
+                ? s.values.map((v, i) => (
+                    <circle key={i} cx={xFor(i)} cy={yForAxis(v, s.axis)} r={hoverIdx === i ? 4.5 : 3} fill={s.color} stroke="#fff" strokeWidth={hoverIdx === i ? 1.5 : 0} />
+                  ))
+                : hoverIdx !== null
+                  ? <circle cx={xFor(hoverIdx)} cy={yForAxis(s.values[hoverIdx] ?? 0, s.axis)} r={4.5} fill={s.color} stroke="#fff" strokeWidth={1.5} />
+                  : null}
             </g>
           );
         })}
