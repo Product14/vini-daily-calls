@@ -950,7 +950,6 @@ function AgentsDashboard() {
         .agent-shimmer { background:linear-gradient(90deg,#eef0f3 25%,#e2e5ea 50%,#eef0f3 75%); background-size:200% 100%; animation:agentShimmer 1.3s ease-in-out infinite; border-radius:6px; color:transparent !important; }
         .agent-refreshing { animation: agentSpin 1s linear infinite; }
         @keyframes agentSpin { to { transform: rotate(360deg); } }
-        .info-tip:hover .info-tip-bubble, .info-tip:focus .info-tip-bubble { opacity: 1; visibility: visible; }
       `}</style>
 
       <div style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
@@ -1067,9 +1066,8 @@ function AgentsDashboard() {
         <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Accounts</span>
           <InfoTip text={
-            "Master sheet only: show just the rooftops listed on the All-Accounts Google Sheet for this agent — uses the sheet's Stage and MRR. " +
-            "All Metabase activity: ignore the sheet and show every rooftop that has activity in Metabase (Stage falls back to Metabase, MRR is unavailable). " +
-            "Switch to ‘All Metabase activity’ when you suspect the sheet is out of sync with reality."
+            "Master sheet only — show just the dealerships listed on our accounts sheet. " +
+            "All Metabase activity — show every dealership with any agent activity, even if not on the sheet."
           } />
           <SegmentedControl
             options={[
@@ -1112,11 +1110,8 @@ function AgentsDashboard() {
               <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, fontWeight: 700, color: "#111827" }}>
                 <span>Day-on-day — {spec.title}</span>
                 <InfoTip text={
-                  "Each line is a daily count of distinct leads at that funnel stage. " +
-                  "Touched is typically 10× larger than Qualified, which is 10× larger than Appointments — " +
-                  "so Touched rides the left axis and the smaller two share the right. " +
-                  "Click a series chip below to hide/show it; remaining axes auto-rescale. " +
-                  "Honors every filter (date range, stage, rooftops, MRR, accounts toggle)."
+                  "Daily trend for each funnel stage. Two y-axes are used so the small Appointments line " +
+                  "doesn't get crushed by the bigger Touched line. Click any label below to hide a line."
                 } size={13} />
               </div>
               <div style={{ fontSize: 12, color: "#6b7280" }}>
@@ -1189,50 +1184,30 @@ function AgentsDashboard() {
 
 type KpiSpec = { label: string; value: string | number; color: string; sub?: string; info?: string };
 
-// Plain-English descriptions for the KPI tooltips. Keep these phrased so a
-// stakeholder skim-reading the card understands what the number means, how
-// it's computed, and what's worth acting on — these are the source of truth
-// for the ⓘ icons.
+// Short, stakeholder-friendly tooltip copy. One or two sentences max; no
+// internal field names or jargon — these need to read clearly to a dealer
+// principal or CS lead skim-reading the dashboard for the first time.
 const KPI_INFO: Record<string, string> = {
   "New Leads":
-    "Top of the funnel. Distinct leads created in the selected window — one count per lead, " +
-    "regardless of how many times the agent contacted them afterwards. " +
-    "Source: new_leads_created from Metabase, per (rooftop × service_type). " +
-    "The sub-label shows how many of those leads the agent actually managed to reach.",
+    "Fresh prospects that came in during this period.",
   "Touched":
-    "Distinct leads the agent placed at least one outbound call or sent at least one SMS to " +
-    "during the window. A lead that got 20 calls still counts once. " +
-    "This is the agent's \"reach\" — and the denominator we use for Inbound Conversion Rate.",
+    "Leads the agent actually reached out to — at least one call or SMS. A lead with 20 calls counts once.",
   "Qualified":
-    "Distinct leads the agent moved into the qualified stage (real buying intent confirmed — " +
-    "budget, timeline, model interest, or test-drive request). " +
-    "Denominator for ABR and for Outbound Conversion Rate.",
+    "Leads the agent confirmed have real buying intent, ready for follow-up.",
   "Appointments":
-    "Distinct leads that booked an appointment during the window — the funnel's bottom-line " +
-    "outcome. Counted once per lead even if they rescheduled. " +
-    "Numerator for both Conversion Rate and ABR.",
+    "Leads who booked a visit. This is the headline outcome we optimise for.",
   "Total Calls":
-    "Sum of every individual call placed or received in the window. Unlike Touched, this " +
-    "includes repeat calls to the same lead — pair it with Touched to read average dials per lead.",
+    "Every call placed or received in this period. One lead can have many.",
   "Total SMS":
-    "Sum of every SMS exchanged in the window (both directions). Includes the full back-and-forth " +
-    "with the same lead — pair with Touched to read average messages per conversation.",
+    "Every message exchanged in this period. One lead can have many.",
   "Capture Rate":
-    "leads_contacted_from_new ÷ new_leads_created. The share of fresh top-of-funnel volume the " +
-    "agent reached at least once. Sub-100% means leads are slipping through with zero contact " +
-    "attempts — usually a staffing/coverage signal, not an agent-quality one.",
+    "Of the new leads that came in, how many we actually reached. Higher is better.",
   "Conversion Rate":
-    "Inbound: Appointments ÷ Touched. Outbound: Appointments ÷ Qualified (because OB only pursues " +
-    "qualified leads). All Agents view uses Touched as the denominator since the funnels mix. " +
-    "This is the single most important per-agent efficiency metric.",
+    "Of the leads we worked, how many ended up booking. The single most important efficiency number.",
   "ABR":
-    "Appointment Booking Rate = Appointments ÷ Qualified. How well qualified leads convert into " +
-    "a booked appointment. Usually higher than Conversion Rate because every qualified lead is, " +
-    "by definition, already a strong prospect — a low ABR points to closing/scheduling friction.",
+    "Of the qualified leads, how many actually booked. Measures closing strength.",
   "Total Accounts":
-    "Distinct rooftops in scope after all filters, split into Live vs Churned per the master " +
-    "accounts sheet. In \"All Metabase activity\" mode the sheet is bypassed, so Churned isn't " +
-    "tracked and the count reflects rooftops with any activity in the window.",
+    "Number of dealerships in this view, split into Live vs Churned.",
 };
 
 function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops, loading }: {
@@ -1809,36 +1784,58 @@ const thStyle: CSSProperties = {
 const tdStyle: CSSProperties = { padding: "8px 12px", fontSize: 13, color: "#374151", whiteSpace: "nowrap" };
 const dayCellStyle: CSSProperties = { padding: "3px 12px", fontSize: 12, color: "#4b5563", whiteSpace: "nowrap", lineHeight: 1.3 };
 
-// Tiny ⓘ glyph with a hover/focus tooltip. CSS-only — uses a sibling div that
-// becomes visible via the `.info-tip:hover` selector defined in the global
-// style block on the dashboard root.
+// Small ⓘ glyph with a tooltip on hover/focus. Uses React state for visibility
+// (more reliable than CSS :hover inside a heavily-styled React tree where
+// inline styles can outweigh a global rule). The bubble flips to a sibling
+// of the icon and is anchored above; when there isn't enough vertical room
+// above (top of the page) the consumer can still rely on the native `title`
+// attribute as a fallback.
 function InfoTip({ text, size = 12 }: { text: string; size?: number }) {
+  const [open, setOpen] = useState(false);
+  const show = () => setOpen(true);
+  const hide = () => setOpen(false);
   return (
     <span
-      className="info-tip"
       tabIndex={0}
+      role="img"
       aria-label={text}
+      title={text}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
       style={{
         position: "relative",
         display: "inline-flex", alignItems: "center", justifyContent: "center",
-        width: size + 2, height: size + 2, borderRadius: "50%",
-        border: "1px solid #cbd5e1", color: "#64748b",
-        fontSize: Math.max(9, size - 3), fontWeight: 700, lineHeight: 1,
-        background: "#f8fafc", cursor: "help", userSelect: "none",
+        width: size + 4, height: size + 4, borderRadius: "50%",
+        border: "1px solid #94a3b8", color: "#475569",
+        fontSize: Math.max(10, size - 2), fontWeight: 700, lineHeight: 1,
+        background: "#fff", cursor: "help", userSelect: "none",
+        textTransform: "none", letterSpacing: 0,
       }}
     >
       i
-      <span className="info-tip-bubble" style={{
-        position: "absolute", bottom: "calc(100% + 6px)", left: "50%",
-        transform: "translateX(-50%)", background: "#111827", color: "#fff",
-        padding: "10px 12px", borderRadius: 8, fontSize: 11.5, fontWeight: 500,
-        lineHeight: 1.5, width: 300, textAlign: "left", letterSpacing: 0,
-        textTransform: "none", boxShadow: "0 6px 18px rgba(0,0,0,0.18)",
-        pointerEvents: "none", opacity: 0, visibility: "hidden",
-        transition: "opacity 0.12s", zIndex: 50, whiteSpace: "normal",
-      }}>
-        {text}
-      </span>
+      {open && (
+        <span style={{
+          position: "absolute", bottom: "calc(100% + 8px)", left: "50%",
+          transform: "translateX(-50%)", background: "#111827", color: "#fff",
+          padding: "10px 12px", borderRadius: 8, fontSize: 11.5, fontWeight: 500,
+          lineHeight: 1.5, width: 300, textAlign: "left", letterSpacing: 0,
+          textTransform: "none", boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+          pointerEvents: "none", zIndex: 100, whiteSpace: "normal",
+        }}>
+          {text}
+          {/* Caret pointing down to the icon */}
+          <span style={{
+            position: "absolute", top: "100%", left: "50%",
+            transform: "translateX(-50%)",
+            width: 0, height: 0,
+            borderLeft: "6px solid transparent",
+            borderRight: "6px solid transparent",
+            borderTop: "6px solid #111827",
+          }} />
+        </span>
+      )}
     </span>
   );
 }
