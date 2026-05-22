@@ -1278,30 +1278,30 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
       info: KPI_INFO["Appointments"] },
   ];
 
+  // Secondary KPIs grouped Rates → Activity → ECR (inbound only). "Total
+  // Accounts" is a context tile (not a performance metric) so it lives in
+  // its own slot, visually separated.
   const accountsSub = `${liveRooftops} live · ${churnedRooftops} churned`;
-  const secondary: KpiSpec[] = [
+  const rates: KpiSpec[] = [
+    { label: "Conversion Rate", value: fmtRate(convNumer, convDenom), color: "#15803d",
+      sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
+    { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
+      sub: "appts / qualified", info: KPI_INFO["ABR"] },
+  ];
+  const activity: KpiSpec[] = [
     { label: "Total Calls", value: fmtNum(totals.totalCalls), color: "#6366f1",
       sub: totals.leadsWithCalls > 0 ? `${fmtNum(totals.leadsWithCalls)} unique leads` : undefined,
       info: KPI_INFO["Total Calls"] },
     { label: "Total SMS", value: fmtNum(totals.totalSms), color: "#0ea5e9",
       sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined,
       info: KPI_INFO["Total SMS"] },
-    { label: "Conversion Rate", value: fmtRate(convNumer, convDenom), color: "#15803d",
-      sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
-    { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
-      sub: "appts / qualified", info: KPI_INFO["ABR"] },
-    { label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569", sub: accountsSub,
-      info: KPI_INFO["Total Accounts"] },
-    // Appointment Value intentionally omitted — Metabase currently emits a flat
-    // $100-per-appointment placeholder (appointment_value === appointments * 100
-    // for every row), so the figure carries no information beyond the appt count.
   ];
-
   // ECR sub-funnel — only the inbound tabs carry these. Service-IB shows all
   // three (Appt Intent / Transfers / Callbacks); Sales-IB shows Transfers only.
   // OB tabs + "All" don't surface them (the underlying fields are null there).
+  const ecr: KpiSpec[] = [];
   if (agent === "Service Inbound") {
-    secondary.push(
+    ecr.push(
       { label: "Appt Intent", value: fmtNum(totals.apptIntent), color: "#f59e0b",
         sub: totals.touched > 0 ? `${fmtRate(totals.apptIntent, totals.touched)} of touched` : undefined,
         info: KPI_INFO["Appt Intent"] },
@@ -1313,26 +1313,60 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
         info: KPI_INFO["Callbacks"] },
     );
   } else if (agent === "Sales Inbound") {
-    secondary.push(
+    ecr.push(
       { label: "Transfers", value: fmtNum(totals.transfers), color: "#ec4899",
         sub: totals.touched > 0 ? `${fmtRate(totals.transfers, totals.touched)} of touched` : undefined,
         info: KPI_INFO["Transfers"] },
     );
   }
+  const accounts: KpiSpec = {
+    label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569",
+    sub: accountsSub, info: KPI_INFO["Total Accounts"],
+  };
+  // Appointment Value intentionally omitted — Metabase currently emits a flat
+  // $100-per-appointment placeholder (appointment_value === appointments * 100
+  // for every row), so the figure carries no information beyond the appt count.
+
+  // Faint arrow between funnel cards — visually communicates the
+  // Touched → Qualified → Appts flow. Hidden when cards wrap to a second row.
+  const FunnelArrow = () => (
+    <div aria-hidden style={{
+      display: "flex", alignItems: "center", color: "#cbd5e1",
+      fontSize: 22, fontWeight: 400, userSelect: "none",
+    }}>→</div>
+  );
+
+  // Subtle vertical divider between secondary KPI groups.
+  const GroupDivider = () => (
+    <div aria-hidden style={{ width: 1, alignSelf: "stretch", background: "#e5e7eb", margin: "4px 4px" }} />
+  );
 
   return (
     <div style={{ marginBottom: 18 }}>
-      {/* MAIN — large headline cards (V3 funnel: Touched · Qualified · Appts) */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-        {main.map(c => (
-          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="main" info={c.info} />
+      {/* MAIN — large headline cards (V3 funnel: Touched → Qualified → Appts) */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "stretch", marginBottom: 12 }}>
+        {main.map((c, i) => (
+          <Fragment key={c.label}>
+            {i > 0 && <FunnelArrow />}
+            <KpiCard label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="main" info={c.info} />
+          </Fragment>
         ))}
       </div>
-      {/* SECONDARY — volume + conv rate + accounts */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {secondary.map(c => (
+      {/* SECONDARY — Rates · Activity · ECR (IB only) · Accounts */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "stretch" }}>
+        {rates.map(c => (
           <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="secondary" info={c.info} />
         ))}
+        <GroupDivider />
+        {activity.map(c => (
+          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="secondary" info={c.info} />
+        ))}
+        {ecr.length > 0 && <GroupDivider />}
+        {ecr.map(c => (
+          <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="secondary" info={c.info} />
+        ))}
+        <GroupDivider />
+        <KpiCard key={accounts.label} label={accounts.label} value={accounts.value} color={accounts.color} loading={loading} sub={accounts.sub} size="secondary" info={accounts.info} />
       </div>
     </div>
   );
@@ -1400,6 +1434,11 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
     color: sort.label === label ? "#4f46e5" : thStyle.color,
   });
 
+  // Subtle vertical separator that marks the start of a new column group.
+  // Applied via border-left on the first header + cell of each group so the
+  // Funnel / Rates / Activity / ECR clusters read at a glance.
+  const groupSep = "1px solid #e5e7eb";
+
   return (
     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
       <thead style={{ position: "sticky", top: 0, background: "#f9fafb", zIndex: 1 }}>
@@ -1411,7 +1450,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
             Rooftop / Day{sortIndicator("Rooftop / Day")}
           </th>
           <th
-            style={{ ...thStyle, ...sortableHeaderStyle("MRR"), textAlign: "right", minWidth: 90 }}
+            style={{ ...thStyle, ...sortableHeaderStyle("MRR"), textAlign: "right", minWidth: 90, borderLeft: groupSep }}
             onClick={() => onSort("MRR")}
             title="Agent MRR from the All-Accounts sheet">
             MRR{sortIndicator("MRR")}
@@ -1419,7 +1458,11 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
           {cols.map(c => (
             <th
               key={c.label}
-              style={{ ...thStyle, ...sortableHeaderStyle(c.label), textAlign: "right", minWidth: c.minWidth ?? 100 }}
+              style={{
+                ...thStyle, ...sortableHeaderStyle(c.label),
+                textAlign: "right", minWidth: c.minWidth ?? 100,
+                ...(c.groupStart ? { borderLeft: groupSep } : null),
+              }}
               onClick={() => onSort(c.label)}>
               {c.label}{sortIndicator(c.label)}
             </th>
@@ -1443,13 +1486,16 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
             </td>
           </tr>
         )}
-        {!loading && rows.map(row => {
+        {!loading && rows.map((row, rowIdx) => {
           const isOpen = expanded.has(row.key);
+          // Zebra striping on the parent rows only (expanded daily rows keep
+          // their own bg so they always read as a child group).
+          const zebra = rowIdx % 2 === 1 ? "#fafbfc" : "#fff";
           return (
             <Fragment key={row.key}>
               <tr
                 onClick={() => onToggle(row.key)}
-                style={{ borderTop: "1px solid #f3f4f6", background: isOpen ? "#eef2ff" : "#fff", cursor: "pointer" }}>
+                style={{ borderTop: "1px solid #f3f4f6", background: isOpen ? "#eef2ff" : zebra, cursor: "pointer" }}>
                 <td style={{ ...tdStyle, textAlign: "center", color: "#6b7280", fontWeight: 700, userSelect: "none" }}>
                   <span style={{ display: "inline-block", width: 16, transform: isOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}>▶</span>
                 </td>
@@ -1465,11 +1511,23 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                     <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{row.enterprise}</div>
                   )}
                 </td>
-                <td style={{ ...tdStyle, textAlign: "right", color: row.mrr != null ? "#0369a1" : "#9ca3af", fontWeight: row.mrr != null ? 600 : 400 }}>
+                <td style={{
+                  ...tdStyle, textAlign: "right",
+                  color: row.mrr != null ? "#0369a1" : "#9ca3af",
+                  fontWeight: row.mrr != null ? 600 : 400,
+                  borderLeft: groupSep,
+                }}>
                   {row.mrr != null ? fmtCurrency(row.mrr) : "—"}
                 </td>
                 {cols.map(c => (
-                  <td key={c.label} style={{ ...tdStyle, textAlign: "right", color: c.emphasize ? "#0369a1" : "#374151", fontWeight: c.emphasize ? 600 : 400 }}>
+                  <td
+                    key={c.label}
+                    style={{
+                      ...tdStyle, textAlign: "right",
+                      color: c.emphasize ? "#0369a1" : "#374151",
+                      fontWeight: c.emphasize ? 600 : 400,
+                      ...(c.groupStart ? { borderLeft: groupSep } : null),
+                    }}>
                     {c.render(row.total)}
                   </td>
                 ))}
@@ -1478,11 +1536,14 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                 <tr key={`${row.key}::${d.day}`} style={{ borderTop: "1px solid #f3f4f6", background: "#fafbff" }}>
                   <td style={dayCellStyle} />
                   <td style={{ ...dayCellStyle, paddingLeft: 36, color: "#6b7280" }}>{fmtDay(d.day)}</td>
-                  <td style={dayCellStyle} />
+                  <td style={{ ...dayCellStyle, borderLeft: groupSep }} />
                   {cols.map(c => (
                     <td
                       key={c.label}
-                      style={{ ...dayCellStyle, textAlign: "right", color: "#4b5563" }}
+                      style={{
+                        ...dayCellStyle, textAlign: "right", color: "#4b5563",
+                        ...(c.groupStart ? { borderLeft: groupSep } : null),
+                      }}
                       title={c.rollingPerRooftop ? "Rolling rooftop total — see the collapsed row" : undefined}
                     >
                       {c.rollingPerRooftop ? "—" : c.render(d)}
@@ -1512,6 +1573,9 @@ type Col = {
   sortValue: (b: Bucket) => number;
   minWidth?: number;
   emphasize?: boolean;
+  // First column of a logical group — gets a subtle left border so the
+  // sections (Funnel / Rates / Activity / ECR) read at a glance.
+  groupStart?: boolean;
   // True for fields whose value is a rolling rooftop×service_type total —
   // constant across all daily rows for the same rooftop. We render "—" in
   // the per-day expanded rows so the user doesn't misread the rolling
@@ -1523,30 +1587,34 @@ function columnsFor(agent: ActiveAgent): Col[] {
   // V3 uniform column set across all four agent tabs. Conv. Rate's denominator
   // switches between touched (IB) and qualified (OB) — see KpiStrip for the
   // rationale. "All Agents" mixes the two and falls back to Touched.
+  // Column groups (left→right): Funnel · Rates · Activity · (ECR if inbound).
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
   const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
   const cols: Col[] = [
-    { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
-    { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
-    { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
-    { label: "Conv. Rate", render: b => fmtRate(b.appts, convDenom(b)), sortValue: b => safeRate(b.appts, convDenom(b)), minWidth: 90 },
-    { label: "ABR", render: b => fmtRate(b.appts, b.qualified), sortValue: b => safeRate(b.appts, b.qualified), minWidth: 80 },
-    { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
-    { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
-    { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },
+    // ── Funnel
+    { label: "Touched",    render: b => fmtNum(b.touched),   sortValue: b => b.touched,   emphasize: true, groupStart: true, minWidth: 90 },
+    { label: "Qualified",  render: b => fmtNum(b.qualified), sortValue: b => b.qualified, minWidth: 90 },
+    { label: "Appts",      render: b => fmtNum(b.appts),     sortValue: b => b.appts,     emphasize: true, minWidth: 80 },
+    // ── Rates
+    { label: "Conv. Rate", render: b => fmtRate(b.appts, convDenom(b)), sortValue: b => safeRate(b.appts, convDenom(b)), groupStart: true, minWidth: 90 },
+    { label: "ABR",        render: b => fmtRate(b.appts, b.qualified),  sortValue: b => safeRate(b.appts, b.qualified),  minWidth: 80 },
+    // ── Activity
+    { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls, groupStart: true, minWidth: 95 },
+    { label: "Total SMS",   render: b => fmtNum(b.totalSms),   sortValue: b => b.totalSms,   minWidth: 90 },
+    { label: "Leads (Calls/SMS)", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 120 },
     // Appt $ column dropped — see KpiStrip note. Re-add once Metabase emits real values.
   ];
   // Agent-scoped ECR sub-funnel — Sales-IB has Transfers only; Service-IB has
   // all three. Other tabs (OB + "All") don't carry these in the Metabase query.
   if (agent === "Service Inbound") {
     cols.push(
-      { label: "Appt Intent", render: b => fmtNum(b.apptIntent), sortValue: b => b.apptIntent, minWidth: 90 },
-      { label: "Transfers",   render: b => fmtNum(b.transfers),  sortValue: b => b.transfers,  minWidth: 80 },
-      { label: "Callbacks",   render: b => fmtNum(b.callbacks),  sortValue: b => b.callbacks,  minWidth: 80 },
+      { label: "Appt Intent", render: b => fmtNum(b.apptIntent), sortValue: b => b.apptIntent, groupStart: true, minWidth: 95 },
+      { label: "Transfers",   render: b => fmtNum(b.transfers),  sortValue: b => b.transfers,  minWidth: 85 },
+      { label: "Callbacks",   render: b => fmtNum(b.callbacks),  sortValue: b => b.callbacks,  minWidth: 85 },
     );
   } else if (agent === "Sales Inbound") {
     cols.push(
-      { label: "Transfers", render: b => fmtNum(b.transfers), sortValue: b => b.transfers, minWidth: 80 },
+      { label: "Transfers", render: b => fmtNum(b.transfers), sortValue: b => b.transfers, groupStart: true, minWidth: 85 },
     );
   }
   return cols;
