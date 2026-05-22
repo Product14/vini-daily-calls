@@ -37,6 +37,18 @@ type AgentRowBase = {
   leads_contacted_from_new: number | null;
   capture_rate: number | null;
   abr: number | null;
+
+  // ECR-driven distinct-lead counts. Carried only on inbound agent_types:
+  //   • Sales IB     — transfer_leads only
+  //   • Service IB   — appointment_intent_leads, transfer_leads, callback_leads
+  //   • Sales/Service OB — null
+  // Each is a count of distinct leads with at least one ECR call matching a
+  // qualification_block / resolution_block predicate (defined upstream in the
+  // Metabase card). Sum-friendly across rooftops, lead-deduped per agent in
+  // the totals card.
+  appointment_intent_leads: number | null;
+  transfer_leads: number | null;
+  callback_leads: number | null;
 };
 // Index signature for the `pld.` prefixed fields (TS can't express dotted keys
 // in a closed type; we just hand-roll the access).
@@ -225,11 +237,19 @@ type Bucket = {
   // max instead of sum for these two.
   newLeads: number;
   contactedFromNew: number;
+  // ECR sub-funnel — distinct-lead counts, treated identically to touched
+  // (sum across rooftops; daily card sums across days but double-counts
+  // multi-day leads, same caveat as touched/qualified/appts; totals card
+  // is lead-deduped per agent).
+  apptIntent: number;
+  transfers: number;
+  callbacks: number;
 };
 const EMPTY: Bucket = {
   touched: 0, qualified: 0, appts: 0, apptValue: 0,
   totalCalls: 0, totalSms: 0, leadsWithCalls: 0, leadsWithSms: 0,
   newLeads: 0, contactedFromNew: 0,
+  apptIntent: 0, transfers: 0, callbacks: 0,
 };
 
 function projectRow(r: AnyAgentRow): Bucket {
@@ -244,6 +264,9 @@ function projectRow(r: AnyAgentRow): Bucket {
     leadsWithSms: num(r.leads_with_sms),
     newLeads: num(r.new_leads_created),
     contactedFromNew: num(r.leads_contacted_from_new),
+    apptIntent: num(r.appointment_intent_leads),
+    transfers: num(r.transfer_leads),
+    callbacks: num(r.callback_leads),
   };
 }
 function add(a: Bucket, b: Bucket): Bucket {
@@ -258,6 +281,9 @@ function add(a: Bucket, b: Bucket): Bucket {
     leadsWithSms: a.leadsWithSms + b.leadsWithSms,
     newLeads: a.newLeads + b.newLeads,
     contactedFromNew: a.contactedFromNew + b.contactedFromNew,
+    apptIntent: a.apptIntent + b.apptIntent,
+    transfers: a.transfers + b.transfers,
+    callbacks: a.callbacks + b.callbacks,
   };
 }
 // Collapse one rooftop's daily rows into a per-rooftop total. Most fields
@@ -277,6 +303,9 @@ function collapseDailyForRooftop(daily: Bucket[]): Bucket {
     out.totalSms         += d.totalSms;
     out.leadsWithCalls   += d.leadsWithCalls;
     out.leadsWithSms     += d.leadsWithSms;
+    out.apptIntent       += d.apptIntent;
+    out.transfers        += d.transfers;
+    out.callbacks        += d.callbacks;
     if (d.newLeads         > out.newLeads)         out.newLeads         = d.newLeads;
     if (d.contactedFromNew > out.contactedFromNew) out.contactedFromNew = d.contactedFromNew;
   }
@@ -1208,6 +1237,12 @@ const KPI_INFO: Record<string, string> = {
     "Of the qualified leads, how many actually booked. Measures closing strength.",
   "Total Accounts":
     "Number of dealerships in this view, split into Live vs Churned.",
+  "Appt Intent":
+    "Inbound leads that asked to book, reschedule, or cancel a service appointment.",
+  "Transfers":
+    "Inbound leads where the agent completed a live transfer to a human.",
+  "Callbacks":
+    "Inbound leads where the agent scheduled or arranged a callback.",
 };
 
 function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops, loading }: {
@@ -1261,6 +1296,29 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
     // $100-per-appointment placeholder (appointment_value === appointments * 100
     // for every row), so the figure carries no information beyond the appt count.
   ];
+
+  // ECR sub-funnel — only the inbound tabs carry these. Service-IB shows all
+  // three (Appt Intent / Transfers / Callbacks); Sales-IB shows Transfers only.
+  // OB tabs + "All" don't surface them (the underlying fields are null there).
+  if (agent === "Service Inbound") {
+    secondary.push(
+      { label: "Appt Intent", value: fmtNum(totals.apptIntent), color: "#f59e0b",
+        sub: totals.touched > 0 ? `${fmtRate(totals.apptIntent, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Appt Intent"] },
+      { label: "Transfers", value: fmtNum(totals.transfers), color: "#ec4899",
+        sub: totals.touched > 0 ? `${fmtRate(totals.transfers, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Transfers"] },
+      { label: "Callbacks", value: fmtNum(totals.callbacks), color: "#8b5cf6",
+        sub: totals.touched > 0 ? `${fmtRate(totals.callbacks, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Callbacks"] },
+    );
+  } else if (agent === "Sales Inbound") {
+    secondary.push(
+      { label: "Transfers", value: fmtNum(totals.transfers), color: "#ec4899",
+        sub: totals.touched > 0 ? `${fmtRate(totals.transfers, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Transfers"] },
+    );
+  }
 
   return (
     <div style={{ marginBottom: 18 }}>
@@ -1467,7 +1525,7 @@ function columnsFor(agent: ActiveAgent): Col[] {
   // rationale. "All Agents" mixes the two and falls back to Touched.
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
   const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
-  return [
+  const cols: Col[] = [
     { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
     { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
@@ -1478,6 +1536,20 @@ function columnsFor(agent: ActiveAgent): Col[] {
     { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },
     // Appt $ column dropped — see KpiStrip note. Re-add once Metabase emits real values.
   ];
+  // Agent-scoped ECR sub-funnel — Sales-IB has Transfers only; Service-IB has
+  // all three. Other tabs (OB + "All") don't carry these in the Metabase query.
+  if (agent === "Service Inbound") {
+    cols.push(
+      { label: "Appt Intent", render: b => fmtNum(b.apptIntent), sortValue: b => b.apptIntent, minWidth: 90 },
+      { label: "Transfers",   render: b => fmtNum(b.transfers),  sortValue: b => b.transfers,  minWidth: 80 },
+      { label: "Callbacks",   render: b => fmtNum(b.callbacks),  sortValue: b => b.callbacks,  minWidth: 80 },
+    );
+  } else if (agent === "Sales Inbound") {
+    cols.push(
+      { label: "Transfers", render: b => fmtNum(b.transfers), sortValue: b => b.transfers, minWidth: 80 },
+    );
+  }
+  return cols;
 }
 
 // ─── Small pieces ────────────────────────────────────────────────────────────

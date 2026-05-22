@@ -1270,6 +1270,10 @@ const AGENT_NUMERIC_FIELDS = [
   "qualified_leads", "appointments", "appointment_value",
   "total_calls", "total_sms", "total_sms_conversations",
   "total_inbound_human_msgs",
+  // ECR-driven distinct-lead counts. Sales-IB carries transfer_leads only;
+  // Service-IB carries all three. The other agent_types emit nulls — dedupe
+  // treats nulls as no-op so the field is just absent for OB rows.
+  "appointment_intent_leads", "transfer_leads", "callback_leads",
 ];
 // Fields that are NOT additive across dupes — rolling-window totals
 // (new_leads_created, leads_contacted_from_new) are constant across all
