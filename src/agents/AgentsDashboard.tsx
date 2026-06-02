@@ -229,6 +229,30 @@ function inRange(iso: string, range: DateRange, custom: CustomRange): boolean {
   return true;
 }
 
+// Number of elapsed days covered by the selected range (bounded by today), or
+// null for "ALL" where there's no clean span. Used to pro-rate monthly MRR to
+// the selected window so ROI = appts(range) ÷ (MRR × days/30) stays
+// apples-to-apples instead of comparing multi-month appts to a one-month fee.
+function rangeDays(range: DateRange, custom: CustomRange): number | null {
+  if (range === "ALL") return null;
+  const today = startOfDay(new Date());
+  const DAY_MS = 86400000;
+  const inclusiveDays = (a: Date, b: Date) => Math.round((b.getTime() - a.getTime()) / DAY_MS) + 1;
+  if (range === "TODAY") return 1;
+  if (range === "WEEK") return inclusiveDays(startOfWeekMon(today), today);
+  if (range === "MTD") return inclusiveDays(new Date(today.getFullYear(), today.getMonth(), 1), today);
+  if (range === "D30") return 30;
+  if (range === "D90") return 90;
+  if (range === "CUSTOM") {
+    const f = custom.from ? parseDay(custom.from) : null;
+    if (!f) return null; // open-ended start → no clean span; fall back to monthly
+    const tRaw = custom.to ? parseDay(custom.to) : today;
+    const t = tRaw && tRaw < today ? tRaw : today; // cap at today
+    return Math.max(1, inclusiveDays(f, t));
+  }
+  return null;
+}
+
 function todayIso(): string {
   const d = new Date();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -366,16 +390,19 @@ function hasMetabaseActivity(b: Bucket): boolean {
 type RagResult = { roi: number | null; status: RagStatus; note: string };
 
 // RAG classification for one rooftop. Always Red / Amber / Green — never N/A.
+// `periodMonths` pro-rates the monthly MRR to the selected date range (days/30,
+// or 1 for the all-time "ALL" range) so the multiple compares like-for-like.
 // Priority:
 //   1. No Metabase activity → Red.
 //   2. Top-of-funnel < 100 leads → Red (too little volume to judge ROI).
 //   3. MRR unknown → can't compute ROI → Red.
 //   4. ROI ≥ 5× Green · 3–5× Amber · < 3× Red.
-function computeRag(mrr: number | null, total: Bucket): RagResult {
+function computeRag(mrr: number | null, total: Bucket, periodMonths: number): RagResult {
   if (!hasMetabaseActivity(total)) {
     return { roi: null, status: "red", note: "No Metabase activity" };
   }
-  const roi = mrr != null && mrr > 0 ? total.roiValue / mrr : null;
+  const denom = mrr != null && mrr > 0 ? mrr * periodMonths : null;
+  const roi = denom != null && denom > 0 ? total.roiValue / denom : null;
   if (total.newLeads < TOFU_MIN_LEADS) {
     return { roi, status: "red", note: `Top-of-funnel < ${TOFU_MIN_LEADS} leads (${fmtNum(total.newLeads)}) — too little volume to judge` };
   }
@@ -959,6 +986,16 @@ function AgentsDashboard() {
     [rooftopRows]
   );
 
+  // Pro-rate factor for ROI: monthly MRR × (days-in-range / 30). "ALL" has no
+  // clean span, so it falls back to 1 (raw monthly denominator).
+  const periodMonths = useMemo(() => {
+    const days = rangeDays(dateRange, customRange);
+    return days == null ? 1 : days / 30;
+  }, [dateRange, customRange]);
+
+  // ROI column is only meaningful in sheet mode (MRR lives in the master sheet).
+  const showRoi = dataMode === "sheet";
+
   const sortedRooftopRows = useMemo(() => {
     const rows = [...rooftopRows];
     const cols = columnsFor(activeAgent);
@@ -980,11 +1017,11 @@ function AgentsDashboard() {
       return rows;
     }
     if (sort.label === "ROI") {
-      // Sort by the ROI multiple; rows where it can't be computed (N/A or
-      // volume-gated Red) sink to the bottom regardless of direction.
+      // Sort by the ROI multiple; rows where it can't be computed (no MRR or
+      // volume-gated) sink to the bottom regardless of direction.
       rows.sort((a, b) => {
-        const av = computeRag(a.mrr, a.total).roi;
-        const bv = computeRag(b.mrr, b.total).roi;
+        const av = computeRag(a.mrr, a.total, periodMonths).roi;
+        const bv = computeRag(b.mrr, b.total, periodMonths).roi;
         if (av == null && bv == null) return 0;
         if (av == null) return 1;
         if (bv == null) return -1;
@@ -1004,7 +1041,7 @@ function AgentsDashboard() {
       return sort.dir === "asc" ? av - bv : bv - av;
     });
     return rows;
-  }, [rooftopRows, sort, activeAgent]);
+  }, [rooftopRows, sort, activeAgent, periodMonths]);
 
   // Day-on-day series — aggregated from the already-filtered per-rooftop
   // daily buckets so the chart honors every filter the table does
@@ -1287,6 +1324,8 @@ function AgentsDashboard() {
             loading={showingPlaceholder}
             sort={sort}
             onSort={onSort}
+            showRoi={showRoi}
+            periodMonths={periodMonths}
           />
         </div>
       </div>
@@ -1450,7 +1489,7 @@ type RooftopRowData = {
   daily: ({ day: string } & Bucket)[]; total: Bucket;
 };
 
-function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }: {
+function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, showRoi, periodMonths }: {
   agent: ActiveAgent;
   rows: RooftopRowData[];
   expanded: Set<string>;
@@ -1458,10 +1497,12 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
   loading: boolean;
   sort: { label: string | null; dir: "asc" | "desc" };
   onSort: (label: string) => void;
+  showRoi: boolean;       // ROI column hidden in no-sheet mode (no MRR available)
+  periodMonths: number;   // pro-rate factor for the ROI denominator
 }) {
   const cols = columnsFor(agent);
-  // arrow + rooftop label + MRR + ROI + metrics
-  const totalCols = cols.length + 4;
+  // arrow + rooftop label + MRR (+ ROI when shown) + metrics
+  const totalCols = cols.length + (showRoi ? 4 : 3);
 
   const sortIndicator = (label: string) => {
     if (sort.label !== label) return <span style={{ color: "#d1d5db", marginLeft: 4 }}>⇅</span>;
@@ -1490,12 +1531,14 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
             title="Agent MRR from the All-Accounts sheet">
             MRR{sortIndicator("MRR")}
           </th>
-          <th
-            style={{ ...thStyle, ...sortableHeaderStyle("ROI"), textAlign: "center", minWidth: 84 }}
-            onClick={() => onSort("ROI")}
-            title="ROI Multiple = (appts × cost-per-appt) ÷ MRR. RAG: Green ≥ 5× · Amber 3–5× · Red < 3× (or < 100 top-of-funnel leads, no MRR, or no Metabase data).">
-            ROI{sortIndicator("ROI")}
-          </th>
+          {showRoi && (
+            <th
+              style={{ ...thStyle, ...sortableHeaderStyle("ROI"), textAlign: "center", minWidth: 84 }}
+              onClick={() => onSort("ROI")}
+              title="ROI Multiple = (appts × cost-per-appt) ÷ (MRR pro-rated to the selected range). RAG: Green ≥ 5× · Amber 3–5× · Red < 3× (or < 100 top-of-funnel leads, or no Metabase data).">
+              ROI{sortIndicator("ROI")}
+            </th>
+          )}
           {cols.map(c => (
             <th
               key={c.label}
@@ -1548,9 +1591,11 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                 <td style={{ ...tdStyle, textAlign: "right", color: row.mrr != null ? "#0369a1" : "#9ca3af", fontWeight: row.mrr != null ? 600 : 400 }}>
                   {row.mrr != null ? fmtCurrency(row.mrr) : "—"}
                 </td>
-                <td style={{ ...tdStyle, textAlign: "center" }}>
-                  <RoiCell rag={computeRag(row.mrr, row.total)} />
-                </td>
+                {showRoi && (
+                  <td style={{ ...tdStyle, textAlign: "center" }}>
+                    <RoiCell rag={computeRag(row.mrr, row.total, periodMonths)} />
+                  </td>
+                )}
                 {cols.map(c => (
                   <td key={c.label} style={{ ...tdStyle, textAlign: "right", color: c.emphasize ? "#0369a1" : "#374151", fontWeight: c.emphasize ? 600 : 400 }}>
                     {c.render(row.total)}
@@ -1562,7 +1607,9 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                   <td style={dayCellStyle} />
                   <td style={{ ...dayCellStyle, paddingLeft: 36, color: "#6b7280" }}>{fmtDay(d.day)}</td>
                   <td style={dayCellStyle} />
-                  <td style={{ ...dayCellStyle, textAlign: "center", color: "#9ca3af" }} title="ROI is a rooftop-level figure — see the collapsed row">—</td>
+                  {showRoi && (
+                    <td style={{ ...dayCellStyle, textAlign: "center", color: "#9ca3af" }} title="ROI is a rooftop-level figure — see the collapsed row">—</td>
+                  )}
                   {cols.map(c => (
                     <td
                       key={c.label}
