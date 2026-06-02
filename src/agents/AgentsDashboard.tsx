@@ -37,6 +37,12 @@ type AgentRowBase = {
   leads_contacted_from_new: number | null;
   capture_rate: number | null;
   abr: number | null;
+
+  // Inbound-only outcome counts (Sales IB / Service IB). Distinct lead counts:
+  // `transfer_leads` = leads the agent handed off to a human; `callback_leads`
+  // = leads for which a callback was scheduled. Null on Outbound rows.
+  transfer_leads: number | null;
+  callback_leads: number | null;
 };
 // Index signature for the `pld.` prefixed fields (TS can't express dotted keys
 // in a closed type; we just hand-roll the access).
@@ -70,6 +76,47 @@ const AGENT_COLORS: Record<AgentType, string> = {
   "Service Inbound": "#22c55e",
   "Sales Outbound": "#6366f1",
   "Service Outbound": "#0ea5e9",
+};
+
+// ─── ROI model ────────────────────────────────────────────────────────────────
+// Per-appointment dollar value the agent generates, by agent type. ROI Multiple
+// = (appts × cost-per-appt) ÷ MRR — i.e. how many times the monthly fee the
+// agent paid back in booked-appointment value this period.
+const COST_PER_APPT: Record<AgentType, number> = {
+  "Sales Inbound": 100,
+  "Sales Outbound": 250,
+  "Service Inbound": 50,
+  "Service Outbound": 75,
+};
+// Premium dealers get a flat $750 per appointment regardless of agent type
+// (higher-value showrooms where each booked visit is worth far more). Editable
+// allowlist — matched case-insensitively against rooftop OR enterprise name.
+const PREMIUM_DEALER_APPT_COST = 750;
+const PREMIUM_DEALERS = new Set<string>([
+  "mercedes-benz of arlington",
+]);
+const normName = (s: string) => s.trim().toLowerCase();
+function isPremiumDealer(rooftopName: string, enterpriseName: string): boolean {
+  return PREMIUM_DEALERS.has(normName(rooftopName)) || PREMIUM_DEALERS.has(normName(enterpriseName));
+}
+function costPerAppt(agentType: AgentType, rooftopName: string, enterpriseName: string): number {
+  if (isPremiumDealer(rooftopName, enterpriseName)) return PREMIUM_DEALER_APPT_COST;
+  return COST_PER_APPT[agentType] ?? 0;
+}
+
+// RAG thresholds. Green ROI ≥ 5×, Amber 3–5×, Performance red < 3×. A rooftop
+// with < 100 top-of-funnel (new) leads is Red regardless of ROI — too little
+// volume to trust the multiple.
+const ROI_GREEN = 5;
+const ROI_AMBER = 3;
+const TOFU_MIN_LEADS = 100;
+
+type RagStatus = "green" | "amber" | "red" | "na";
+const RAG_COLORS: Record<RagStatus, { bg: string; fg: string }> = {
+  green: { bg: "#dcfce7", fg: "#166534" },
+  amber: { bg: "#fef3c7", fg: "#92400e" },
+  red:   { bg: "#fee2e2", fg: "#991b1b" },
+  na:    { bg: "#f3f4f6", fg: "#9ca3af" },
 };
 
 // Tab selection extends AgentType with an "All" pseudo-value that aggregates
@@ -225,11 +272,21 @@ type Bucket = {
   // max instead of sum for these two.
   newLeads: number;
   contactedFromNew: number;
+  // Inbound-only outcome counts — see AgentRowBase. Additive like touched.
+  transfers: number;
+  callbacks: number;
+  // Cost-weighted appointment value = appts × cost-per-appt for THIS row's
+  // agent type (or the premium-dealer rate). Kept as a Bucket field so it sums
+  // correctly when "All Agents" merges rows of different agent types — each
+  // contributes its own cost basis. ROI Multiple = roiValue ÷ MRR.
+  roiValue: number;
 };
 const EMPTY: Bucket = {
   touched: 0, qualified: 0, appts: 0, apptValue: 0,
   totalCalls: 0, totalSms: 0, leadsWithCalls: 0, leadsWithSms: 0,
   newLeads: 0, contactedFromNew: 0,
+  transfers: 0, callbacks: 0,
+  roiValue: 0,
 };
 
 function projectRow(r: AnyAgentRow): Bucket {
@@ -244,6 +301,10 @@ function projectRow(r: AnyAgentRow): Bucket {
     leadsWithSms: num(r.leads_with_sms),
     newLeads: num(r.new_leads_created),
     contactedFromNew: num(r.leads_contacted_from_new),
+    transfers: num(r.transfer_leads),
+    callbacks: num(r.callback_leads),
+    roiValue: num(r.appointments) *
+      costPerAppt(r.agent_type, String(r.rooftop_name ?? ""), String(r.enterprise_name ?? "")),
   };
 }
 function add(a: Bucket, b: Bucket): Bucket {
@@ -258,6 +319,9 @@ function add(a: Bucket, b: Bucket): Bucket {
     leadsWithSms: a.leadsWithSms + b.leadsWithSms,
     newLeads: a.newLeads + b.newLeads,
     contactedFromNew: a.contactedFromNew + b.contactedFromNew,
+    transfers: a.transfers + b.transfers,
+    callbacks: a.callbacks + b.callbacks,
+    roiValue: a.roiValue + b.roiValue,
   };
 }
 // Collapse one rooftop's daily rows into a per-rooftop total. Most fields
@@ -277,6 +341,9 @@ function collapseDailyForRooftop(daily: Bucket[]): Bucket {
     out.totalSms         += d.totalSms;
     out.leadsWithCalls   += d.leadsWithCalls;
     out.leadsWithSms     += d.leadsWithSms;
+    out.transfers        += d.transfers;
+    out.callbacks        += d.callbacks;
+    out.roiValue         += d.roiValue;
     if (d.newLeads         > out.newLeads)         out.newLeads         = d.newLeads;
     if (d.contactedFromNew > out.contactedFromNew) out.contactedFromNew = d.contactedFromNew;
   }
@@ -287,6 +354,41 @@ const fmtNum = (n: number) => n.toLocaleString();
 const fmtCurrency = (n: number) => `$${Math.round(n).toLocaleString()}`;
 const fmtRate = (num: number, den: number) =>
   den > 0 ? `${((num / den) * 100).toFixed(1)}%` : "—";
+const fmtRoi = (x: number) => `${x.toFixed(1)}×`;
+
+// True when the rooftop has any Metabase activity in scope. A sheet-seeded
+// rooftop with no Metabase rows collapses to EMPTY → false.
+function hasMetabaseActivity(b: Bucket): boolean {
+  return b.touched > 0 || b.appts > 0 || b.totalCalls > 0 || b.totalSms > 0 || b.newLeads > 0;
+}
+
+type RagResult = { roi: number | null; status: RagStatus; note: string };
+
+// RAG classification for one rooftop. Priority:
+//   1. No Metabase activity → Red if Live (no N/A allowed in Live), else N/A.
+//   2. Top-of-funnel < 100 leads → Red (too little volume to judge ROI).
+//   3. MRR unknown → can't compute ROI → Red if Live, else N/A.
+//   4. ROI ≥ 5× Green · 3–5× Amber · < 3× Red.
+function computeRag(stage: string | null, mrr: number | null, total: Bucket): RagResult {
+  const isLive = stage === "Live";
+  if (!hasMetabaseActivity(total)) {
+    return isLive
+      ? { roi: null, status: "red", note: "Live but no Metabase activity yet" }
+      : { roi: null, status: "na",  note: "No Metabase activity" };
+  }
+  const roi = mrr != null && mrr > 0 ? total.roiValue / mrr : null;
+  if (total.newLeads < TOFU_MIN_LEADS) {
+    return { roi, status: "red", note: `Top-of-funnel < ${TOFU_MIN_LEADS} leads (${fmtNum(total.newLeads)}) — too little volume to judge` };
+  }
+  if (roi == null) {
+    return isLive
+      ? { roi: null, status: "red", note: "Live but MRR unknown" }
+      : { roi: null, status: "na",  note: "MRR unknown — ROI can't be computed" };
+  }
+  if (roi >= ROI_GREEN) return { roi, status: "green", note: `ROI ${fmtRoi(roi)} — at/above ${ROI_GREEN}×` };
+  if (roi >= ROI_AMBER) return { roi, status: "amber", note: `ROI ${fmtRoi(roi)} — ${ROI_AMBER}–${ROI_GREEN}×` };
+  return { roi, status: "red", note: `ROI ${fmtRoi(roi)} — below ${ROI_AMBER}×` };
+}
 
 function AgentsDashboard() {
   const [dailyRows, setDailyRows] = useState<AgentRowDaily[]>([]);
@@ -344,17 +446,17 @@ function AgentsDashboard() {
   const [selectedRooftops, setSelectedRooftops] = useState<Set<string>>(new Set());
   // MRR range filter (inclusive). null on either side means unbounded.
   const [mrrRange, setMrrRange] = useState<{ min: number | null; max: number | null }>({ min: null, max: null });
-  // Data-mode toggle:
+  // Data-mode toggle. The Vini funnel sheet is the source of truth, so we
+  // default to "sheet":
   //   • "sheet"    — sheet-driven. Restrict rooftops to those listed in the
-  //                  master accounts sheet for this (rooftop × agent_type), use
-  //                  the sheet's stage + MRR, and overlay the OB roster sheet.
-  //   • "no-sheet" — pure Metabase. Ignore BOTH Google sheets entirely. Stage
-  //                  reverts to Metabase's rooftop_stage; MRR is unavailable.
-  //                  Use this when the sheet is suspected out of sync with
-  //                  reality (it currently is for ~5 of the 7 Live Sales-OB
-  //                  rooftops — Dream Automotive, Landers Dodge CDJR, etc., are
-  //                  not in the sheet at all).
-  const [dataMode, setDataMode] = useState<"sheet" | "no-sheet">("no-sheet");
+  //                  funnel sheet for this (rooftop × agent_type), and use the
+  //                  sheet's stage (Live / Churned / In OB) + MRR. This is the
+  //                  default and the intended view.
+  //   • "no-sheet" — pure Metabase. Ignore the sheet entirely. Stage reverts to
+  //                  Metabase's rooftop_stage; MRR is unavailable. Kept as an
+  //                  escape hatch for spot-checking raw Metabase activity that
+  //                  the sheet may not list yet.
+  const [dataMode, setDataMode] = useState<"sheet" | "no-sheet">("sheet");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Sort state: null label means "default" (touched desc, the V3 funnel-top).
   const [sort, setSort] = useState<{ label: string | null; dir: "asc" | "desc" }>({ label: null, dir: "desc" });
@@ -880,6 +982,19 @@ function AgentsDashboard() {
       });
       return rows;
     }
+    if (sort.label === "ROI") {
+      // Sort by the ROI multiple; rows where it can't be computed (N/A or
+      // volume-gated Red) sink to the bottom regardless of direction.
+      rows.sort((a, b) => {
+        const av = computeRag(a.stage, a.mrr, a.total).roi;
+        const bv = computeRag(b.stage, b.mrr, b.total).roi;
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        return sort.dir === "asc" ? av - bv : bv - av;
+      });
+      return rows;
+    }
     const col = sort.label ? cols.find(c => c.label === sort.label) : null;
     if (!col) {
       // V3 default: Touched desc (funnel top).
@@ -914,13 +1029,14 @@ function AgentsDashboard() {
     };
   }, [rooftopRows]);
 
-  const { liveRooftops, churnedRooftops } = useMemo(() => {
-    let live = 0, churned = 0;
+  const { liveRooftops, churnedRooftops, inObRooftops } = useMemo(() => {
+    let live = 0, churned = 0, inOb = 0;
     for (const rt of rooftopRows) {
       if (rt.stage === "Live") live++;
       else if (rt.stage === "Churned") churned++;
+      else if (rt.stage === "In OB") inOb++;
     }
-    return { liveRooftops: live, churnedRooftops: churned };
+    return { liveRooftops: live, churnedRooftops: churned, inObRooftops: inOb };
   }, [rooftopRows]);
 
   const showingPlaceholder = loading && totalsRows.length === 0;
@@ -1066,12 +1182,12 @@ function AgentsDashboard() {
         <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Accounts</span>
           <InfoTip text={
-            "Master sheet only — show just the dealerships listed on our accounts sheet. " +
+            "Funnel sheet only — show just the dealerships on the Vini funnel sheet (Live / In OB / Churned). " +
             "All Metabase activity — show every dealership with any agent activity, even if not on the sheet."
           } />
           <SegmentedControl
             options={[
-              { key: "sheet" as const,    label: "Master sheet only" },
+              { key: "sheet" as const,    label: "Funnel sheet only" },
               { key: "no-sheet" as const, label: "All Metabase activity" },
             ]}
             value={dataMode}
@@ -1089,6 +1205,7 @@ function AgentsDashboard() {
         totals={totals}
         liveRooftops={liveRooftops}
         churnedRooftops={churnedRooftops}
+        inObRooftops={inObRooftops}
         totalRooftops={rooftopRows.length}
         loading={showingPlaceholder}
       />
@@ -1208,13 +1325,18 @@ const KPI_INFO: Record<string, string> = {
     "Of the qualified leads, how many actually booked. Measures closing strength.",
   "Total Accounts":
     "Number of dealerships in this view, split into Live vs Churned.",
+  "Transfers":
+    "Inbound leads the agent handed off to a live human — e.g. a hot sales lead or an escalation.",
+  "Callbacks":
+    "Inbound leads the agent scheduled a callback for, to reconnect at a better time.",
 };
 
-function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops, loading }: {
+function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, totalRooftops, loading }: {
   agent: ActiveAgent;
   totals: Bucket;
   liveRooftops: number;
   churnedRooftops: number;
+  inObRooftops: number;
   totalRooftops: number;
   loading: boolean;
 }) {
@@ -1225,6 +1347,11 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
   // rolls IB and OB together, so we fall back to the broader Touched
   // denominator (qualified-only would understate the mixed funnel).
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
+  // Transfer/Callback are inbound-only outcomes (Sales IB / Service IB). Show
+  // them on those two tabs and on "All" (which folds IB in); the data is null
+  // on pure-Outbound rows so we hide the cards there rather than show "0".
+  const showInboundOutcomes =
+    agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
   const convNumer = totals.appts;
   const convDenom = isOutbound ? totals.qualified : totals.touched;
   const convDenomLabel = isOutbound ? "qualified" : "touched";
@@ -1243,7 +1370,7 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
       info: KPI_INFO["Appointments"] },
   ];
 
-  const accountsSub = `${liveRooftops} live · ${churnedRooftops} churned`;
+  const accountsSub = `${liveRooftops} live · ${inObRooftops} in OB · ${churnedRooftops} churned`;
   const secondary: KpiSpec[] = [
     { label: "Total Calls", value: fmtNum(totals.totalCalls), color: "#6366f1",
       sub: totals.leadsWithCalls > 0 ? `${fmtNum(totals.leadsWithCalls)} unique leads` : undefined,
@@ -1255,6 +1382,14 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, totalRooftops,
       sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
     { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
       sub: "appts / qualified", info: KPI_INFO["ABR"] },
+    ...(showInboundOutcomes ? [
+      { label: "Transfers", value: fmtNum(totals.transfers), color: "#d97706",
+        sub: totals.touched > 0 ? `${fmtRate(totals.transfers, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Transfers"] },
+      { label: "Callbacks", value: fmtNum(totals.callbacks), color: "#7c3aed",
+        sub: totals.touched > 0 ? `${fmtRate(totals.callbacks, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Callbacks"] },
+    ] as KpiSpec[] : []),
     { label: "Total Accounts", value: fmtNum(totalRooftops), color: "#475569", sub: accountsSub,
       info: KPI_INFO["Total Accounts"] },
     // Appointment Value intentionally omitted — Metabase currently emits a flat
@@ -1328,8 +1463,8 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
   onSort: (label: string) => void;
 }) {
   const cols = columnsFor(agent);
-  // arrow + rooftop label + MRR + metrics
-  const totalCols = cols.length + 3;
+  // arrow + rooftop label + MRR + ROI + metrics
+  const totalCols = cols.length + 4;
 
   const sortIndicator = (label: string) => {
     if (sort.label !== label) return <span style={{ color: "#d1d5db", marginLeft: 4 }}>⇅</span>;
@@ -1357,6 +1492,12 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
             onClick={() => onSort("MRR")}
             title="Agent MRR from the All-Accounts sheet">
             MRR{sortIndicator("MRR")}
+          </th>
+          <th
+            style={{ ...thStyle, ...sortableHeaderStyle("ROI"), textAlign: "center", minWidth: 84 }}
+            onClick={() => onSort("ROI")}
+            title="ROI Multiple = (appts × cost-per-appt) ÷ MRR. RAG: Green ≥ 5× · Amber 3–5× · Red < 3× (or < 100 top-of-funnel leads, or Live with no data).">
+            ROI{sortIndicator("ROI")}
           </th>
           {cols.map(c => (
             <th
@@ -1410,6 +1551,9 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                 <td style={{ ...tdStyle, textAlign: "right", color: row.mrr != null ? "#0369a1" : "#9ca3af", fontWeight: row.mrr != null ? 600 : 400 }}>
                   {row.mrr != null ? fmtCurrency(row.mrr) : "—"}
                 </td>
+                <td style={{ ...tdStyle, textAlign: "center" }}>
+                  <RoiCell rag={computeRag(row.stage, row.mrr, row.total)} />
+                </td>
                 {cols.map(c => (
                   <td key={c.label} style={{ ...tdStyle, textAlign: "right", color: c.emphasize ? "#0369a1" : "#374151", fontWeight: c.emphasize ? 600 : 400 }}>
                     {c.render(row.total)}
@@ -1421,6 +1565,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                   <td style={dayCellStyle} />
                   <td style={{ ...dayCellStyle, paddingLeft: 36, color: "#6b7280" }}>{fmtDay(d.day)}</td>
                   <td style={dayCellStyle} />
+                  <td style={{ ...dayCellStyle, textAlign: "center", color: "#9ca3af" }} title="ROI is a rooftop-level figure — see the collapsed row">—</td>
                   {cols.map(c => (
                     <td
                       key={c.label}
@@ -1467,6 +1612,10 @@ function columnsFor(agent: ActiveAgent): Col[] {
   // rationale. "All Agents" mixes the two and falls back to Touched.
   const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
   const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
+  // Transfer/Callback are inbound-only — surface the columns on the IB tabs and
+  // "All"; null on pure-Outbound rows, so we omit them there.
+  const showInboundOutcomes =
+    agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
   return [
     { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
@@ -1476,17 +1625,41 @@ function columnsFor(agent: ActiveAgent): Col[] {
     { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
     { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
     { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },
+    ...(showInboundOutcomes ? [
+      { label: "Transfers", render: (b: Bucket) => fmtNum(b.transfers), sortValue: (b: Bucket) => b.transfers },
+      { label: "Callbacks", render: (b: Bucket) => fmtNum(b.callbacks), sortValue: (b: Bucket) => b.callbacks },
+    ] as Col[] : []),
     // Appt $ column dropped — see KpiStrip note. Re-add once Metabase emits real values.
   ];
 }
 
 // ─── Small pieces ────────────────────────────────────────────────────────────
 
+// ROI Multiple + RAG pill for a rooftop. Shows the multiple (e.g. "4.2×")
+// colored by status, or "N/A" when it can't be computed. The hover title
+// explains the verdict.
+function RoiCell({ rag }: { rag: RagResult }) {
+  const c = RAG_COLORS[rag.status];
+  const label = rag.roi != null ? fmtRoi(rag.roi) : (rag.status === "na" ? "N/A" : "—");
+  return (
+    <span
+      title={rag.note}
+      style={{
+        display: "inline-block", minWidth: 52, textAlign: "center",
+        padding: "2px 8px", borderRadius: 999, fontSize: 12, fontWeight: 700,
+        background: c.bg, color: c.fg,
+      }}>
+      {label}
+    </span>
+  );
+}
+
 function StagePill({ stage }: { stage: string | null }) {
   if (!stage) return null;
   const colorMap: Record<string, { bg: string; fg: string }> = {
     "Live": { bg: "#dcfce7", fg: "#166534" },
     "Churned": { bg: "#fee2e2", fg: "#991b1b" },
+    "In OB": { bg: "#dbeafe", fg: "#1e40af" },
     "Onboarding": { bg: "#dbeafe", fg: "#1e40af" },
     "New": { bg: "#fef3c7", fg: "#92400e" },
     "Contracted": { bg: "#e0e7ff", fg: "#3730a3" },

@@ -1270,6 +1270,10 @@ const AGENT_NUMERIC_FIELDS = [
   "qualified_leads", "appointments", "appointment_value",
   "total_calls", "total_sms", "total_sms_conversations",
   "total_inbound_human_msgs",
+  // Inbound-only outcome counts (added in the latest card revision). Distinct
+  // lead counts per (team × agent_type), so additive across dupes like the
+  // other distinct-count fields. Null/absent on Outbound rows.
+  "transfer_leads", "callback_leads",
 ];
 // Fields that are NOT additive across dupes — rolling-window totals
 // (new_leads_created, leads_contacted_from_new) are constant across all
@@ -1626,21 +1630,27 @@ app.get("/api/agent-stages", async (req, res) => {
   }
 });
 
-// ─── GET /api/accounts-sheet — master "All Accounts" sheet (Google Sheet CSV) ─
+// ─── GET /api/accounts-sheet — Vini funnel master sheet (Google Sheet CSV) ────
 //
-// Source: the All Accounts sheet (gid=1705606702 in the master rooftop tracker).
-// One row per (rooftop × agent_type). Provides:
-//   • Current Stage  — authoritative for Live / Churned (supersedes Metabase
-//                      and the OB-stage roster sheet).
-//   • Agent MRR       — monthly revenue per (rooftop × agent_type).
+// Source: the "Devansh_Vini_Funnel" workbook, read across two tabs and merged
+// into one row per (rooftop × agent_type). This sheet is the source of truth for
+// the dashboard's three account stages — Live, Churned, In OB:
+//   • Master tab (gid=0): Account / Team ID / Agent Opted / Stage (Live|Churned)
+//     / MRR / ARR — supplies the Live and Churned rooftops.
+//   • In-OB tab (gid=327747468): Rooftop_ID / Agent_Type / Status (OB Initiated)
+//     / ARR — supplies the In OB rooftops (untracked OB/Sales drops are excluded).
 //
-// Config: ALL_ACCOUNTS_SHEET_URL env var (CSV-export URL). When unset, defaults
-// to the public CSV export of the known sheet. Data is cached in-process for
-// 10 minutes and persisted to sheet_cache so a failed Google fetch falls back
-// to the last good snapshot instead of breaking the dashboard.
+// Config: ALL_ACCOUNTS_SHEET_URL (master tab) and INOB_SHEET_URL (in-OB tab)
+// env vars, each a CSV-export URL. When unset they default to the public CSV
+// exports below. Data is cached in-process for 10 minutes and persisted to
+// sheet_cache so a failed Google fetch falls back to the last good snapshot
+// instead of breaking the dashboard.
 
+const FUNNEL_SHEET_ID = "15BScfybsSmmvQefXQxN-TYA_-cCNkD8qLDui7EML3ss";
 const DEFAULT_ACCOUNTS_SHEET_URL =
-  "https://docs.google.com/spreadsheets/d/1ZSPzZZGbI-ixJBLGhHa1zy-vxjom94SDLumhy7zDoPw/export?format=csv&gid=1705606702";
+  `https://docs.google.com/spreadsheets/d/${FUNNEL_SHEET_ID}/export?format=csv&gid=0`;
+const DEFAULT_INOB_SHEET_URL =
+  `https://docs.google.com/spreadsheets/d/${FUNNEL_SHEET_ID}/export?format=csv&gid=327747468`;
 const ACCOUNTS_TTL_MS = 10 * 60 * 1000;
 let accountsCache = { data: null, fetchedAt: 0 };
 
@@ -1648,9 +1658,13 @@ let accountsCache = { data: null, fetchedAt: 0 };
 // labels are normalised to lower-case + trimmed; multiple columns with the same
 // label (the sheet has two "Enterprise Type" columns side by side) collapse to
 // the first occurrence, which is what we want.
+// Header labels are normalised to lower-case, with underscores treated as
+// spaces, so the two tabs of the funnel sheet line up despite different
+// conventions: the master tab uses "Rooftop Name" / "Team ID" / "Agent Opted"
+// while the in-OB tab uses "Rooftop_Name" / "Rooftop_ID" / "Agent_Type".
 function buildHeaderIndex(rows) {
   for (let r = 0; r < Math.min(rows.length, 10); r++) {
-    const cells = rows[r].map(s => s.toLowerCase().trim());
+    const cells = rows[r].map(s => s.toLowerCase().replace(/_/g, " ").trim());
     if (cells.includes("rooftop name")) {
       const idx = {};
       cells.forEach((c, i) => { if (c && !(c in idx)) idx[c] = i; });
@@ -1668,10 +1682,26 @@ function parseMoney(v) {
   if (v == null) return null;
   const s = String(v).trim();
   if (!s || s === "—" || s.startsWith("✏")) return null;
-  const cleaned = s.replace(/[$,\s]/g, "");
+  // Strip currency glyphs ($, ₹, €, £) — the in-OB tab quotes ARR in ₹ while
+  // the master tab uses $; the number itself is the same magnitude either way.
+  const cleaned = s.replace(/[$₹€£,\s]/g, "");
   if (!cleaned) return null;
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;
+}
+
+// Collapse every funnel-sheet stage label to exactly one of the three buckets
+// the dashboard exposes — Live / Churned / In OB — or null for rows we don't
+// track (e.g. "OB Drop", "Sales Drop": rooftops lost before go-live).
+//   • master tab "Stage":  Live | Churned
+//   • in-OB tab "Status":  OB Initiated (→ In OB) | OB Drop | Sales Drop | Churned
+function normalizeStage(raw) {
+  const s = String(raw ?? "").toLowerCase().trim();
+  if (!s) return null;
+  if (s === "live") return "Live";
+  if (s === "churned") return "Churned";
+  if (s === "ob initiated" || s === "in ob" || s === "onboarding" || s === "in implementation") return "In OB";
+  return null;
 }
 
 // Rows like "39 rooftops" / "12 rooftops" — the sheet rolls up bulk PWS quotes
@@ -1679,29 +1709,36 @@ function parseMoney(v) {
 // otherwise inflate MRR totals if a downstream consumer summed agentMrr.
 const AGGREGATE_NAME_RE = /^\d+\s+rooftops?$/i;
 
-function parseAccountsSheet(csv) {
+// Extract raw account rows from one CSV tab of the funnel sheet. Column lookups
+// accept aliases so the same code reads both the master tab (Account / Team ID /
+// Agent Opted / Stage / MRR / ARR) and the in-OB tab (Enterprise_Name /
+// Rooftop_ID / Agent_Type / Status / ARR). Stage is collapsed to Live / Churned
+// / In OB via normalizeStage; rows whose stage falls outside those three buckets
+// (untracked OB/Sales drops, blank, TBC agent) are dropped and counted.
+function extractAccountRows(csv) {
   const rows = parseCsv(csv);
   const hdr = buildHeaderIndex(rows);
-  if (!hdr) return { rows: [], rooftopNames: [], droppedAggregate: 0, dedupedDuplicates: 0 };
+  if (!hdr) return { rows: [], droppedAggregate: 0, droppedStage: 0 };
 
+  const pick = (...keys) => { for (const k of keys) if (hdr.idx[k] != null) return hdr.idx[k]; return undefined; };
   const COL = {
-    enterpriseName: hdr.idx["enterprise name"],
-    rooftopName:    hdr.idx["rooftop name"],
-    agentType:      hdr.idx["agent type"],
-    currentStage:   hdr.idx["current stage"],
-    subStage:       hdr.idx["sub stage"],
-    enterpriseId:   hdr.idx["enterprise id"],
-    rooftopId:      hdr.idx["rooftop id"],
-    agentMrr:       hdr.idx["agent mrr"],
-    collectedMrr:   hdr.idx["collected mrr"],
-    agentCarr:      hdr.idx["agent carr"],
+    enterpriseName: pick("enterprise name", "enterrprise name", "account"),
+    rooftopName:    pick("rooftop name"),
+    agentType:      pick("agent type", "agent opted"),
+    currentStage:   pick("current stage", "stage", "status"),
+    subStage:       pick("sub stage", "current month confirmations"),
+    enterpriseId:   pick("enterprise id"),
+    rooftopId:      pick("rooftop id", "team id"),
+    agentMrr:       pick("agent mrr", "mrr"),
+    collectedMrr:   pick("collected mrr"),
+    agentCarr:      pick("agent carr", "arr", "$arr"),
   };
   // Rooftop Name is the only strictly required column.
-  if (COL.rooftopName == null) return { rows: [], rooftopNames: [], droppedAggregate: 0, dedupedDuplicates: 0 };
+  if (COL.rooftopName == null) return { rows: [], droppedAggregate: 0, droppedStage: 0 };
 
   const out = [];
-  const namesSeen = new Set();
   let droppedAggregate = 0;
+  let droppedStage = 0;
   for (let i = hdr.headerRow + 1; i < rows.length; i++) {
     const row = rows[i];
     const name = (row[COL.rooftopName] ?? "").trim();
@@ -1710,41 +1747,53 @@ function parseAccountsSheet(csv) {
     if (name.startsWith("✏")) continue;
     if (AGGREGATE_NAME_RE.test(name)) { droppedAggregate++; continue; }
 
+    // Collapse to Live / Churned / In OB. Anything else (OB Drop, Sales Drop,
+    // blank) is not one of the three tracked buckets — drop it.
+    const stage = normalizeStage(COL.currentStage != null ? row[COL.currentStage] : "");
+    if (!stage) { droppedStage++; continue; }
+
+    const agentCarr = COL.agentCarr != null ? parseMoney(row[COL.agentCarr]) : null;
+    let agentMrr = COL.agentMrr != null ? parseMoney(row[COL.agentMrr]) : null;
+    // The in-OB tab carries ARR but no monthly figure — derive MRR from it so
+    // the dashboard's MRR column/filter is populated for in-onboarding rooftops.
+    if (agentMrr == null && agentCarr != null) agentMrr = Math.round(agentCarr / 12);
+
     const entry = {
       enterpriseName: COL.enterpriseName != null ? (row[COL.enterpriseName] ?? "").trim() : "",
       rooftopName:    name,
       agentType:      COL.agentType != null ? (row[COL.agentType] ?? "").trim() : "",
-      currentStage:   COL.currentStage != null ? (row[COL.currentStage] ?? "").trim() : "",
+      currentStage:   stage,
       subStage:       COL.subStage != null ? (row[COL.subStage] ?? "").trim() : "",
       enterpriseId:   COL.enterpriseId != null ? (row[COL.enterpriseId] ?? "").trim() : "",
       rooftopId:      COL.rooftopId != null ? (row[COL.rooftopId] ?? "").trim() : "",
-      agentMrr:       COL.agentMrr != null ? parseMoney(row[COL.agentMrr]) : null,
+      agentMrr,
       collectedMrr:   COL.collectedMrr != null ? parseMoney(row[COL.collectedMrr]) : null,
-      agentCarr:      COL.agentCarr != null ? parseMoney(row[COL.agentCarr]) : null,
+      agentCarr,
     };
     // Skip rows that don't identify an agent — agent_type drives the dashboard's
-    // per-tab join, so "TBC"-only / blank-agent rows are not addressable. Keep
-    // them in counts so the user can see how many sheet rows we ignored.
+    // per-tab join, so "TBC"-only / blank-agent rows are not addressable.
     if (!entry.agentType || entry.agentType.toUpperCase() === "TBC") {
       droppedAggregate++;
       continue;
     }
     out.push(entry);
-    namesSeen.add(name);
   }
+  return { rows: out, droppedAggregate, droppedStage };
+}
 
-  // Collapse exact duplicates by (team_id, agent_type). The sheet currently has
-  // ~7 such duplicate pairs (Feldman Chevrolet, Feldmann Imports, Tropical
-  // Chevrolet, World Car Hyundai South, …) — often identical rows but
-  // occasionally with conflicting MRR. The "right" survivor of a conflict is
-  // ambiguous; we pick the higher-MRR row and prefer Churned > Live > others
-  // for stage so the result is at least deterministic and conservative.
-  const STAGE_PRIORITY = { "Churned": 3, "Live": 2 };
+// Collapse duplicates by (team_id, agent_type) across the merged master + in-OB
+// rows. Duplicates arise within a tab (~7 pairs in the master tab) and across
+// tabs (a rooftop×agent that is Live in the master tab but also appears as In OB
+// in the in-OB roster). On conflict we keep the higher-priority stage —
+// Churned > Live > In OB — so a gone-live rooftop never regresses to In OB, and
+// within a stage we keep the higher-MRR row.
+function dedupeAccounts(allRows) {
+  const STAGE_PRIORITY = { "Churned": 4, "Live": 3, "In OB": 2 };
   const stagePriority = (s) => STAGE_PRIORITY[s] ?? 1;
   const dedupKey = (e) => e.rooftopId ? `tid:${e.rooftopId}::${e.agentType}` : `name:${e.rooftopName.toLowerCase()}::${e.agentType}`;
   const merged = new Map();
   let dedupedDuplicates = 0;
-  for (const e of out) {
+  for (const e of allRows) {
     const k = dedupKey(e);
     const prev = merged.get(k);
     if (!prev) { merged.set(k, e); continue; }
@@ -1755,18 +1804,53 @@ function parseAccountsSheet(csv) {
         (e.agentMrr ?? 0) > (prev.agentMrr ?? 0));
     if (keepNew) merged.set(k, e);
   }
+  const namesSeen = new Set();
+  for (const e of merged.values()) namesSeen.add(e.rooftopName);
 
   return {
     rows: Array.from(merged.values()),
     rooftopNames: Array.from(namesSeen),
-    droppedAggregate,
     dedupedDuplicates,
   };
 }
 
-app.get("/api/accounts-sheet", async (req, res) => {
-  const url = (process.env.ALL_ACCOUNTS_SHEET_URL || DEFAULT_ACCOUNTS_SHEET_URL).trim();
+// Fetch + parse both funnel tabs and merge into a single deduped account list:
+// the master tab supplies Live / Churned, the in-OB tab supplies In OB. Either
+// fetch failing on its own doesn't sink the whole response — we merge whatever
+// parsed successfully (a master-only result is still useful).
+async function fetchAccountsSheet() {
+  const masterUrl = (process.env.ALL_ACCOUNTS_SHEET_URL || DEFAULT_ACCOUNTS_SHEET_URL).trim();
+  const inObUrl = (process.env.INOB_SHEET_URL || DEFAULT_INOB_SHEET_URL).trim();
 
+  const fetchCsv = async (url) => {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(20000), redirect: "follow" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.text();
+  };
+
+  const [masterRes, inObRes] = await Promise.allSettled([fetchCsv(masterUrl), fetchCsv(inObUrl)]);
+  if (masterRes.status === "rejected" && inObRes.status === "rejected") {
+    throw new Error(masterRes.reason?.message ?? "both account tabs failed to fetch");
+  }
+
+  const allRows = [];
+  let droppedAggregate = 0, droppedStage = 0;
+  const errors = {};
+  for (const [tab, res] of [["master", masterRes], ["inOb", inObRes]]) {
+    if (res.status === "fulfilled") {
+      const ex = extractAccountRows(res.value);
+      allRows.push(...ex.rows);
+      droppedAggregate += ex.droppedAggregate;
+      droppedStage += ex.droppedStage;
+    } else {
+      errors[tab] = res.reason?.message ?? "fetch failed";
+    }
+  }
+
+  return { ...dedupeAccounts(allRows), droppedAggregate, droppedStage, errors };
+}
+
+app.get("/api/accounts-sheet", async (req, res) => {
   const force = req.query.refresh === "1";
   const fresh = !force && accountsCache.data && (Date.now() - accountsCache.fetchedAt) < ACCOUNTS_TTL_MS;
   if (fresh) {
@@ -1777,10 +1861,7 @@ app.get("/api/accounts-sheet", async (req, res) => {
   }
 
   try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(20000), redirect: "follow" });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const csv = await resp.text();
-    const parsed = parseAccountsSheet(csv);
+    const parsed = await fetchAccountsSheet();
     accountsCache = { data: parsed, fetchedAt: Date.now() };
     await writeSheetCache("accounts", parsed);
     return res.json({
