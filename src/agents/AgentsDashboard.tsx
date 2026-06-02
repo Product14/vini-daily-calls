@@ -111,12 +111,13 @@ const ROI_GREEN = 5;
 const ROI_AMBER = 3;
 const TOFU_MIN_LEADS = 100;
 
-type RagStatus = "green" | "amber" | "red" | "na";
+// Every rooftop resolves to one of three states — never N/A. Anything we can't
+// score (no Metabase activity, MRR unknown, too little volume) falls to Red.
+type RagStatus = "green" | "amber" | "red";
 const RAG_COLORS: Record<RagStatus, { bg: string; fg: string }> = {
   green: { bg: "#dcfce7", fg: "#166534" },
   amber: { bg: "#fef3c7", fg: "#92400e" },
   red:   { bg: "#fee2e2", fg: "#991b1b" },
-  na:    { bg: "#f3f4f6", fg: "#9ca3af" },
 };
 
 // Tab selection extends AgentType with an "All" pseudo-value that aggregates
@@ -364,26 +365,22 @@ function hasMetabaseActivity(b: Bucket): boolean {
 
 type RagResult = { roi: number | null; status: RagStatus; note: string };
 
-// RAG classification for one rooftop. Priority:
-//   1. No Metabase activity → Red if Live (no N/A allowed in Live), else N/A.
+// RAG classification for one rooftop. Always Red / Amber / Green — never N/A.
+// Priority:
+//   1. No Metabase activity → Red.
 //   2. Top-of-funnel < 100 leads → Red (too little volume to judge ROI).
-//   3. MRR unknown → can't compute ROI → Red if Live, else N/A.
+//   3. MRR unknown → can't compute ROI → Red.
 //   4. ROI ≥ 5× Green · 3–5× Amber · < 3× Red.
-function computeRag(stage: string | null, mrr: number | null, total: Bucket): RagResult {
-  const isLive = stage === "Live";
+function computeRag(mrr: number | null, total: Bucket): RagResult {
   if (!hasMetabaseActivity(total)) {
-    return isLive
-      ? { roi: null, status: "red", note: "Live but no Metabase activity yet" }
-      : { roi: null, status: "na",  note: "No Metabase activity" };
+    return { roi: null, status: "red", note: "No Metabase activity" };
   }
   const roi = mrr != null && mrr > 0 ? total.roiValue / mrr : null;
   if (total.newLeads < TOFU_MIN_LEADS) {
     return { roi, status: "red", note: `Top-of-funnel < ${TOFU_MIN_LEADS} leads (${fmtNum(total.newLeads)}) — too little volume to judge` };
   }
   if (roi == null) {
-    return isLive
-      ? { roi: null, status: "red", note: "Live but MRR unknown" }
-      : { roi: null, status: "na",  note: "MRR unknown — ROI can't be computed" };
+    return { roi: null, status: "red", note: "MRR unknown — ROI can't be computed" };
   }
   if (roi >= ROI_GREEN) return { roi, status: "green", note: `ROI ${fmtRoi(roi)} — at/above ${ROI_GREEN}×` };
   if (roi >= ROI_AMBER) return { roi, status: "amber", note: `ROI ${fmtRoi(roi)} — ${ROI_AMBER}–${ROI_GREEN}×` };
@@ -986,8 +983,8 @@ function AgentsDashboard() {
       // Sort by the ROI multiple; rows where it can't be computed (N/A or
       // volume-gated Red) sink to the bottom regardless of direction.
       rows.sort((a, b) => {
-        const av = computeRag(a.stage, a.mrr, a.total).roi;
-        const bv = computeRag(b.stage, b.mrr, b.total).roi;
+        const av = computeRag(a.mrr, a.total).roi;
+        const bv = computeRag(b.mrr, b.total).roi;
         if (av == null && bv == null) return 0;
         if (av == null) return 1;
         if (bv == null) return -1;
@@ -1496,7 +1493,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
           <th
             style={{ ...thStyle, ...sortableHeaderStyle("ROI"), textAlign: "center", minWidth: 84 }}
             onClick={() => onSort("ROI")}
-            title="ROI Multiple = (appts × cost-per-appt) ÷ MRR. RAG: Green ≥ 5× · Amber 3–5× · Red < 3× (or < 100 top-of-funnel leads, or Live with no data).">
+            title="ROI Multiple = (appts × cost-per-appt) ÷ MRR. RAG: Green ≥ 5× · Amber 3–5× · Red < 3× (or < 100 top-of-funnel leads, no MRR, or no Metabase data).">
             ROI{sortIndicator("ROI")}
           </th>
           {cols.map(c => (
@@ -1552,7 +1549,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort }
                   {row.mrr != null ? fmtCurrency(row.mrr) : "—"}
                 </td>
                 <td style={{ ...tdStyle, textAlign: "center" }}>
-                  <RoiCell rag={computeRag(row.stage, row.mrr, row.total)} />
+                  <RoiCell rag={computeRag(row.mrr, row.total)} />
                 </td>
                 {cols.map(c => (
                   <td key={c.label} style={{ ...tdStyle, textAlign: "right", color: c.emphasize ? "#0369a1" : "#374151", fontWeight: c.emphasize ? 600 : 400 }}>
@@ -1640,7 +1637,7 @@ function columnsFor(agent: ActiveAgent): Col[] {
 // explains the verdict.
 function RoiCell({ rag }: { rag: RagResult }) {
   const c = RAG_COLORS[rag.status];
-  const label = rag.roi != null ? fmtRoi(rag.roi) : (rag.status === "na" ? "N/A" : "—");
+  const label = rag.roi != null ? fmtRoi(rag.roi) : "—";
   return (
     <span
       title={rag.note}
