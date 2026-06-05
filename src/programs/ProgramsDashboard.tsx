@@ -1705,6 +1705,7 @@ function TaskRowItem({ row, onOpen }: { row: TaskRow; onOpen:(k:string)=>void })
 
 type Section2Row = {
   rag: RagStatus;
+  agent: AgentType;
   taskDri: string;         // raw owner (email or plain name); "" if unassigned
   ownerLabel: string;      // unfurled display name; "" if unassigned
   team: TaskFunction;
@@ -1713,10 +1714,14 @@ type Section2Row = {
   rooftopCount: number;
   arrSum: number;
 };
-type Section2Agent = {
-  agent: AgentType;
+// Section 2 is grouped by owner so each accountable person sees their full
+// list at once. Within a group, rows are sorted by ARR (highest first).
+type Section2OwnerGroup = {
+  taskDri: string;          // grouping key (lowercased); "" for unassigned
+  ownerLabel: string;       // displayed name; "(no owner)" when unassigned
   rows: Section2Row[];
   subtotalArr: number;
+  teams: TaskFunction[];    // unique teams the owner is doing work on
 };
 
 function EmailReportView({ accounts, state, overall }: {
@@ -1749,60 +1754,72 @@ function EmailReportView({ accounts, state, overall }: {
     });
   }, [accounts]);
 
-  // Section 2 — per agent, aggregated (RAG, team, title) across rooftops.
-  // Only not-Green accounts and not-Done tasks (point of the email is "what
-  // do we still need to do to make accounts green").
-  const section2: Section2Agent[] = useMemo(() => {
-    const agents: AgentType[] = ["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"];
+  // Section 2 — outer grouping by OWNER (so each person sees their entire
+  // workload at once), inner aggregation by (rag × owner × agent × title)
+  // collapsed across rooftops. Sorted: owners by total ARR desc, rows by
+  // ARR desc inside each owner. Only not-Green accounts and not-Done tasks.
+  const section2: Section2OwnerGroup[] = useMemo(() => {
     const accByKey = new Map(accounts.map(a => [a.key, a]));
-    const out: Section2Agent[] = [];
-    for (const agent of agents) {
-      // Group key = `${rag}::${team}::${title}`
-      const groups = new Map<string, Section2Row>();
-      let subtotalArr = 0;
-      for (const [accountKey, s] of Object.entries(state)) {
-        const account = accByKey.get(accountKey);
-        if (!account) continue;
-        if (account.agentType !== agent) continue;
-        if (account.rag === "green") continue;
-        for (const task of s.tasks ?? []) {
-          if (task.status === "Done") continue;
-          // Group by (rag × owner × title) so each row points at a single
-          // person who's accountable. If the same task title has two owners
-          // across rooftops, that's two rows — by design, since accountability
-          // is per-person not per-team.
-          const ownerKey = (task.taskDri ?? "").trim().toLowerCase();
-          const key = `${account.rag}::${ownerKey}::${task.title.trim()}`;
-          const prev = groups.get(key);
-          const arr = account.arr ?? 0;
-          if (!prev) {
-            const taskDri = (task.taskDri ?? "").trim();
-            groups.set(key, {
-              rag: account.rag,
-              taskDri,
-              ownerLabel: taskDri ? (displayNameFromEmail(taskDri) || taskDri) : "",
-              team: task.function,
-              title: task.title || "(untitled)",
-              earliestEta: task.dueDate,
-              rooftopCount: 1,
-              arrSum: arr,
-            });
-          } else {
-            prev.rooftopCount += 1;
-            prev.arrSum += arr;
-            if (task.dueDate && (!prev.earliestEta || task.dueDate < prev.earliestEta)) prev.earliestEta = task.dueDate;
-          }
-          subtotalArr += arr;
+    // Pass 1: build flat aggregated rows.
+    const groups = new Map<string, Section2Row>();
+    for (const [accountKey, s] of Object.entries(state)) {
+      const account = accByKey.get(accountKey);
+      if (!account) continue;
+      if (account.rag === "green") continue;
+      for (const task of s.tasks ?? []) {
+        if (task.status === "Done") continue;
+        const ownerKey = (task.taskDri ?? "").trim().toLowerCase();
+        const key = `${account.rag}::${ownerKey}::${account.agentType}::${task.title.trim()}`;
+        const prev = groups.get(key);
+        const arr = account.arr ?? 0;
+        if (!prev) {
+          const taskDri = (task.taskDri ?? "").trim();
+          groups.set(key, {
+            rag: account.rag,
+            agent: account.agentType,
+            taskDri,
+            ownerLabel: taskDri ? (displayNameFromEmail(taskDri) || taskDri) : "",
+            team: task.function,
+            title: task.title || "(untitled)",
+            earliestEta: task.dueDate,
+            rooftopCount: 1,
+            arrSum: arr,
+          });
+        } else {
+          prev.rooftopCount += 1;
+          prev.arrSum += arr;
+          if (task.dueDate && (!prev.earliestEta || task.dueDate < prev.earliestEta)) prev.earliestEta = task.dueDate;
         }
       }
-      const ragRank: Record<RagStatus, number> = { red: 3, amber: 2, green: 1 };
-      const rows = Array.from(groups.values()).sort((a, b) => {
-        const r = ragRank[b.rag] - ragRank[a.rag]; if (r) return r;
-        return b.arrSum - a.arrSum;
-      });
-      out.push({ agent, rows, subtotalArr });
     }
-    return out;
+    // Pass 2: bucket rows into owner groups.
+    const byOwner = new Map<string, Section2OwnerGroup>();
+    for (const row of groups.values()) {
+      const ownerKey = row.taskDri.toLowerCase();
+      let g = byOwner.get(ownerKey);
+      if (!g) {
+        g = {
+          taskDri: ownerKey,
+          ownerLabel: row.ownerLabel || "(no owner)",
+          rows: [],
+          subtotalArr: 0,
+          teams: [],
+        };
+        byOwner.set(ownerKey, g);
+      }
+      g.rows.push(row);
+      g.subtotalArr += row.arrSum;
+      if (!g.teams.includes(row.team)) g.teams.push(row.team);
+    }
+    // Sort rows within each owner by ARR desc; sort owners by total ARR desc.
+    // Unassigned bucket pinned to the bottom regardless (so the call-to-action
+    // doesn't dominate the visual top of the section).
+    for (const g of byOwner.values()) g.rows.sort((a, b) => b.arrSum - a.arrSum);
+    return Array.from(byOwner.values()).sort((a, b) => {
+      if (!a.taskDri && b.taskDri) return 1;
+      if (a.taskDri && !b.taskDri) return -1;
+      return b.subtotalArr - a.subtotalArr;
+    });
   }, [accounts, state]);
 
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
@@ -2079,6 +2096,7 @@ function EmailReportView({ accounts, state, overall }: {
 
       <table style={{ ...Sx.reportTable, width: "auto", margin: "0 auto" }}>
         <colgroup>
+          <col style={{ width: 88 }} />   {/* Section */}
           <col style={{ width: 64 }} />   {/* RAG */}
           <col style={{ width: 60 }} />   {/* Agents */}
           <col style={{ width: 44 }} />   {/* % */}
@@ -2087,6 +2105,7 @@ function EmailReportView({ accounts, state, overall }: {
         </colgroup>
         <thead>
           <tr>
+            <Th2>Section</Th2>
             <Th2>RAG</Th2>
             <Th2 right>Agents</Th2>
             <Th2 right>%</Th2>
@@ -2115,56 +2134,57 @@ function EmailReportView({ accounts, state, overall }: {
 
       {/* ─── Section 2: Tasks by agent ────────────────────────────────── */}
       <div style={{ marginTop: 28 }}>
-        <ReportSectionTitle index={2}>Tasks by agent · path to green</ReportSectionTitle>
+        <ReportSectionTitle index={2}>Tasks by owner · path to green</ReportSectionTitle>
       </div>
 
       <table style={Sx.reportTable}>
         <colgroup>
           <col style={{ width: 50 }} />   {/* RAG */}
-          <col style={{ width: 104 }} />  {/* Owner (Team as subtitle) */}
+          <col style={{ width: 84 }} />   {/* Agent */}
           <col />                          {/* Next Step + ETA stacked */}
           <col style={{ width: 72 }} />   {/* Rooftop + ARR stacked */}
         </colgroup>
         <thead>
           <tr>
             <Th2>RAG</Th2>
-            <Th2>Owner</Th2>
+            <Th2>Agent</Th2>
             <Th2>Next Step</Th2>
             <Th2 right>Rooftop / ARR</Th2>
           </tr>
         </thead>
         <tbody>
-          {section2.map(({ agent, rows, subtotalArr }) => (
-            <Fragment key={agent}>
-              <tr>
-                <td colSpan={3} style={Sx.agentBandLabel}>{AGENT_LABELS[agent]}</td>
-                <td style={{ ...Sx.agentBandLabel, textAlign: "right" }}>{fmtMoney(subtotalArr)}</td>
-              </tr>
-              {rows.length === 0 ? (
-                <tr><td colSpan={4} style={{ padding: "6px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No open tasks.</td></tr>
-              ) : rows.map((r, i) => (
-                <tr key={`${agent}-${i}`}>
-                  <td style={{ ...Sx.reportCellTight, verticalAlign: "top", background: RAG_COLORS[r.rag].bg, color: RAG_COLORS[r.rag].fg, fontWeight: 700, textAlign: "center" }}>
-                    {r.rag === "red" ? "Red" : r.rag === "amber" ? "Amber" : "Green"}
+          {section2.map(({ ownerLabel, taskDri, rows, subtotalArr, teams }) => {
+            const teamLabel = teams.length === 0 ? "" : teams.length === 1 ? teams[0] : "Multiple teams";
+            return (
+              <Fragment key={taskDri || "(no owner)"}>
+                <tr>
+                  <td colSpan={3} style={Sx.agentBandLabel}>
+                    <span style={{ color: taskDri ? "#111827" : "#dc2626" }}>{taskDri ? ownerLabel : "(no owner)"}</span>
+                    {teamLabel && <span style={{ fontWeight: 400, color: "#6b7280", fontSize: 11, marginLeft: 8 }}>{teamLabel}</span>}
                   </td>
-                  <td style={{ ...Sx.reportCellTight, verticalAlign: "top" }}>
-                    {r.ownerLabel
-                      ? <div style={{ fontWeight: 600, color: "#111827" }}>{r.ownerLabel}</div>
-                      : <div style={{ fontWeight: 600, color: "#dc2626" }}>no owner</div>}
-                    <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{r.team}</div>
-                  </td>
-                  <td style={{ ...Sx.reportCellTight, verticalAlign: "top", whiteSpace: "normal", lineHeight: 1.3 }}>
-                    {r.title}
-                    {r.earliestEta && <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>ETA · {fmtEtaShort(r.earliestEta)}</div>}
-                  </td>
-                  <td style={{ ...Sx.reportCellTight, verticalAlign: "top", textAlign: "right" }}>
-                    <div style={{ fontWeight: 700, color: "#111827" }}>{r.rooftopCount}</div>
-                    <div style={{ fontSize: 10, color: "#374151", marginTop: 2 }}>{fmtMoney(r.arrSum)}</div>
-                  </td>
+                  <td style={{ ...Sx.agentBandLabel, textAlign: "right" }}>{fmtMoney(subtotalArr)}</td>
                 </tr>
-              ))}
-            </Fragment>
-          ))}
+                {rows.length === 0 ? (
+                  <tr><td colSpan={4} style={{ padding: "6px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No open tasks.</td></tr>
+                ) : rows.map((r, i) => (
+                  <tr key={`${taskDri}-${i}`}>
+                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top", background: RAG_COLORS[r.rag].bg, color: RAG_COLORS[r.rag].fg, fontWeight: 700, textAlign: "center" }}>
+                      {r.rag === "red" ? "Red" : r.rag === "amber" ? "Amber" : "Green"}
+                    </td>
+                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top" }}>{AGENT_LABELS[r.agent]}</td>
+                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top", whiteSpace: "normal", lineHeight: 1.3 }}>
+                      {r.title}
+                      {r.earliestEta && <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>ETA · {fmtEtaShort(r.earliestEta)}</div>}
+                    </td>
+                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top", textAlign: "right" }}>
+                      <div style={{ fontWeight: 700, color: "#111827" }}>{r.rooftopCount}</div>
+                      <div style={{ fontSize: 10, color: "#374151", marginTop: 2 }}>{fmtMoney(r.arrSum)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
 
@@ -2183,15 +2203,19 @@ function RagSplitBand({ label, totalLabel, totalCount, totalArr, red, amber, gre
   red: OverallBucket; amber: OverallBucket; green: OverallBucket;
 }) {
   const fmtPct = (n: number) => `${n.toFixed(0)}%`;
+  const rags: RagStatus[] = ["red","amber","green"];
+  const sectionCell: CSSProperties = {
+    padding: "8px 10px", fontWeight: 700, color: "#111827", fontSize: 11,
+    background: "#f9fafb", borderTop: "1px solid #e5e7eb", borderRight: "1px solid #e5e7eb",
+    verticalAlign: "top",
+  };
   return (
     <Fragment>
-      <tr>
-        <td colSpan={5} style={Sx.agentBandLabel}>{label}</td>
-      </tr>
-      {(["red","amber","green"] as RagStatus[]).map(rag => {
+      {rags.map((rag, i) => {
         const b = rag === "red" ? red : rag === "amber" ? amber : green;
         return (
           <tr key={rag}>
+            {i === 0 && <td rowSpan={4} style={sectionCell}>{label}</td>}
             <td style={{ ...Sx.reportCellTight, background: RAG_COLORS[rag].bg, color: RAG_COLORS[rag].fg, fontWeight: 700 }}>
               {rag === "red" ? "Red" : rag === "amber" ? "Amber" : "Green"}
             </td>

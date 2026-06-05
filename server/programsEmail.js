@@ -47,32 +47,39 @@ function ragLabelCell(rag) {
   return `<td style="${cellTd}background:${c.bg};color:${c.fg};font-weight:700;text-align:center;">${label}</td>`;
 }
 
-// ─── Section 1 — RAG split (one banded table) ──────────────────────────────
+// ─── Section 1 — RAG split (Section in a left column, rowspan per band) ────
 function renderRagSplit(overall, perAgent) {
-  const band = (label, cnt, arr, red, amber, green, totalLabel) => `
-    <tr><td colspan="5" style="${bandTd}">${escapeHtml(label)}</td></tr>
-    ${["red","amber","green"].map(r => {
+  // sectionLabel spans 4 rows: red / amber / green / total. The label cell
+  // uses rowspan=4 so it's only emitted on the first row of the band.
+  const sectionCellStyle = "padding:8px 10px;font-weight:700;color:#111827;font-size:11px;font-family:Arial,Helvetica,sans-serif;background:#f9fafb;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;vertical-align:top;";
+  const band = (label, cnt, arr, red, amber, green, totalLabel) => {
+    const rags = ["red","amber","green"];
+    const rows = rags.map((r, i) => {
       const b = r === "red" ? red : r === "amber" ? amber : green;
+      const sectionTd = i === 0 ? `<td rowspan="4" style="${sectionCellStyle}">${escapeHtml(label)}</td>` : "";
       return `<tr>
+        ${sectionTd}
         ${ragLabelCell(r)}
         <td style="${cellTd}text-align:right;">${b.count}</td>
         <td style="${cellTd}text-align:right;">${fmtPct(b.pctCount)}</td>
         <td style="${cellTd}text-align:right;">${fmtMoney(b.arr)}</td>
         <td style="${cellTd}text-align:right;">${fmtPct(b.pctArr)}</td>
       </tr>`;
-    }).join("")}
-    <tr>
+    }).join("");
+    const totalRow = `<tr>
       <td style="${totalTd}">${escapeHtml(totalLabel)}</td>
       <td style="${totalTd}text-align:right;">${cnt}</td>
       <td style="${totalTd}text-align:right;">${cnt > 0 ? "100%" : "—"}</td>
       <td style="${totalTd}text-align:right;">${fmtMoney(arr)}</td>
       <td style="${totalTd}text-align:right;">${arr > 0 ? "100%" : "—"}</td>
-    </tr>
-  `;
+    </tr>`;
+    return rows + totalRow;
+  };
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;margin:0 auto;">
       <thead>
         <tr>
+          <th style="${headTh}width:88px;border-right:1px solid #cbd5e1;">Section</th>
           <th style="${headTh}width:64px;">RAG</th>
           <th style="${headTh}width:60px;text-align:right;">Agents</th>
           <th style="${headTh}width:44px;text-align:right;">%</th>
@@ -90,32 +97,31 @@ function renderRagSplit(overall, perAgent) {
   `;
 }
 
-// ─── Section 2 — Tasks by agent ─────────────────────────────────────────────
-// Columns: RAG · Owner (with Team subtitle) · Next Step · Rooftop/ARR. Owner
-// is the primary accountability axis — same task title with different owners
-// shows as separate rows so each person owns their own slice.
-function renderTasksByAgent(section2) {
-  const rowsHtml = section2.map(({ agent, rows, subtotalArr }) => {
+// ─── Section 2 — Tasks grouped by owner ─────────────────────────────────────
+// Each owner gets a banded section header showing their name + team(s) +
+// combined ARR. Rows inside list their tasks sorted by ARR desc. Columns:
+// RAG · Agent · Next Step · Rooftop/ARR. Unassigned tasks bucket at the end
+// in a red "(no owner)" band — a deliberate prompt to fix accountability.
+function renderTasksByOwner(section2) {
+  const rowsHtml = section2.map(({ ownerLabel, rows, subtotalArr, teams, taskDri }) => {
+    const teamLabel = teams.length === 0 ? "" : teams.length === 1 ? teams[0] : "Multiple teams";
+    const labelHtml = taskDri
+      ? `<span style="color:#111827;">${escapeHtml(ownerLabel)}</span>`
+      : `<span style="color:#dc2626;">(no owner)</span>`;
     const bandRow = `
       <tr>
-        <td colspan="3" style="${bandTd}">${escapeHtml(AGENT_LABELS[agent] ?? agent)}</td>
+        <td colspan="3" style="${bandTd}">
+          ${labelHtml}
+          ${teamLabel ? `<span style="font-weight:400;color:#6b7280;font-size:11px;margin-left:8px;">${escapeHtml(teamLabel)}</span>` : ""}
+        </td>
         <td style="${bandTd}text-align:right;">${fmtMoney(subtotalArr)}</td>
       </tr>
     `;
-    if (!rows || rows.length === 0) {
-      return bandRow + `<tr><td colspan="4" style="${cellTd}color:#9ca3af;text-align:center;">No open tasks.</td></tr>`;
-    }
-    const rowHtml = rows.map(r => {
-      const ownerHtml = r.ownerLabel
-        ? `<div style="font-weight:600;color:#111827;font-family:Arial,Helvetica,sans-serif;">${escapeHtml(r.ownerLabel)}</div>`
-        : `<div style="font-weight:600;color:#dc2626;font-family:Arial,Helvetica,sans-serif;">no owner</div>`;
-      return `
+    if (!rows || rows.length === 0) return bandRow;
+    const rowHtml = rows.map(r => `
       <tr>
         ${ragLabelCell(r.rag)}
-        <td style="${cellTd}vertical-align:top;">
-          ${ownerHtml}
-          <div style="font-size:10px;color:#6b7280;margin-top:2px;font-family:Arial,Helvetica,sans-serif;">${escapeHtml(r.team)}</div>
-        </td>
+        <td style="${cellTd}vertical-align:top;">${escapeHtml(AGENT_LABELS[r.agent] ?? r.agent)}</td>
         <td style="${cellTd}vertical-align:top;white-space:normal;line-height:1.3;">
           ${escapeHtml(r.title)}
           ${r.earliestEta ? `<div style="font-size:10px;color:#6b7280;margin-top:2px;font-family:Arial,Helvetica,sans-serif;">ETA · ${escapeHtml(fmtEtaShort(r.earliestEta))}</div>` : ""}
@@ -125,8 +131,7 @@ function renderTasksByAgent(section2) {
           <div style="font-size:10px;color:#374151;margin-top:2px;font-family:Arial,Helvetica,sans-serif;">${fmtMoney(r.arrSum)}</div>
         </td>
       </tr>
-    `;
-    }).join("");
+    `).join("");
     return bandRow + rowHtml;
   }).join("");
 
@@ -135,7 +140,7 @@ function renderTasksByAgent(section2) {
       <thead>
         <tr>
           <th style="${headTh}width:50px;">RAG</th>
-          <th style="${headTh}width:104px;">Owner</th>
+          <th style="${headTh}width:84px;">Agent</th>
           <th style="${headTh}">Next Step</th>
           <th style="${headTh}width:72px;text-align:right;">Rooftop / ARR</th>
         </tr>
@@ -174,9 +179,9 @@ export function renderProgramsEmailHtml({ overall, perAgent, section2, dateText,
 
                 <div style="margin-top:24px;display:flex;align-items:center;">
                   <span style="display:inline-block;width:20px;height:20px;background:#111827;color:#ffffff;border-radius:4px;text-align:center;font-size:11px;font-weight:700;line-height:20px;font-family:Arial,Helvetica,sans-serif;">2</span>
-                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">Tasks by agent · path to green</span>
+                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">Tasks by owner · path to green</span>
                 </div>
-                <div style="margin-top:10px;">${renderTasksByAgent(section2)}</div>
+                <div style="margin-top:10px;">${renderTasksByOwner(section2)}</div>
 
                 <div style="margin-top:18px;font-size:11px;color:#9ca3af;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
                   Section 2 collapses identical (task × team) across rooftops into one row per agent group. Rooftop count = distinct rooftops sharing the same ask; ARR = combined exposure. ETA shows the earliest date if any rooftop has one set.
