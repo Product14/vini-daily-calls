@@ -1112,18 +1112,24 @@ function AgentsDashboard() {
             roll-up. Date filter applies to every card, chart and the per-day breakdown.
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 4 }}>
-          {fetchedAt && !loading && (
-            <span style={{ fontSize: 12, color: "#16a34a" }}>
-              ● {(dailyRows.length + totalsRows.length).toLocaleString()} rows ({totalsRows.length.toLocaleString()} totals · {dailyRows.length.toLocaleString()} daily) · fetched {new Date(fetchedAt).toLocaleTimeString()}
-            </span>
-          )}
-          {loading && <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching…</span>}
-          <button onClick={() => load(true)} disabled={loading}
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: loading ? "#f3f4f6" : "#fff", fontSize: 12, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", color: loading ? "#9ca3af" : "#374151" }}>
-            <span className={loading ? "agent-refreshing" : undefined} style={{ display: "inline-block" }}>↻</span>
-            Refresh
-          </button>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, paddingTop: 4 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {fetchedAt && !loading && (
+              <span style={{ fontSize: 12, color: "#16a34a" }}>
+                ● {(dailyRows.length + totalsRows.length).toLocaleString()} rows ({totalsRows.length.toLocaleString()} totals · {dailyRows.length.toLocaleString()} daily) · fetched {new Date(fetchedAt).toLocaleTimeString()}
+              </span>
+            )}
+            {loading && <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching…</span>}
+            <button onClick={() => load(true)} disabled={loading}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: loading ? "#f3f4f6" : "#fff", fontSize: 12, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", color: loading ? "#9ca3af" : "#374151" }}>
+              <span className={loading ? "agent-refreshing" : undefined} style={{ display: "inline-block" }}>↻</span>
+              Refresh
+            </button>
+          </div>
+          <a href="/programs"
+             style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #111827", background: "#111827", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
+            CS Report →
+          </a>
         </div>
       </div>
 
