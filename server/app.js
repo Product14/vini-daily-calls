@@ -2,11 +2,13 @@ import express from "express";
 import cors from "cors";
 import dns from "node:dns";
 import https from "node:https";
+import { createClient as createSbClient } from "@supabase/supabase-js";
 import { query, getClient } from "./db.js";
 import { buildEmailHtml } from "./emailTemplate.js";
 import { sendReport }     from "./emailClient.js";
 import { getAllDeploymentStatuses, upsertDeploymentStatus } from "./viniStatuses.js";
 import { mapMetabaseRows } from "./viniRooftopMap.js";
+import { sendProgramsReportEmail } from "./programsEmail.js";
 
 // Some local resolvers (mac dev boxes, restrictive networks) break dns.lookup() while
 // dns.resolve4() still works. Node's global fetch uses dns.lookup. Wrap https.request
@@ -1690,6 +1692,25 @@ function parseMoney(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Parse the master tab's "Go-Live Date" column. Sheet uses "D-MMM-YY"
+// (e.g. "4-Aug-25" → "2025-08-04"). Returns an ISO date string or null.
+const GO_LIVE_MONTHS = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+function parseGoLiveDate(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s || s.startsWith("✏")) return null;
+  const m = s.match(/^(\d{1,2})[-\s\/]([A-Za-z]{3,9})[-\s\/](\d{2,4})$/);
+  if (!m) return null;
+  const day = Number(m[1]);
+  const mon = GO_LIVE_MONTHS[m[2].slice(0,3).toLowerCase()];
+  let yr = Number(m[3]);
+  if (mon == null || !Number.isFinite(day) || !Number.isFinite(yr)) return null;
+  if (yr < 100) yr += 2000;
+  const d = new Date(Date.UTC(yr, mon, day));
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
 // Collapse every funnel-sheet stage label to exactly one of the three buckets
 // the dashboard exposes — Live / Churned / In OB — or null for rows we don't
 // track (e.g. "OB Drop", "Sales Drop": rooftops lost before go-live).
@@ -1732,6 +1753,8 @@ function extractAccountRows(csv) {
     agentMrr:       pick("agent mrr", "mrr"),
     collectedMrr:   pick("collected mrr"),
     agentCarr:      pick("agent carr", "arr", "$arr"),
+    goLiveDate:     pick("go-live date", "go live date", "live date"),
+    csmEmail:       pick("csm name", "csm email", "csm"),
   };
   // Rooftop Name is the only strictly required column.
   if (COL.rooftopName == null) return { rows: [], droppedAggregate: 0, droppedStage: 0 };
@@ -1769,6 +1792,15 @@ function extractAccountRows(csv) {
       agentMrr,
       collectedMrr:   COL.collectedMrr != null ? parseMoney(row[COL.collectedMrr]) : null,
       agentCarr,
+      goLiveDate:     COL.goLiveDate != null ? parseGoLiveDate(row[COL.goLiveDate]) : null,
+      csmEmail:       (() => {
+        if (COL.csmEmail == null) return null;
+        const raw = (row[COL.csmEmail] ?? "").trim();
+        if (!raw || raw.startsWith("✏")) return null;
+        // Only accept values that look like an email — the column header
+        // is "CSM Name" but the data is emails; some rows may be free-text.
+        return /@/.test(raw) ? raw.toLowerCase() : null;
+      })(),
     };
     // Skip rows that don't identify an agent — agent_type drives the dashboard's
     // per-tab join, so "TBC"-only / blank-agent rows are not addressable.
@@ -2073,6 +2105,86 @@ app.get("/api/vini/rooftops", async (_req, res) => {
   } catch (err) {
     console.error("GET /api/vini/rooftops error:", err?.message);
     return res.status(500).json({ error: err?.message ?? "Failed to load" });
+  }
+});
+
+// ─── POST /api/programs/send-report — Email the Daily Snapshot ─────────────
+// Client computes the report data (the same aggregates that drive the on-screen
+// Email Report tab) and POSTs it here. Server fetches active recipients from
+// Supabase, renders an inline-styled HTML email, and sends via the Spyne
+// mail proxy.
+app.post("/api/programs/send-report", async (req, res) => {
+  try {
+    const { payload, subject, dashboardUrl, recipientsOverride } = req.body ?? {};
+    if (!payload || !Array.isArray(payload.perAgent) || !Array.isArray(payload.section2)) {
+      return res.status(400).json({ error: "payload missing or malformed" });
+    }
+
+    // Debug: payload structure summary. If tables come up blank in the
+    // email, this is the first thing to check — confirms whether the
+    // client actually serialised the aggregates.
+    console.log("[send-report] payload received:", {
+      overallTotalCount: payload.overall?.totalCount,
+      overallTotalArr:   payload.overall?.totalArr,
+      overallRed:        payload.overall?.red,
+      overallAmber:      payload.overall?.amber,
+      overallGreen:      payload.overall?.green,
+      perAgentCount:     payload.perAgent.length,
+      perAgent0:         payload.perAgent[0],
+      section2Count:     payload.section2.length,
+      section2RowCounts: payload.section2.map(s => ({ agent: s.agent, rows: s.rows?.length ?? 0 })),
+      section2FirstRow:  payload.section2.find(s => s.rows?.length)?.rows?.[0],
+    });
+
+    // Preview mode — render the HTML and return it instead of sending.
+    // Done before the recipient gate so it works without any configured.
+    if (req.query?.preview === "1") {
+      const { renderProgramsEmailHtml } = await import("./programsEmail.js");
+      const dateText = new Date().toLocaleDateString("en-GB", {
+        weekday: "long", day: "numeric", month: "short", year: "numeric"
+      });
+      const html = renderProgramsEmailHtml({ ...payload, dateText, dashboardUrl });
+      res.set("Content-Type", "text/html");
+      return res.send(html);
+    }
+
+    // Resolve recipients — either an explicit override from the client (testing
+    // a single send) or all active rows in programs_email_recipients.
+    let recipients = [];
+    if (Array.isArray(recipientsOverride) && recipientsOverride.length > 0) {
+      recipients = recipientsOverride.map(s => String(s).trim()).filter(Boolean);
+    } else {
+      const sbUrl = process.env.VITE_PROGRAMS_SUPABASE_URL;
+      const sbKey = process.env.VITE_PROGRAMS_SUPABASE_KEY;
+      if (!sbUrl || !sbKey) {
+        return res.status(500).json({ error: "Supabase env not configured on server" });
+      }
+      const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+      const { data, error } = await sb
+        .from("programs_email_recipients")
+        .select("email")
+        .eq("active", true);
+      if (error) {
+        return res.status(500).json({ error: `recipients fetch failed: ${error.message}` });
+      }
+      recipients = (data ?? []).map(r => r.email).filter(Boolean);
+    }
+    if (recipients.length === 0) {
+      return res.status(400).json({ error: "No active recipients configured" });
+    }
+
+    const result = await sendProgramsReportEmail({
+      payload, recipients, subject, dashboardUrl,
+    });
+    return res.json({
+      sent: recipients.length,
+      recipients,
+      providerStatus: result?.status ?? null,
+      providerResponse: result?.response ?? null,
+    });
+  } catch (err) {
+    console.error("POST /api/programs/send-report error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "Send failed" });
   }
 });
 

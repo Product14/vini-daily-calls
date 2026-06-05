@@ -4,6 +4,7 @@ import "./index.css";
 import Dashboard from "../inventory-dashboard.tsx";
 import AgentsDashboard from "./agents/AgentsDashboard.tsx";
 import DreamDashboard from "./dream/DreamDashboard.tsx";
+import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
 
 function Router() {
   const [path, setPath] = useState(() => window.location.pathname);
@@ -14,6 +15,9 @@ function Router() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  if (path === "/programs" || path.startsWith("/programs/")) {
+    return <ProgramsDashboard />;
+  }
   if (path === "/agents" || path.startsWith("/agents/")) {
     return <AgentsDashboard />;
   }
