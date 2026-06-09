@@ -2188,4 +2188,59 @@ app.post("/api/programs/send-report", async (req, res) => {
   }
 });
 
+// ─── ROI Email Tracker · real "send now" ────────────────────────────────────
+// Forwards the rendered digest HTML to the mail proxy AND marks the run sent in
+// the ROI Supabase (status=sent, recipients received, rendered_html stored) so
+// the tracker shows it as sent and the exact HTML is viewable.
+// Body: { teamId, department, localDate, to:[emails], subject, html }
+app.post("/api/email/roi-send-now", async (req, res) => {
+  try {
+    const { teamId, department, localDate, to, subject, html } = req.body ?? {};
+    const recipients = (Array.isArray(to) ? to : [to]).map((s) => String(s || "").trim()).filter(Boolean);
+    if (!teamId || !department || !localDate) return res.status(400).json({ error: "teamId, department, localDate required" });
+    if (!recipients.length) return res.status(400).json({ error: "no recipients" });
+    if (!html) return res.status(400).json({ error: "no html" });
+
+    // 1) send via the internal mail proxy (same contract as the Daily Snapshot)
+    const mailUrl = process.env.EMAIL_PROXY_URL || process.env.INTERNAL_EMAIL_API_URL;
+    if (!mailUrl) return res.status(500).json({ error: "EMAIL_PROXY_URL not set on server" });
+    const template = process.env.EMAIL_PROXY_TEMPLATE || "email-control-tower-report";
+    const mailRes = await fetch(mailUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.EMAIL_PROXY_COOKIE ? { Cookie: process.env.EMAIL_PROXY_COOKIE } : {}),
+      },
+      body: JSON.stringify({ to: recipients.join(","), subject: subject || "Daily Digest", template, templateData: { HTMLdata: html } }),
+    });
+    if (!mailRes.ok) {
+      const t = await mailRes.text().catch(() => "");
+      return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` });
+    }
+    const mj = await mailRes.json().catch(() => ({}));
+    const messageId = mj.messageId ?? mj.id ?? null;
+
+    // 2) mark the run sent in ROI Supabase (service key — bypasses RLS)
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    let dbUpdated = false;
+    if (sbUrl && sbKey) {
+      const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+      const { error } = await sb.from("roi_digest_runs").update({
+        status: "sent", reason: null, sent_at: new Date().toISOString(), send_path: "raw_html",
+        rendered_html: html, message_id: messageId,
+        recipients: recipients.map((email) => ({ email, received: true })),
+      }).eq("team_id", teamId).eq("department", department).eq("cadence", "daily").eq("local_date", localDate);
+      dbUpdated = !error;
+      if (error) console.error("[roi-send-now] supabase update failed:", error.message);
+    } else {
+      console.warn("[roi-send-now] ROI_SUPABASE_SERVICE_KEY not set — email sent but run not marked");
+    }
+    return res.json({ ok: true, messageId, dbUpdated, to: recipients });
+  } catch (err) {
+    console.error("POST /api/email/roi-send-now error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "send failed" });
+  }
+});
+
 export default app;

@@ -8,8 +8,9 @@ import {
   type RooftopRow,
   type SendCell,
 } from "./mockData";
-import { isPipelineConfigured, runDryPipeline, sendViaServer } from "./pipeline";
+import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
+import { sendDigestNow } from "./sendDigest";
 
 /**
  * Cell-action drawer.
@@ -198,8 +199,11 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                   <FixDataForm
                     rooftop={rooftop}
                     reason={reason}
-                    onSend={() => {
-                      onSend(rooftop.rooftop_id, cell.date, cell.cadence);
+                    dept={dept}
+                    metrics={metrics}
+                    localDate={cell.date}
+                    onSent={() => {
+                      onReload?.();
                       onClose();
                     }}
                   />
@@ -448,15 +452,24 @@ function ReasonFieldStatus({ rooftop, reason }: { rooftop: RooftopRow; reason: N
 function FixDataForm({
   rooftop,
   reason,
-  onSend,
+  dept,
+  metrics,
+  localDate,
+  onSent,
 }: {
   rooftop: RooftopRow;
   reason: NotSentReason;
-  onSend: () => void;
+  dept?: DeptKind;
+  metrics?: DigestMetrics;
+  localDate: string;
+  onSent: () => void;
 }) {
   const existing = rooftop.departments.flatMap((d) => d.recipients).find((r) => r.email && r.email !== "m");
-  const [tag, setTag] = useState<DeptKind | "">(rooftop.departments[0]?.kind ?? "");
+  const [tag, setTag] = useState<DeptKind | "">(dept ?? rooftop.departments[0]?.kind ?? "");
   const [recipientsInput, setRecipientsInput] = useState(existing?.email ?? "");
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const inFlight = useRef(false);
 
   const showTag = reason === "tag_missing";
   const showRecipients =
@@ -470,6 +483,26 @@ function FixDataForm({
   })();
   const tagValid = showTag ? !!tag : true;
   const canSend = recipientsValid && tagValid;
+
+  const doSend = async () => {
+    if (inFlight.current || !canSend) return;
+    inFlight.current = true;
+    setState("sending"); setMsg("");
+    const recips = recipientsInput.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+    const r = await sendDigestNow({
+      teamId: rooftop.team_id,
+      enterpriseId: rooftop.enterprise_id,
+      dept: (tag || dept) as DeptKind | undefined,
+      rooftopName: rooftop.name,
+      timezone: rooftop.timezone,
+      localDate,
+      metrics,
+      recipients: recips,
+    });
+    if (r.ok) { setState("sent"); setMsg(r.error || "Sent ✓"); setTimeout(onSent, 1200); }
+    else { setState("error"); setMsg(r.error || "Send failed"); }
+    inFlight.current = false;
+  };
 
   return (
     <div className="space-y-3">
@@ -523,16 +556,22 @@ function FixDataForm({
       <div className="flex items-center justify-between gap-2 border-t border-border-subtle pt-3">
         <button
           type="button"
-          onClick={onSend}
-          disabled={!canSend}
+          onClick={doSend}
+          disabled={!canSend || state === "sending" || state === "sent"}
           className={`rounded-md px-3 py-2 text-[12px] font-semibold ${
-            canSend ? "bg-brand-primary text-white hover:bg-brand-primary-hover" : "cursor-not-allowed bg-surface-subtle text-text-muted"
+            state === "sent"
+              ? "bg-positive/10 text-positive"
+              : state === "error"
+              ? "bg-negative-soft text-negative"
+              : canSend
+              ? "bg-brand-primary text-white hover:bg-brand-primary-hover"
+              : "cursor-not-allowed bg-surface-subtle text-text-muted"
           }`}
         >
-          {retryOnly ? "Retry & send now" : "Save & send now"}
+          {state === "sending" ? "Sending…" : state === "sent" ? "✓ Sent" : state === "error" ? "Retry send" : retryOnly ? "Retry & send now" : "Save & send now"}
         </button>
         <span className="text-[10px] text-text-muted">
-          {retryOnly ? "Re-runs the send job" : "Saves data + dispatches"}
+          {msg || (retryOnly ? "Re-runs the send job" : "Sends a real email + records it")}
         </span>
       </div>
     </div>
@@ -719,23 +758,23 @@ function SendNowLiveSection({
     if (!metrics) { setState("error"); setMsg("No metrics for this rooftop yet — resync first."); return; }
     inFlight.current = true;
     setState("sending"); setMsg("");
-    const r = await sendViaServer({
+    const r = await sendDigestNow({
       teamId: rooftop.team_id,
       enterpriseId: rooftop.enterprise_id,
-      dept: dept as "sales" | "service" | undefined,
+      dept,
       rooftopName: rooftop.name,
       timezone: rooftop.timezone,
-      reportDate,
-      metrics: metrics as unknown as Record<string, unknown>,
+      localDate: reportDate || "",
+      metrics,
       recipients: emails,
     });
     if (r.ok) {
       setState("sent");
-      setMsg(`Sent ✓ → ${(r.to ?? emails).join(", ")}`);
+      setMsg(r.error ? r.error : `Sent ✓ → ${emails.join(", ")}`);
       setTimeout(onSent, 1200);
     } else {
       setState("error");
-      setMsg(r.error ?? `Send failed (HTTP ${r.status ?? "?"})`);
+      setMsg(r.error ?? "Send failed");
     }
     inFlight.current = false; // release — a later deliberate click may resend
   };
