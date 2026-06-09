@@ -1126,10 +1126,16 @@ function AgentsDashboard() {
               Refresh
             </button>
           </div>
-          <a href="/programs"
-             style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #111827", background: "#111827", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
-            CS Report →
-          </a>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <a href="/email-tracker"
+               style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #4600F2", background: "#4600F2", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
+              ✉ Email tracker →
+            </a>
+            <a href="/programs"
+               style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #111827", background: "#111827", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
+              CS Report →
+            </a>
+          </div>
         </div>
       </div>
 
