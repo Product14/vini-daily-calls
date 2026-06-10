@@ -1,0 +1,14 @@
+{
+  "name": "roi-email-local-cron",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "scripts": {
+    "once": "node runner.cjs",
+    "loop": "node runner.cjs --loop"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.103.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
