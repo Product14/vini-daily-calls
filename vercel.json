@@ -13,6 +13,7 @@
   "crons": [
     { "path": "/api/scheduled-report", "schedule": "30 6 * * *"  },
     { "path": "/api/scheduled-report", "schedule": "30 12 * * *" },
-    { "path": "/api/scheduled-report", "schedule": "30 18 * * *" }
+    { "path": "/api/scheduled-report", "schedule": "30 18 * * *" },
+    { "path": "/api/cron/roi-email",   "schedule": "0 * * * *"   }
   ]
 }
