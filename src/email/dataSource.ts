@@ -49,7 +49,7 @@ type RunRow = {
   message_id: string | null;
   sent_at: string | null;
 };
-type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null };
+type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null };
 type RecipientRow = {
   team_id: string; email: string; name: string | null;
   receives_sales: boolean; receives_service: boolean; email_enabled: boolean;
@@ -121,7 +121,7 @@ export async function loadRooftops(): Promise<LoadResult> {
     supabase.from("roi_digest_runs")
       .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at")
       .order("local_date", { ascending: false }).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone"),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
@@ -203,7 +203,7 @@ export async function loadRooftops(): Promise<LoadResult> {
       department: dept,
       dryRun: live.dry_run !== false, // default true (dry-run on) when unset
       timezone: cfg?.timezone ?? undefined,
-      csm: "Unassigned",
+      csm: cfg?.csm_name?.trim() || "Unassigned",
       group: enterpriseId ? `Ent ${enterpriseId.slice(0, 6)}` : undefined,
       agents_live: agents,
       departments,
@@ -213,12 +213,14 @@ export async function loadRooftops(): Promise<LoadResult> {
       monthly: buildCells(deptRuns, "monthly"),
     };
   })
-  // Sent rooftops on top (any 'sent' daily cell), then by name, then department.
-  .sort((a, b) => {
-    const aSent = a.daily.some((c) => c.status === "sent") ? 0 : 1;
-    const bSent = b.daily.some((c) => c.status === "sent") ? 0 : 1;
-    return aSent - bSent || a.name.localeCompare(b.name) || (a.department ?? "").localeCompare(b.department ?? "");
-  });
+  // GROUP BY ROOFTOP — both departments of a rooftop sit together (sales above service),
+  // rooftops ordered alphabetically. (Replaces the previous "sent-first" split that scattered
+  // a rooftop's two department rows apart.)
+  .sort((a, b) =>
+    a.name.localeCompare(b.name) ||
+    (a.team_id ?? "").localeCompare(b.team_id ?? "") ||
+    (a.department ?? "").localeCompare(b.department ?? "")
+  );
 
   return { rooftops, source: "supabase", today, lastSynced: new Date() };
 }

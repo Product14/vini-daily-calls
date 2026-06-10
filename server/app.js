@@ -2209,6 +2209,7 @@ app.post("/api/email/roi-send-now", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}),
         ...(process.env.EMAIL_PROXY_COOKIE ? { Cookie: process.env.EMAIL_PROXY_COOKIE } : {}),
       },
       body: JSON.stringify({ to: recipients.join(","), subject: subject || "Daily Digest", template, templateData: { HTMLdata: html } }),

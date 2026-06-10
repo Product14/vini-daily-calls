@@ -339,6 +339,7 @@ export function EmailerTracker() {
           <thead className="sticky top-0 z-20">
             <tr>
               <Th sticky left={0} minW={200}>Rooftop</Th>
+              <Th minW={140}>CSM</Th>
               <Th minW={92}>Dept</Th>
               <Th minW={96}>Dry-run</Th>
               {Array.from({ length: colCount }).map((_, i) => (
@@ -349,21 +350,41 @@ export function EmailerTracker() {
           <tbody>
             {filtered.map((r, idx) => {
               const cells = cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly;
-              const rowBg = idx % 2 === 0 ? "bg-surface-card" : "bg-surface-background";
+              // group-by-rooftop: both department rows of a rooftop render as one visual block
+              const groupKey = (rr: RooftopRow) => rr.team_id ?? rr.name;
+              const firstOfGroup = idx === 0 || groupKey(filtered[idx - 1]) !== groupKey(r);
+              const lastOfGroup = idx === filtered.length - 1 || groupKey(filtered[idx + 1]) !== groupKey(r);
+              // shared zebra per rooftop group (not per row) so both dept rows match
+              let groupIdx = 0;
+              for (let k = 1; k <= idx; k++) if (groupKey(filtered[k - 1]) !== groupKey(filtered[k])) groupIdx++;
+              const rowBg = groupIdx % 2 === 0 ? "bg-surface-card" : "bg-surface-background";
+              const divider = lastOfGroup ? "border-b border-border-subtle" : "";
+              const groupTop = firstOfGroup && idx !== 0 ? "border-t-2 border-border-subtle" : "";
               return (
                 <tr key={r.rooftop_id}>
-                  <td className={`sticky left-0 z-10 border-b border-border-subtle ${rowBg} px-4 py-2`} style={{ minWidth: 200 }}>
-                    <div className="text-[13px] font-semibold text-text-primary">{r.name}</div>
-                    <div className="text-[10px] text-text-muted">{r.group ?? r.csm}</div>
+                  <td className={`sticky left-0 z-10 ${divider} ${groupTop} ${rowBg} px-4 py-2`} style={{ minWidth: 200 }}>
+                    {firstOfGroup ? (
+                      <>
+                        <div className="text-[13px] font-semibold text-text-primary">{r.name}</div>
+                        <div className="text-[10px] text-text-muted">{r.group ?? "—"}</div>
+                      </>
+                    ) : (
+                      <div className="pl-3 text-[11px] text-text-muted">↳ same rooftop</div>
+                    )}
                   </td>
-                  <td className="border-b border-border-subtle px-3 py-2">
+                  <td className={`${divider} ${groupTop} ${rowBg} px-3 py-2`} style={{ minWidth: 140 }}>
+                    {firstOfGroup ? (
+                      <span className="text-[12px] font-medium text-text-secondary">{r.csm}</span>
+                    ) : null}
+                  </td>
+                  <td className={`${divider} ${groupTop} px-3 py-2`}>
                     <DeptBadge dept={r.department} />
                   </td>
-                  <td className="border-b border-border-subtle px-3 py-2">
+                  <td className={`${divider} ${groupTop} px-3 py-2`}>
                     <DryRunToggle rooftop={r} />
                   </td>
                   {cells.slice(0, colCount).map((c) => (
-                    <td key={c.date} className="border-b border-border-subtle px-2 py-2" style={{ minWidth: 88 }}>
+                    <td key={c.date} className={`${divider} ${groupTop} px-2 py-2`} style={{ minWidth: 88 }}>
                       <SendStatusCell
                         cell={c}
                         sentNow={!!sentNow[cellKey(r, c)]}

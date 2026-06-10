@@ -53,6 +53,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
   const open = !!(rooftop && cell);
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
+  const [view, setView] = useState<"desktop" | "email">("email");
 
   useEffect(() => {
     if (open) {
@@ -112,13 +113,27 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
             </span>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="flex-shrink-0 rounded-md border border-border-subtle bg-surface-card px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle"
-        >
-          Close ✕
-        </button>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
+            {(["desktop", "email"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                className={`px-3 py-1.5 text-[11px] font-semibold capitalize ${view === v ? "bg-brand-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"}`}
+              >
+                {v === "desktop" ? "🖥 Desktop" : "✉ Email"}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border-subtle bg-surface-card px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle"
+          >
+            Close ✕
+          </button>
+        </div>
       </header>
 
       {/* Reason banner (non-sent) */}
@@ -147,24 +162,30 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                   : "Email sent · re-rendered from stored metrics"
                 : "Daily digest · preview (not sent)"}
             </div>
-            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={primary?.renderedHtml} />
+            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={primary?.renderedHtml} view={view} />
           </div>
 
           <aside className="space-y-4">
+            {/* ALWAYS show the recipient list + chooser + per-recipient (re)send — every status */}
+            <Section eyebrow="Recipients" title={isSent ? "Recipients · choose & retrigger" : "Recipients · choose & send"}>
+              <RecipientManager
+                rooftop={rooftop}
+                dept={dept}
+                metrics={metrics}
+                reportDate={cell.date}
+                sentRecipients={primary?.recipients}
+                isSent={isSent}
+                onSend={() => onSend(rooftop.rooftop_id, cell.date, cell.cadence)}
+              />
+            </Section>
             {isSent ? (
               <>
                 <Section eyebrow="Sent to" title="Email IDs on this send">
                   <SentToList recipients={primary?.recipients} />
                 </Section>
-                <Section eyebrow="Recipients" title="Manage recipients">
-                  <RecipientManager rooftop={rooftop} onSend={() => onSend(rooftop.rooftop_id, cell.date, cell.cadence)} />
-                </Section>
               </>
             ) : isSuppressed ? (
               <>
-                <Section eyebrow="Will send to" title="Recipients on send">
-                  <SentToList recipients={primary?.recipients} pending />
-                </Section>
                 <Section eyebrow="Suppressed" title="Why it was held back">
                   <SuppressBanner rawReason={rawReason} />
                 </Section>
@@ -241,43 +262,97 @@ function Section({
 /* ============================================================
    Recipient manager (sent view) · per department
    ============================================================ */
-function RecipientManager({ rooftop, onSend }: { rooftop: RooftopRow; onSend: () => void }) {
-  // Local editable copy so add-email / send reflect immediately
+const validEmail = (e: string) => e.trim() !== "" && e !== "m" && /\S+@\S+\.\S+/.test(e.trim());
+
+type SendResult = { ok: boolean; error?: string };
+
+function RecipientManager({
+  rooftop,
+  dept,
+  metrics,
+  reportDate,
+  sentRecipients,
+  isSent,
+  onSend,
+}: {
+  rooftop: RooftopRow;
+  dept?: DeptKind;
+  metrics?: DigestMetrics;
+  reportDate?: string;
+  sentRecipients?: { email: string; received?: boolean; bounced?: boolean }[];
+  isSent: boolean;
+  onSend: () => void;
+}) {
+  // received overlay from the actual run (who really got it)
+  const recvByEmail = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const r of sentRecipients ?? []) map.set(r.email.toLowerCase(), r.received === true && r.bounced !== true);
+    return map;
+  }, [sentRecipients]);
+
+  // Local editable copy so add-email / send / received reflect immediately.
+  // Merge the ACTUAL sent recipients (from the run) into the cell's department so a
+  // "Sent" row always lists who got it — even if they aren't in the configured roi_recipients.
   const [depts, setDepts] = useState(() =>
-    rooftop.departments.map((d) => ({
-      kind: d.kind,
-      recipients: d.recipients.map((r) => ({ ...r })),
-    }))
+    rooftop.departments.map((d) => {
+      const base = d.recipients.map((r) => ({ ...r, received: r.received || recvByEmail.get(r.email.toLowerCase()) || false }));
+      if (dept && d.kind === dept) {
+        for (const sr of sentRecipients ?? []) {
+          if (!base.some((b) => b.email.toLowerCase() === sr.email.toLowerCase())) {
+            base.push({ email: sr.email, received: sr.received === true && sr.bounced !== true });
+          }
+        }
+      }
+      return { kind: d.kind, recipients: base };
+    })
   );
+  // chosen recipients (emails) that WILL receive on a bulk send · default = all valid
+  const [selected, setSelected] = useState<Set<string>>(() => {
+    const s = new Set<string>();
+    for (const d of rooftop.departments) for (const r of d.recipients) if (validEmail(r.email)) s.add(r.email.toLowerCase());
+    for (const sr of sentRecipients ?? []) if (validEmail(sr.email)) s.add(sr.email.toLowerCase());
+    return s;
+  });
+  const [bulk, setBulk] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [bulkMsg, setBulkMsg] = useState("");
 
-  const markReceived = (deptKind: DeptKind, idx: number) => {
-    setDepts((prev) =>
-      prev.map((d) =>
-        d.kind === deptKind
-          ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, received: true } : r)) }
-          : d
-      )
-    );
+  const toggle = (email: string) => {
+    const key = email.toLowerCase();
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
+  const markReceived = (deptKind: DeptKind, idx: number) =>
+    setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, received: true } : r)) } : d)));
+  const setEmail = (deptKind: DeptKind, idx: number, email: string) =>
+    setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, email } : r)) } : d)));
+  const addRecipient = (deptKind: DeptKind) =>
+    setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: [...d.recipients, { email: "", received: false }] } : d)));
+
+  // the REAL send — to a specific set of emails for a department
+  const sendTo = async (emails: string[], deptKind: DeptKind): Promise<SendResult> => {
+    const r = await sendDigestNow({
+      teamId: rooftop.team_id,
+      enterpriseId: rooftop.enterprise_id,
+      dept: (deptKind ?? dept) as DeptKind | undefined,
+      rooftopName: rooftop.name,
+      timezone: rooftop.timezone,
+      localDate: reportDate || "",
+      metrics,
+      recipients: emails,
+    });
+    return { ok: r.ok, error: r.error };
   };
 
-  const setEmail = (deptKind: DeptKind, idx: number, email: string) => {
-    setDepts((prev) =>
-      prev.map((d) =>
-        d.kind === deptKind
-          ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, email } : r)) }
-          : d
-      )
-    );
-  };
-
-  const addRecipient = (deptKind: DeptKind) => {
-    setDepts((prev) =>
-      prev.map((d) =>
-        d.kind === deptKind
-          ? { ...d, recipients: [...d.recipients, { email: "", received: false }] }
-          : d
-      )
-    );
+  const sendSelected = async (deptKind: DeptKind, deptEmails: string[]) => {
+    const chosen = deptEmails.filter((e) => selected.has(e.toLowerCase()));
+    if (!chosen.length) { setBulk("error"); setBulkMsg("Pick at least one recipient first."); return; }
+    setBulk("sending"); setBulkMsg("");
+    const r = await sendTo(chosen, deptKind);
+    if (r.ok) { setBulk("sent"); setBulkMsg(r.error || `Sent ✓ → ${chosen.join(", ")}`); onSend(); }
+    else { setBulk("error"); setBulkMsg(r.error || "Send failed"); }
   };
 
   if (depts.length === 0) {
@@ -286,112 +361,188 @@ function RecipientManager({ rooftop, onSend }: { rooftop: RooftopRow; onSend: ()
 
   return (
     <div className="space-y-4">
-      {depts.map((d) => (
-        <div key={d.kind}>
-          <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-widest capitalize text-text-secondary">
-              {d.kind} department
-            </span>
-            <span className="text-[10px] text-text-muted">
-              {d.recipients.filter((r) => r.received).length}/{d.recipients.length} received
-            </span>
+      {!metrics ? (
+        <p className="rounded-md border border-info-border bg-info-soft px-3 py-1.5 text-[11px] leading-snug text-info">
+          No stored metrics for this cell yet — a send will render from whatever data is available.
+        </p>
+      ) : null}
+      {depts.map((d) => {
+        const emails = d.recipients.map((r) => r.email).filter(validEmail);
+        const chosenCount = emails.filter((e) => selected.has(e.toLowerCase())).length;
+        return (
+          <div key={d.kind}>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-[11px] font-semibold uppercase tracking-widest capitalize text-text-secondary">
+                {d.kind} department
+              </span>
+              <span className="text-[10px] text-text-muted">
+                {d.recipients.filter((r) => r.received).length}/{d.recipients.length} received
+              </span>
+            </div>
+            {d.recipients.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => addRecipient(d.kind)}
+                className="w-full rounded-md border border-dashed border-border-strong bg-surface-background px-3 py-2 text-[12px] font-semibold text-text-secondary hover:border-brand-primary hover:text-brand-primary"
+              >
+                + Add recipient
+              </button>
+            ) : (
+              <>
+                <ul className="space-y-1.5">
+                  {d.recipients.map((rec, idx) => (
+                    <RecipientRow
+                      key={idx}
+                      recipient={rec}
+                      isSent={isSent}
+                      checked={validEmail(rec.email) && selected.has(rec.email.toLowerCase())}
+                      onToggle={() => toggle(rec.email)}
+                      onSetEmail={(email) => setEmail(d.kind, idx, email)}
+                      onSend={async (email) => {
+                        const r = await sendTo([email], d.kind);
+                        if (r.ok) { markReceived(d.kind, idx); onSend(); }
+                        return r;
+                      }}
+                    />
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  onClick={() => addRecipient(d.kind)}
+                  className="mt-1.5 text-[11px] font-semibold text-brand-primary hover:underline"
+                >
+                  + Add recipient
+                </button>
+                {emails.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => void sendSelected(d.kind, emails)}
+                    disabled={bulk === "sending" || chosenCount === 0}
+                    className={`mt-2 w-full rounded-md px-3 py-2 text-[12px] font-semibold ${
+                      bulk === "sent"
+                        ? "bg-positive/10 text-positive"
+                        : bulk === "error"
+                        ? "bg-negative-soft text-negative"
+                        : chosenCount > 0
+                        ? "bg-brand-primary text-white hover:bg-brand-primary-hover"
+                        : "cursor-not-allowed bg-surface-subtle text-text-muted"
+                    }`}
+                  >
+                    {bulk === "sending"
+                      ? "Sending…"
+                      : isSent
+                      ? `Resend to ${chosenCount} selected`
+                      : `Send to ${chosenCount} selected`}
+                  </button>
+                ) : null}
+              </>
+            )}
           </div>
-          {d.recipients.length === 0 ? (
-            <button
-              type="button"
-              onClick={() => addRecipient(d.kind)}
-              className="w-full rounded-md border border-dashed border-border-strong bg-surface-background px-3 py-2 text-[12px] font-semibold text-text-secondary hover:border-brand-primary hover:text-brand-primary"
-            >
-              + Add recipient
-            </button>
-          ) : (
-            <ul className="space-y-1.5">
-              {d.recipients.map((rec, idx) => (
-                <RecipientRow
-                  key={idx}
-                  recipient={rec}
-                  onSetEmail={(email) => setEmail(d.kind, idx, email)}
-                  onSend={() => {
-                    markReceived(d.kind, idx);
-                    onSend();
-                  }}
-                />
-              ))}
-            </ul>
-          )}
-        </div>
-      ))}
+        );
+      })}
+      {bulkMsg ? <p className="text-[10px] text-text-muted">{bulkMsg}</p> : null}
     </div>
   );
 }
 
 function RecipientRow({
   recipient,
+  isSent,
+  checked,
+  onToggle,
   onSetEmail,
   onSend,
 }: {
   recipient: Recipient;
+  isSent: boolean;
+  checked: boolean;
+  onToggle: () => void;
   onSetEmail: (email: string) => void;
-  onSend: () => void;
+  onSend: (email: string) => Promise<SendResult>;
 }) {
   const [draft, setDraft] = useState(recipient.email);
-  const hasEmail = recipient.email.trim() !== "" && recipient.email !== "m";
-  const valid = /\S+@\S+\.\S+/.test(draft.trim());
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const hasEmail = validEmail(recipient.email);
+  const valid = validEmail(draft);
 
-  if (recipient.received) {
-    return (
-      <li className="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-positive/5 px-3 py-2">
-        <span className="min-w-0 truncate text-[12px] text-text-primary">{recipient.email}</span>
-        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-positive">✓ Received</span>
-      </li>
-    );
-  }
+  const fire = async (email: string) => {
+    setState("sending"); setMsg("");
+    const r = await onSend(email);
+    if (r.ok) { setState("sent"); setMsg(r.error || "Sent ✓"); }
+    else { setState("error"); setMsg(r.error || "Failed"); }
+  };
 
-  // Not received · either has an email (bounce/retry) or needs an email
-  if (hasEmail) {
+  // Missing email · inline add + send (no checkbox until there's an address)
+  if (!hasEmail) {
     return (
-      <li className="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-surface-background px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-[12px] text-text-primary">{recipient.email}</div>
-          <div className="text-[10px] text-negative">Didn't receive</div>
+      <li className="rounded-md border border-dashed border-warning/50 bg-warning-soft/40 px-3 py-2">
+        <div className="text-[10px] font-semibold text-warning">No email on file · add one</div>
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <input
+            type="email"
+            value={draft}
+            onChange={(e) => { setDraft(e.target.value); onSetEmail(e.target.value); }}
+            placeholder="name@dealership.com"
+            className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-card px-2.5 py-1.5 text-[12px] placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={() => valid && void fire(draft.trim())}
+            disabled={!valid || state === "sending"}
+            className={`shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-semibold ${
+              valid ? "bg-brand-primary text-white hover:bg-brand-primary-hover" : "cursor-not-allowed bg-surface-subtle text-text-muted"
+            }`}
+          >
+            {state === "sending" ? "Sending…" : "Add & send"}
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={onSend}
-          className="shrink-0 rounded-md bg-brand-primary px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-brand-primary-hover"
-        >
-          Send to them
-        </button>
+        {msg ? <div className="mt-1 text-[10px] text-text-muted">{msg}</div> : null}
       </li>
     );
   }
 
-  // Missing email · inline add + send
+  const sendLabel = state === "sending"
+    ? "Sending…"
+    : state === "sent"
+    ? "✓ Sent"
+    : state === "error"
+    ? "Retry"
+    : recipient.received
+    ? "Resend"
+    : "Send";
+
   return (
-    <li className="rounded-md border border-dashed border-warning/50 bg-warning-soft/40 px-3 py-2">
-      <div className="text-[10px] font-semibold text-warning">No email on file · add one</div>
-      <div className="mt-1.5 flex items-center gap-1.5">
-        <input
-          type="email"
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            onSetEmail(e.target.value);
-          }}
-          placeholder="name@dealership.com"
-          className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-card px-2.5 py-1.5 text-[12px] placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
-        />
-        <button
-          type="button"
-          onClick={onSend}
-          disabled={!valid}
-          className={`shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-semibold ${
-            valid ? "bg-brand-primary text-white hover:bg-brand-primary-hover" : "cursor-not-allowed bg-surface-subtle text-text-muted"
-          }`}
-        >
-          Add & send
-        </button>
+    <li className={`flex items-center gap-2 rounded-md border border-border-subtle px-3 py-2 ${recipient.received ? "bg-positive/5" : "bg-surface-background"}`}>
+      {/* choose-to-receive checkbox */}
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onToggle}
+        title="Include this recipient when sending to selected"
+        className="h-3.5 w-3.5 shrink-0 accent-brand-primary"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[12px] text-text-primary">{recipient.email}</div>
+        <div className={`text-[10px] ${recipient.received ? "text-positive" : isSent ? "text-negative" : "text-text-muted"}`}>
+          {recipient.received ? "✓ Received" : isSent ? "Didn't receive" : "Not sent yet"}
+        </div>
       </div>
+      <button
+        type="button"
+        onClick={() => void fire(recipient.email)}
+        disabled={state === "sending"}
+        title={recipient.received ? "Resend individually to this recipient" : "Send individually to this recipient"}
+        className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold ${
+          state === "sent"
+            ? "bg-positive/10 text-positive"
+            : state === "error"
+            ? "bg-negative-soft text-negative"
+            : "bg-brand-primary text-white hover:bg-brand-primary-hover"
+        }`}
+      >
+        {sendLabel}
+      </button>
     </li>
   );
 }
@@ -587,40 +738,32 @@ function DigestEmail({
   metrics,
   dept,
   renderedHtml,
+  view = "email",
 }: {
   rooftop: RooftopRow;
   cell: SendCell;
   metrics?: DigestMetrics;
   dept?: DeptKind;
   renderedHtml?: string;
+  view?: "desktop" | "email";
 }) {
-  // Render the exact email-safe digest HTML (table layout, real console links) in an
-  // iframe — the same HTML the mailer sends. Renders identically in-app and in inbox.
-  if (metrics) {
-    const html = renderDigestEmail(metrics, {
-      rooftopName: rooftop.name,
-      dept,
-      teamId: rooftop.team_id,
-      enterpriseId: rooftop.enterprise_id,
-      reportDate: (metrics as { reportDate?: string }).reportDate ?? cell.date,
-      timezone: rooftop.timezone,
-    });
-    return (
+  // STRICT: the preview is the SAME HTML as the email. Prefer the stored rendered_html
+  // (the exact bytes that were sent); only if absent fall back to the same renderer.
+  const html = renderedHtml || (metrics ? renderDigestEmail(metrics, {
+    rooftopName: rooftop.name, dept, teamId: rooftop.team_id, enterpriseId: rooftop.enterprise_id,
+    reportDate: (metrics as { reportDate?: string }).reportDate ?? cell.date, timezone: rooftop.timezone,
+  }) : null);
+  if (!html) return <EmailSnippetCard rooftop={rooftop} />;
+  // view toggle: 'email' = ~400px (mobile/inbox, triggers the email's @media stacking);
+  // 'desktop' = full 640px card. The HTML is identical — only the viewport width changes.
+  const maxWidth = view === "email" ? 400 : 680;
+  return (
+    <div style={{ maxWidth, margin: "0 auto" }} className="transition-[max-width] duration-200">
       <div className="overflow-hidden rounded-xl border border-border-subtle bg-white">
-        <iframe title="Daily digest preview" srcDoc={html} className="block w-full bg-white" style={{ height: 760, border: 0 }} />
+        <iframe title={renderedHtml ? "Email — exact HTML sent" : "Daily digest preview"} srcDoc={html} className="block w-full bg-white" style={{ height: 980, border: 0 }} />
       </div>
-    );
-  }
-  // No metrics but exact provider HTML stored (real send) → show it verbatim.
-  if (renderedHtml) {
-    return (
-      <div className="overflow-hidden rounded-xl border border-border-subtle bg-white">
-        <iframe title="Email sent" srcDoc={renderedHtml} className="block w-full bg-white" style={{ height: 700, border: 0 }} />
-      </div>
-    );
-  }
-  // Nothing stored → lightweight stub.
-  return <EmailSnippetCard rooftop={rooftop} />;
+    </div>
+  );
 }
 
 /* ============================================================
