@@ -397,8 +397,10 @@ function RecipientManager({
                       isSent={isSent}
                       checked={validEmail(rec.email) && selected.has(rec.email.toLowerCase())}
                       onToggle={() => toggle(rec.email)}
-                      onSetEmail={(email) => setEmail(d.kind, idx, email)}
                       onSend={async (email) => {
+                        // commit the typed address into the list + select it, THEN send
+                        setEmail(d.kind, idx, email);
+                        setSelected((prev) => new Set(prev).add(email.toLowerCase()));
                         const r = await sendTo([email], d.kind);
                         if (r.ok) { markReceived(d.kind, idx); onSend(); }
                         return r;
@@ -450,14 +452,12 @@ function RecipientRow({
   isSent,
   checked,
   onToggle,
-  onSetEmail,
   onSend,
 }: {
   recipient: Recipient;
   isSent: boolean;
   checked: boolean;
   onToggle: () => void;
-  onSetEmail: (email: string) => void;
   onSend: (email: string) => Promise<SendResult>;
 }) {
   const [draft, setDraft] = useState(recipient.email);
@@ -482,7 +482,8 @@ function RecipientRow({
           <input
             type="email"
             value={draft}
-            onChange={(e) => { setDraft(e.target.value); onSetEmail(e.target.value); }}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && valid) void fire(draft.trim()); }}
             placeholder="name@dealership.com"
             className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-card px-2.5 py-1.5 text-[12px] placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
           />

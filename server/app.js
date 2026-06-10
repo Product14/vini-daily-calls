@@ -2,7 +2,11 @@ import express from "express";
 import cors from "cors";
 import dns from "node:dns";
 import https from "node:https";
+import { createRequire } from "node:module";
 import { createClient as createSbClient } from "@supabase/supabase-js";
+
+// CJS interop: the ROI cron engine (server/roi-cron/runner.cjs) is CommonJS.
+const require = createRequire(import.meta.url);
 import { query, getClient } from "./db.js";
 import { buildEmailHtml } from "./emailTemplate.js";
 import { sendReport }     from "./emailClient.js";
@@ -2241,6 +2245,26 @@ app.post("/api/email/roi-send-now", async (req, res) => {
   } catch (err) {
     console.error("POST /api/email/roi-send-now error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "send failed" });
+  }
+});
+
+// ── Hourly ROI digest cron (Vercel Cron → this route) ───────────────────────
+// Runs the full daily-digest pass for EVERY live rooftop (roi_live_departments.is_live=true).
+// With DRY_RUN=false it really emails the rooftops where dry_run=false and suppresses the rest,
+// at each rooftop's local send-hour (idempotent: one send per rooftop per day).
+// Vercel sends `Authorization: Bearer <CRON_SECRET>` when CRON_SECRET is configured.
+app.get("/api/cron/roi-email", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const { runOnce } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const summary = await runOnce();
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
+  } catch (err) {
+    console.error("GET /api/cron/roi-email error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
   }
 });
 
