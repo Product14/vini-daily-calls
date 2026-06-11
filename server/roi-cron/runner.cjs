@@ -312,21 +312,22 @@ async function runOnce() {
   const targets = (live ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
   if (ONLY.length) console.log(`  scope: ONLY_TEAMS → ${targets.length} dept-rows across ${ONLY.length} team(s)`);
 
-  for (const L of targets) {
+  // Process ONE rooftop·dept. Independent per row → safe to run many in parallel.
+  const processOne = async (L) => {
     const c = cfgOf.get(L.team_id);
     const tz = c?.timezone || "America/New_York";
     const name = c?.rooftop_name || L.team_id;
-    if (c && c.daily_enabled === false) continue;
+    if (c && c.daily_enabled === false) return;
     const w = RUN_LOCAL_DATE ? { ...windowsForDate(RUN_LOCAL_DATE, tz), localHour: localParts(tz).localHour } : localParts(tz);
     const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
     const upsert = (extra) => sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
     try {
       // already sent today?
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
-      if (done && !FORCE_RESEND) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already sent for ${w.localDate}`); continue; }
+      if (done && !FORCE_RESEND) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already sent for ${w.localDate}`); return; }
       // recipients (step 1 finalized) for this dept
       const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
-      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); continue; }
+      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); return; }
       // step 2 — fetch via embedding (daily window + MTD window) + action items, store queued
       const day = await fetchMetrics(L.team_id, L.department, w.yStart, w.yEnd);
       const mtd = await fetchMetrics(L.team_id, L.department, w.monthStart, w.yEnd);
@@ -345,16 +346,16 @@ async function runOnce() {
       out.queued++;
       // step 3 — guardrails
       const g = guardrail(m);
-      if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; console.log(`  · ${name} [${L.department}] not_sent → ${g.reason} (appts ${m.appointmentsYesterday} · conv ${m.conversationsHandled} · leads ${m.inboundUniqueLeads} · actions ${m.actionItemsTotal})`); continue; }
+      if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; console.log(`  · ${name} [${L.department}] not_sent → ${g.reason} (appts ${m.appointmentsYesterday} · conv ${m.conversationsHandled} · leads ${m.inboundUniqueLeads} · actions ${m.actionItemsTotal})`); return; }
       // step 4 — send-hour gate
       const sendHour = c?.digest_send_hour ?? 7;
-      if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:00 < send ${String(sendHour).padStart(2, "0")}:00)`); continue; }
+      if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:00 < send ${String(sendHour).padStart(2, "0")}:00)`); return; }
       // active campaigns (3rd embedding) — only now, just before render
       const camps = await fetchCampaigns(L.team_id, L.department, w.yStart, w.yEnd);
       const metricsFull = { ...metrics, campaigns: camps };
       const html = renderHtml(name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, m, camps);
       const dry = DRY_RUN || L.dry_run === true;
-      if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); continue; }
+      if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
       // SEND
       const sentAt = new Date().toISOString();
       const messageId = await sendMail(emails, subject, html);
@@ -369,7 +370,13 @@ async function runOnce() {
       console.log(`  ✗ ${name} [${L.department}] error: ${String(e).slice(0, 160)}`);
       try { await upsert({ status: "not_sent", reason: "error", reason_detail: String(e).slice(0, 400) }); } catch { /* swallow — one failure must not halt the pass */ }
     }
-  }
+  };
+  // Concurrency pool — fit the whole pass inside the serverless time limit.
+  const POOL = Number(process.env.CRON_POOL || 10);
+  let _i = 0;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(POOL, targets.length)) }, async () => {
+    while (_i < targets.length) { const L = targets[_i++]; await processOne(L); }
+  }));
   console.log("  summary:", JSON.stringify(out));
   return out;
 }
