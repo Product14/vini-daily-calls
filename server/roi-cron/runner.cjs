@@ -281,11 +281,21 @@ async function sendMail(to, subject, html) {
 async function runOnce() {
   const ts = new Date().toISOString();
   console.log(`\n── ROI cron pass @ ${ts} · DRY_RUN=${DRY_RUN} ──`);
-  const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
+  // FAIL LOUD: a misconfigured serverless function (missing ROI_SUPABASE_* / Metabase env) used to
+  // silently return an all-zero summary because the Supabase error was swallowed. Surface it.
+  if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
+  if (EMBEDDING_TYPE === "metabase-embed" && (!MB_SECRET || !Q_METRICS)) throw new Error("Missing METABASE_SECRET_KEY / METABASE_METRICS_QUESTION env.");
+  const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,digest_send_hour,daily_enabled"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
+  if (liveRes.error || cfgRes.error || recRes.error) {
+    const e = liveRes.error || cfgRes.error || recRes.error;
+    throw new Error(`Supabase read failed (check ROI_SUPABASE_URL/ROI_SUPABASE_SERVICE_KEY): ${e.message}`);
+  }
+  const live = liveRes.data, cfg = cfgRes.data, rec = recRes.data;
+  if (!live || live.length === 0) console.warn("[roi-cron] WARNING: roi_live_departments.is_live=true returned 0 rows — nothing to process (check data / env).");
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
