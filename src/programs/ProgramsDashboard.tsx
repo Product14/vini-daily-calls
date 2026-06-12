@@ -128,9 +128,19 @@ type Task = {
 type AccountState = {
   rootCauses: RootCause[];
   tasks: Task[];
-  accountDri: string;       // CSM — left blank for first cut
+  accountDri: string;            // CSM override (sheet provides the default)
   notes: string;
 };
+
+// Rooftop-level tech stack (CRM / scheduler / DMS) — these are facts about
+// the dealership, not the agent product, so they're keyed by rooftop and
+// shared across every agent on that rooftop. Stored in programs_rooftops.
+type RooftopStack = {
+  crmName: string;
+  serviceSchedulerName: string;
+  dmsName: string;
+};
+const EMPTY_ROOFTOP_STACK: RooftopStack = { crmName: "", serviceSchedulerName: "", dmsName: "" };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 const num = (v: unknown): number => {
@@ -231,12 +241,29 @@ function normalizeAgentType(s: string): AgentType | null {
 // Persistence — Supabase (primary) with localStorage mirror (backup if DB is
 // down or env vars are missing). Schema: src/programs/schema.sql.
 const LS_ROOT = "programs.accountState.v1";
+// Default shape for AccountState — kept in sync with the `AccountState` type
+// above. Used to backfill any fields missing on objects loaded from older
+// localStorage snapshots (added incrementally as we extend the schema).
+const ACCOUNT_STATE_DEFAULTS: AccountState = {
+  rootCauses: [],
+  tasks: [],
+  accountDri: "",
+  notes: "",
+};
 function loadLocalMirror(): Record<string, AccountState> {
   try {
     const raw = localStorage.getItem(LS_ROOT);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    // Backfill any fields added since this snapshot was written — otherwise
+    // code that reads (e.g.) s.serviceSchedulerName crashes on .trim() on
+    // pre-existing localStorage state.
+    const out: Record<string, AccountState> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      out[k] = { ...ACCOUNT_STATE_DEFAULTS, ...(v as Partial<AccountState>) };
+    }
+    return out;
   } catch { return {}; }
 }
 function saveLocalMirror(s: Record<string, AccountState>) {
@@ -345,6 +372,61 @@ async function persistAccount(accountKey: string, current: AccountState): Promis
   }
 }
 
+// Load rooftop-level tech stack rows from Supabase. Returns null if the DB
+// isn't configured or the fetch fails — caller falls through to empty data.
+async function loadRooftopStacks(): Promise<Record<string, RooftopStack> | null> {
+  const sb = getProgramsClient();
+  if (!sb) return null;
+  try {
+    const { data, error } = await sb.from("programs_rooftops").select("*");
+    if (error) throw error;
+    const out: Record<string, RooftopStack> = {};
+    for (const r of data ?? []) {
+      out[r.rooftop_key] = {
+        crmName: r.crm_name ?? "",
+        serviceSchedulerName: r.service_scheduler_name ?? "",
+        dmsName: r.dms_name ?? "",
+      };
+    }
+    return out;
+  } catch (e) {
+    console.error("[programs] Supabase rooftops load failed:", e);
+    return null;
+  }
+}
+
+// Upsert a single rooftop record. Used when the user edits CRM/Scheduler/DMS
+// from the drawer — the change applies to every (rooftop × agent) account
+// implicitly because every consumer reads via rooftopKey.
+async function persistRooftop(rooftopKey: string, stack: RooftopStack): Promise<{ ok: boolean; error?: string }> {
+  const sb = getProgramsClient();
+  if (!sb) return { ok: false, error: "DB not configured" };
+  try {
+    const { error } = await sb.from("programs_rooftops").upsert({
+      rooftop_key: rooftopKey,
+      crm_name: stack.crmName,
+      service_scheduler_name: stack.serviceSchedulerName,
+      dms_name: stack.dmsName,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "rooftop_key" });
+    if (error) throw error;
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[programs] persistRooftop failed:", msg);
+    return { ok: false, error: msg };
+  }
+}
+
+// Strip the "::AgentType" suffix from an accountKey to get its rooftop key —
+// "tid:abc::Sales Inbound" → "tid:abc", "name:foo::Service IB" → "name:foo".
+// Every (rooftop × agent) on the same rooftop maps to the same rooftopKey,
+// which is how rooftop-level facts (CRM, scheduler, DMS) stay consistent.
+function rooftopKeyFromAccountKey(k: string): string {
+  const i = k.indexOf("::");
+  return i > 0 ? k.slice(0, i) : k;
+}
+
 // account_key format from buildAccount: "tid:<rooftopId>::<agentType>" or
 // "name:<lower-name>::<agentType>". Extract rooftopId (or null) + agentType.
 function parseAccountKey(k: string): [string | null, string | null] {
@@ -403,12 +485,20 @@ export default function ProgramsDashboard() {
   const stateRef = useRef(state);
   useEffect(() => { stateRef.current = state; }, [state]);
 
+  // Rooftop-level tech stack (CRM / scheduler / DMS) — keyed by rooftopKey
+  // so all agents on the same rooftop share one value automatically.
+  const [rooftopStack, setRooftopStack] = useState<Record<string, RooftopStack>>({});
+  const dirtyRooftops = useRef<Set<string>>(new Set());
+  const rooftopSaveTimer = useRef<number | null>(null);
+  const rooftopStackRef = useRef(rooftopStack);
+  useEffect(() => { rooftopStackRef.current = rooftopStack; }, [rooftopStack]);
+
   // Hydrate from Supabase on mount.
   useEffect(() => {
     if (!PROGRAMS_DB_CONFIGURED) return;
     let cancelled = false;
     (async () => {
-      const fromDb = await loadFromSupabase();
+      const [fromDb, rooftops] = await Promise.all([loadFromSupabase(), loadRooftopStacks()]);
       if (cancelled) return;
       if (fromDb) {
         setState(fromDb);
@@ -419,6 +509,7 @@ export default function ProgramsDashboard() {
         setDbStatus("error");
         setDbError("Could not load from Supabase. Using local mirror.");
       }
+      if (rooftops) setRooftopStack(rooftops);
     })();
     return () => { cancelled = true; };
   }, []);
@@ -440,6 +531,22 @@ export default function ProgramsDashboard() {
     setDbError(errMsg);
   };
 
+  const flushDirtyRooftops = async () => {
+    const keys = Array.from(dirtyRooftops.current);
+    dirtyRooftops.current = new Set();
+    if (!PROGRAMS_DB_CONFIGURED || keys.length === 0) return;
+    setDbStatus("saving");
+    let errMsg: string | null = null;
+    for (const rk of keys) {
+      const cur = rooftopStackRef.current[rk];
+      if (!cur) continue;
+      const res = await persistRooftop(rk, cur);
+      if (!res.ok) errMsg = res.error ?? "save failed";
+    }
+    setDbStatus(errMsg ? "error" : "ready");
+    setDbError(errMsg);
+  };
+
   const updateAccountState = (key: string, patch: Partial<AccountState>) => {
     setState(prev => {
       const next = { ...prev, [key]: { ...EMPTY_STATE, ...prev[key], ...patch } };
@@ -449,6 +556,18 @@ export default function ProgramsDashboard() {
     dirtyKeys.current.add(key);
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(flushDirty, 700);
+  };
+
+  // Update the rooftop-level tech stack for a rooftop (every agent on that
+  // rooftop sees the change). Debounced 700ms like account state.
+  const updateRooftopStack = (rooftopKey: string, patch: Partial<RooftopStack>) => {
+    setRooftopStack(prev => ({
+      ...prev,
+      [rooftopKey]: { ...EMPTY_ROOFTOP_STACK, ...prev[rooftopKey], ...patch },
+    }));
+    dirtyRooftops.current.add(rooftopKey);
+    if (rooftopSaveTimer.current) window.clearTimeout(rooftopSaveTimer.current);
+    rooftopSaveTimer.current = window.setTimeout(flushDirtyRooftops, 700);
   };
 
   // ── Fetch sheet + Metabase ─────────────────────────────────────────────
@@ -697,6 +816,25 @@ export default function ProgramsDashboard() {
   const openAccount = openKey ? accounts.find(a => a.key === openKey) ?? null : null;
   const openAccountState = openKey ? (state[openKey] ?? EMPTY_STATE) : EMPTY_STATE;
 
+  // Distinct tech-stack values across all rooftops. Drawer combobox uses
+  // these as dropdown suggestions so common vendors get auto-completed
+  // without managing an enum. Sourced from the rooftop-level table now.
+  const stackOptions = useMemo(() => {
+    const uniq = (pick: (s: RooftopStack) => string) => {
+      const set = new Set<string>();
+      for (const s of Object.values(rooftopStack)) {
+        const v = (pick(s) ?? "").trim();
+        if (v) set.add(v);
+      }
+      return Array.from(set).sort((a, b) => a.localeCompare(b));
+    };
+    return {
+      crm:       uniq(s => s.crmName),
+      scheduler: uniq(s => s.serviceSchedulerName),
+      dms:       uniq(s => s.dmsName),
+    };
+  }, [rooftopStack]);
+
   // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div style={S.page}>
@@ -747,21 +885,27 @@ export default function ProgramsDashboard() {
         />
       )}
 
-      {tab === "list"   && <AccountTable rows={filtered} state={state} onOpen={setOpenKey} />}
+      {tab === "list"   && <AccountTable rows={filtered} state={state} rooftopStack={rooftopStack} onOpen={setOpenKey} />}
       {tab === "cohort" && (
         <CohortView agentByCohort={agentByCohort} />
       )}
       {tab === "tasks"  && <NextStepsView accounts={accounts} state={state} onOpen={setOpenKey} />}
       {tab === "report" && <EmailReportView accounts={accounts} state={state} overall={overall} />}
 
-      {openAccount && (
-        <AccountDrawer
-          account={openAccount}
-          state={openAccountState}
-          onChange={(patch)=>updateAccountState(openAccount.key, patch)}
-          onClose={()=>setOpenKey(null)}
-        />
-      )}
+      {openAccount && (() => {
+        const rk = rooftopKeyFromAccountKey(openAccount.key);
+        return (
+          <AccountDrawer
+            account={openAccount}
+            state={openAccountState}
+            stack={rooftopStack[rk] ?? EMPTY_ROOFTOP_STACK}
+            stackOptions={stackOptions}
+            onChange={(patch)=>updateAccountState(openAccount.key, patch)}
+            onStackChange={(patch)=>updateRooftopStack(rk, patch)}
+            onClose={()=>setOpenKey(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -1010,8 +1154,8 @@ function Filters(props: {
     const n = new Set(set); n.has(v) ? n.delete(v) : n.add(v); setter(n);
   };
   return (
-    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 12, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", marginBottom: 14 }}>
-      <ChipGroup<RagStatus> label="RAG" options={["red","amber","green"]} selected={props.ragFilter} onToggle={v=>toggle(props.ragFilter, v, props.setRagFilter)} render={v=>v.toUpperCase()} />
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", marginBottom: 14, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
+      <ChipGroup<RagStatus> label="RAG" options={["red","amber","green"]} selected={props.ragFilter} onToggle={v=>toggle(props.ragFilter, v, props.setRagFilter)} render={v=>v.toUpperCase()} palette={v=>CHIP_PALETTE_RAG[v]} />
       <div style={Sx.divider} />
       <ChipGroup label="Cohort" options={["Activation","Ramp","Mature","Unknown"] as Cohort[]} selected={props.cohortFilter} onToggle={(v)=>toggle(props.cohortFilter, v, props.setCohortFilter)} />
       <div style={Sx.divider} />
@@ -1061,26 +1205,101 @@ function Filters(props: {
   );
 }
 
-function ChipGroup<T extends string>({ label, options, selected, onToggle, render }:
-  { label: string; options: T[]; selected: Set<T>; onToggle: (v:T)=>void; render?: (v:T)=>string }) {
+// ChipGroup — modern token-style chips.
+// • 8px corners (still pill-shaped but softer than fully-rounded)
+// • 28px min height, generous tap target
+// • Semantic tinting via `palette` prop — RAG/Status chips show their meaning
+//   when selected (red wash for Red, amber for Amber, etc.) instead of a
+//   uniform black fill
+// • 150ms ease transitions on every state change
+// • Subtle hover affordance for unselected chips
+type ChipTone = { bg: string; fg: string; border: string };
+function ChipGroup<T extends string>({ label, options, selected, onToggle, render, palette }:
+  { label: string; options: T[]; selected: Set<T>; onToggle: (v:T)=>void;
+    render?: (v:T)=>string; palette?: (v:T)=>ChipTone | undefined }) {
+  // Default selected tone — soft charcoal with light shadow, not a hard black slab.
+  const defaultOn: ChipTone = { bg: "#111827", fg: "#ffffff", border: "#111827" };
   return (
-    <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-      <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>{label}</span>
-      {options.map(v => {
-        const on = selected.has(v);
-        return (
-          <button key={v} onClick={()=>onToggle(v)} style={{
-            padding: "4px 9px", borderRadius: 999, fontSize: 12, fontWeight: 600,
-            border: on ? "1px solid #111827" : "1px solid #d1d5db",
-            background: on ? "#111827" : "#fff", color: on ? "#fff" : "#374151", cursor: "pointer",
-          }}>{render ? render(v) : v}</button>
-        );
-      })}
+    <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+      <span style={{
+        fontSize: 10, color: "#6b7280", fontWeight: 700,
+        textTransform: "uppercase", letterSpacing: 0.6,
+      }}>{label}</span>
+      <div style={{ display: "inline-flex", gap: 4 }}>
+        {options.map(v => {
+          const on   = selected.has(v);
+          const tone = on ? (palette?.(v) ?? defaultOn) : null;
+          const baseStyle: CSSProperties = {
+            padding: "5px 10px",
+            minHeight: 26,
+            borderRadius: 7,
+            fontSize: 11.5, fontWeight: 600,
+            fontFamily: "inherit",
+            letterSpacing: 0.1,
+            cursor: "pointer",
+            transition: "background-color 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease",
+            outline: "none",
+            lineHeight: 1.3,
+            whiteSpace: "nowrap",
+          };
+          const onStyle: CSSProperties = on
+            ? {
+                background: tone!.bg,
+                color: tone!.fg,
+                border: `1px solid ${tone!.border}`,
+                boxShadow: palette ? "none" : "0 1px 2px rgba(17,24,39,0.12), inset 0 1px 0 rgba(255,255,255,0.06)",
+              }
+            : {
+                background: "#ffffff",
+                color: "#475569",
+                border: "1px solid #e5e7eb",
+              };
+          return (
+            <button
+              key={v}
+              onClick={() => onToggle(v)}
+              style={{ ...baseStyle, ...onStyle }}
+              onMouseEnter={e => {
+                if (on) return;
+                e.currentTarget.style.background   = "#f8fafc";
+                e.currentTarget.style.borderColor  = "#cbd5e1";
+                e.currentTarget.style.color        = "#1f2937";
+              }}
+              onMouseLeave={e => {
+                if (on) return;
+                e.currentTarget.style.background   = "#ffffff";
+                e.currentTarget.style.borderColor  = "#e5e7eb";
+                e.currentTarget.style.color        = "#475569";
+              }}
+            >{render ? render(v) : v}</button>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function AccountTable({ rows, state, onOpen }: { rows: Account[]; state: Record<string, AccountState>; onOpen:(k:string)=>void }) {
+// Semantic palettes for RAG and Task Status. Used in the filter chips so the
+// selected state carries meaning at a glance — Red selected = red wash, not
+// a generic black-fill that looks identical to every other selected chip.
+const CHIP_PALETTE_RAG: Record<RagStatus, ChipTone> = {
+  red:   { bg: "#fee2e2", fg: "#991b1b", border: "#fca5a5" },
+  amber: { bg: "#fef3c7", fg: "#92400e", border: "#fcd34d" },
+  green: { bg: "#dcfce7", fg: "#166534", border: "#86efac" },
+};
+const CHIP_PALETTE_STATUS: Record<TaskStatus, ChipTone> = {
+  "Open":        { bg: "#f3f4f6", fg: "#374151", border: "#d1d5db" },
+  "In Progress": { bg: "#e0f2fe", fg: "#075985", border: "#7dd3fc" },
+  "Blocked":     { bg: "#fee2e2", fg: "#991b1b", border: "#fca5a5" },
+  "Done":        { bg: "#dcfce7", fg: "#166534", border: "#86efac" },
+};
+
+function AccountTable({ rows, state, rooftopStack, onOpen }: {
+  rows: Account[];
+  state: Record<string, AccountState>;
+  rooftopStack: Record<string, RooftopStack>;
+  onOpen:(k:string)=>void;
+}) {
   return (
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
@@ -1089,6 +1308,9 @@ function AccountTable({ rows, state, onOpen }: { rows: Account[]; state: Record<
           <col style={{ width: 90 }}  />  {/* Agent */}
           <col style={{ width: 90 }}  />  {/* MRR */}
           <col style={{ width: 130 }} />  {/* CSM */}
+          <col style={{ width: 110 }} />  {/* CRM */}
+          <col style={{ width: 110 }} />  {/* Service Scheduler */}
+          <col style={{ width: 100 }} />  {/* DMS */}
           <col style={{ width: 78 }}  />  {/* RAG */}
           <col style={{ width: 78 }}  />  {/* ROI */}
           <col style={{ width: 130 }} />  {/* Cohort */}
@@ -1102,6 +1324,9 @@ function AccountTable({ rows, state, onOpen }: { rows: Account[]; state: Record<
             <Th>Agent</Th>
             <Th right>MRR</Th>
             <Th>CSM</Th>
+            <Th>CRM</Th>
+            <Th>Scheduler</Th>
+            <Th>DMS</Th>
             <Th>RAG</Th>
             <Th right>ROI</Th>
             <Th>Cohort</Th>
@@ -1134,6 +1359,26 @@ function AccountTable({ rows, state, onOpen }: { rows: Account[]; state: Record<
                       : <span style={{ color: "#9ca3af" }}>—</span>;
                   })()}
                 </Td>
+                {(() => {
+                  const stack = rooftopStack[rooftopKeyFromAccountKey(a.key)] ?? EMPTY_ROOFTOP_STACK;
+                  return <>
+                    <Td>
+                      {stack.crmName
+                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.crmName}</span>
+                        : <span style={{ color: "#9ca3af" }}>—</span>}
+                    </Td>
+                    <Td>
+                      {stack.serviceSchedulerName
+                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.serviceSchedulerName}</span>
+                        : <span style={{ color: "#9ca3af" }}>—</span>}
+                    </Td>
+                    <Td>
+                      {stack.dmsName
+                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.dmsName}</span>
+                        : <span style={{ color: "#9ca3af" }}>—</span>}
+                    </Td>
+                  </>;
+                })()}
                 <Td><RagPill rag={a.rag} /></Td>
                 <Td right><RoiPill roi={a.roi} /></Td>
                 <Td><CohortPill cohort={a.cohort} daysLive={a.daysLive} /></Td>
@@ -1144,7 +1389,7 @@ function AccountTable({ rows, state, onOpen }: { rows: Account[]; state: Record<
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
+            <tr><td colSpan={13} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
           )}
         </tbody>
       </table>
@@ -1225,6 +1470,7 @@ function NextStepsView({ accounts, state, onOpen }: {
   const [statusFilter, setStatusFilter] = useState<Set<TaskStatus>>(new Set(["Open","In Progress","Blocked"]));
   const [funcFilter,   setFuncFilter]   = useState<Set<TaskFunction>>(new Set());
   const [ragFilter,    setRagFilter]    = useState<Set<RagStatus>>(new Set());
+  const [agentFilter,  setAgentFilter]  = useState<Set<AgentType>>(new Set());
   const [dueFilter,    setDueFilter]    = useState<Set<DueBucket>>(new Set());
   const [ownerFilter,  setOwnerFilter]  = useState<string>("");   // task DRI email
   const [csmFilter,    setCsmFilter]    = useState<string>("");   // account CSM email
@@ -1294,6 +1540,7 @@ function NextStepsView({ accounts, state, onOpen }: {
     if (statusFilter.size) rows = rows.filter(r => statusFilter.has(r.task.status));
     if (funcFilter.size)   rows = rows.filter(r => funcFilter.has(r.task.function));
     if (ragFilter.size)    rows = rows.filter(r => ragFilter.has(r.account.rag));
+    if (agentFilter.size)  rows = rows.filter(r => agentFilter.has(r.account.agentType));
     if (dueFilter.size)    rows = rows.filter(r => dueFilter.has(r.dueBucket));
     if (ownerFilter)       rows = rows.filter(r => r.task.taskDri === ownerFilter);
     if (csmFilter)         rows = rows.filter(r => r.csmEmail === csmFilter);
@@ -1326,7 +1573,7 @@ function NextStepsView({ accounts, state, onOpen }: {
       return 0;
     });
     return sorted;
-  }, [allRows, statusFilter, funcFilter, ragFilter, dueFilter, ownerFilter, csmFilter, search, sortKey]);
+  }, [allRows, statusFilter, funcFilter, ragFilter, agentFilter, dueFilter, ownerFilter, csmFilter, search, sortKey]);
 
   // Group
   const groupLabel = (r: TaskRow): string => {
@@ -1382,17 +1629,19 @@ function NextStepsView({ accounts, state, onOpen }: {
   };
   return (
     <>
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 12, marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-        <ChipGroup<TaskStatus> label="Status" options={["Open","In Progress","Blocked","Done"]} selected={statusFilter} onToggle={v=>toggleSet(statusFilter, v, setStatusFilter)} />
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
+        <ChipGroup<TaskStatus> label="Status" options={["Open","In Progress","Blocked","Done"]} selected={statusFilter} onToggle={v=>toggleSet(statusFilter, v, setStatusFilter)} palette={v=>CHIP_PALETTE_STATUS[v]} />
         <div style={Sx.divider} />
         <ChipGroup<TaskFunction> label="Function" options={[...TASK_FUNCTIONS]} selected={funcFilter} onToggle={v=>toggleSet(funcFilter, v, setFuncFilter)} />
         <div style={Sx.divider} />
-        <ChipGroup<RagStatus> label="Account RAG" options={["red","amber","green"]} selected={ragFilter} onToggle={v=>toggleSet(ragFilter, v, setRagFilter)} render={v=>v.toUpperCase()} />
+        <ChipGroup<RagStatus> label="Account RAG" options={["red","amber","green"]} selected={ragFilter} onToggle={v=>toggleSet(ragFilter, v, setRagFilter)} render={v=>v.toUpperCase()} palette={v=>CHIP_PALETTE_RAG[v]} />
+        <div style={Sx.divider} />
+        <ChipGroup<AgentType> label="Agent" options={["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"]} selected={agentFilter} onToggle={v=>toggleSet(agentFilter, v, setAgentFilter)} render={v=>AGENT_LABELS[v]} />
         <div style={Sx.divider} />
         <ChipGroup<DueBucket> label="Due" options={["Overdue","Today","This Week","Next 30d","Later","No date"]} selected={dueFilter} onToggle={v=>toggleSet(dueFilter, v, setDueFilter)} />
       </div>
 
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 12, marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
         <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Task Owner</span>
           <select value={ownerFilter} onChange={e=>setOwnerFilter(e.target.value)} style={Sx.select}>
@@ -2261,8 +2510,13 @@ function Th2({ children, right, style }: { children: ReactNode; right?: boolean;
   );
 }
 
-function AccountDrawer({ account, state, onChange, onClose }:
-  { account: Account; state: AccountState; onChange: (p: Partial<AccountState>)=>void; onClose: ()=>void }) {
+function AccountDrawer({ account, state, stack, stackOptions, onChange, onStackChange, onClose }:
+  { account: Account; state: AccountState;
+    stack: RooftopStack;
+    stackOptions: { crm: string[]; scheduler: string[]; dms: string[] };
+    onChange: (p: Partial<AccountState>)=>void;
+    onStackChange: (p: Partial<RooftopStack>)=>void;
+    onClose: ()=>void }) {
   const toggleCause = (c: RootCause) => {
     const next = state.rootCauses.includes(c)
       ? state.rootCauses.filter(x => x !== c)
@@ -2339,6 +2593,37 @@ function AccountDrawer({ account, state, onChange, onClose }:
             : <>Default: <strong style={{ color: "#374151" }}>{account.csmName || "—"}</strong> (from funnel sheet). Type a new email to override for this account.</>}
         </div>
 
+        <SectionTitle>Tech stack</SectionTitle>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 4 }}>
+          <StackField
+            label="CRM"
+            placeholder="VinSolutions, Tekion…"
+            value={stack.crmName}
+            onChange={v => onStackChange({ crmName: v })}
+            options={stackOptions.crm}
+            listId="stack-crm"
+          />
+          <StackField
+            label="Service Scheduler"
+            placeholder="xtime, myKaarma…"
+            value={stack.serviceSchedulerName}
+            onChange={v => onStackChange({ serviceSchedulerName: v })}
+            options={stackOptions.scheduler}
+            listId="stack-scheduler"
+          />
+          <StackField
+            label="DMS"
+            placeholder="Reynolds, CDK, Dealertrack…"
+            value={stack.dmsName}
+            onChange={v => onStackChange({ dmsName: v })}
+            options={stackOptions.dms}
+            listId="stack-dms"
+          />
+        </div>
+        <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 14 }}>
+          Set per rooftop — shared across all agents on this dealership. Pick a suggestion or type a new vendor.
+        </div>
+
         <SectionTitle>Diagnosis · root causes</SectionTitle>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
           {ROOT_CAUSES.map(c => {
@@ -2406,6 +2691,32 @@ function AccountDrawer({ account, state, onChange, onClose }:
 }
 
 // ─── Atoms ─────────────────────────────────────────────────────────────────
+// Combobox-style field. Uses HTML5 <datalist> so users get a dropdown of
+// values already in use (across all accounts in state) AND can type
+// anything new — a freshly-typed value automatically appears in the list
+// for future accounts once it's saved.
+function StackField({ label, placeholder, value, onChange, options, listId }: {
+  label: string; placeholder: string;
+  value: string; onChange: (v: string) => void;
+  options: string[]; listId: string;
+}) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <span style={{ fontSize: 10, color: "#6b7280", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</span>
+      <input
+        list={listId}
+        placeholder={placeholder}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{ width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, fontWeight: 600 }}
+      />
+      <datalist id={listId}>
+        {options.map(opt => <option key={opt} value={opt} />)}
+      </datalist>
+    </label>
+  );
+}
+
 function SectionTitle({ children }: { children: ReactNode }) {
   return <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>{children}</div>;
 }
@@ -2526,7 +2837,10 @@ const S: Record<string, CSSProperties> = {
   tabs: { display: "flex", gap: 4, marginBottom: 12, borderBottom: "1px solid #e5e7eb" },
 };
 const Sx = {
-  divider: { width: 1, height: 24, background: "#e5e7eb" } as CSSProperties,
+  // Filter bar "divider" — now a small subtle dot rather than a hard 1px
+  // vertical line. The hard line looked cluttered; a dot reads as a soft
+  // visual separator and stays out of the way.
+  divider: { width: 3, height: 3, borderRadius: "50%", background: "#d1d5db", margin: "0 4px", flex: "0 0 auto" } as CSSProperties,
   matrixHeadCell: { padding: "10px 12px", borderBottom: "1px solid #e5e7eb", fontSize: 11, fontWeight: 700, color: "#374151", textTransform: "uppercase" as const, letterSpacing: 0.4 },
   matrixCell: { padding: "12px 14px", borderBottom: "1px solid #f3f4f6" } as CSSProperties,
   cellTruncate: { minWidth: 0, maxWidth: "100%" } as CSSProperties,
