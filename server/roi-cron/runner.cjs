@@ -223,7 +223,7 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
     <td valign="top" align="right"><div style="font-size:13px;font-weight:700;">${esc(name)}</div><div style="font-size:12px;color:#6B7280;">${esc(dateLabel)}</div></td>
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:8px 22px 0;"><table width="100%"><tr>
-    <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">Appointments yesterday</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${m.appointmentsYesterday || 0}</div><div style="margin-top:12px;"><span style="display:inline-block;font-size:11px;font-weight:600;color:#4600F2;background:#EEF0FF;border-radius:9999px;padding:4px 10px;">${m.appointmentsYesterdayMTD || 0} month to date</span></div></div></td>
+    <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">${(m.appointmentsYesterday || 0) > 0 ? "Appointments yesterday" : "Leads warmed"}</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${(m.appointmentsYesterday || 0) > 0 ? (m.appointmentsYesterday || 0) : (m.inboundUniqueLeads || 0)}</div><div style="margin-top:12px;"><span style="display:inline-block;font-size:11px;font-weight:600;color:#4600F2;background:#EEF0FF;border-radius:9999px;padding:4px 10px;">${m.appointmentsYesterdayMTD || 0} ${(m.appointmentsYesterday || 0) > 0 ? "month to date" : "appointments MTD"}</span></div></div></td>
     <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">Conversations handled</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${m.conversationsHandled || 0}</div>${hasConv ? channelBar : `<div style="font-size:11px;color:#9CA3AF;margin-top:10px;">No conversations yesterday</div>`}</div></td>
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:14px 28px 4px;">${btnP("View appointments", L.appts)} ${btnS("Open conversation inbox", L.conv)}</td></tr>
@@ -233,13 +233,9 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
     <table width="100%"><tr>
       ${mini("Appointments", m.appointmentsYesterday || 0, `Yesterday · ${m.appointmentsYesterdayMTD || 0} MTD`)}
       ${mini("Unique leads", m.inboundUniqueLeads || 0, `Yesterday · ${m.inboundUniqueLeadsMTD || 0} MTD`)}
-      ${isSvc ? mini("Transfer rate", `${m.transferRate || 0}%`, `${m.transferCount || 0} transfers`) : mini("Avg response time", m.avgResponseTime || "—", m.avgResponseTimeMTD || "—")}
+      ${mini("Warm transfers", m.warmTransfers || 0, `Yesterday · ${m.warmTransfersMTD || 0} MTD`)}
     </tr></table>
-    <div style="padding:0 6px;">${hasInboundConv ? `${sect("Channel breakdown")}${mkBar(callIn, smsIn, chatIn)}
-      <table width="100%" style="margin-top:14px;"><tr>
-        <td valign="top" width="50%"><div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#6B7280;font-weight:600;">After-hours</div><div style="font-size:13px;margin-top:3px;"><b>${m.afterHoursLeads || 0}</b> leads engaged · <b>${m.afterHoursAppts || 0}</b> appts booked</div></td>
-        <td valign="top" width="50%"><div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#6B7280;font-weight:600;">Warm transfers</div><div style="font-size:13px;margin-top:3px;"><b>${m.warmTransfers || 0}</b> · ${m.warmTransfersMTD || 0} MTD</div></td>
-      </tr></table>` : ""}
+    <div style="padding:0 6px;">${hasInboundConv ? `${sect("Channel breakdown")}${mkBar(callIn, smsIn, chatIn)}` : ""}
       ${tv.length ? `${sect("Top vehicles of interest")}<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;">${tv.map((v, i) => `<tr><td style="padding:12px 14px;${i ? "border-top:1px solid #E5E7EB;" : ""}"><table width="100%"><tr><td style="font-size:13px;color:#111827;">${esc(v.name)}</td><td align="right" style="font-size:13px;font-weight:700;color:#111827;">${v.count}</td></tr></table></td></tr>`).join("")}</table>` : ""}
     </div>
   </td></tr>
@@ -345,6 +341,7 @@ async function runOnce() {
       const m = {
         ...day, actionItemsTotal: ai.total,
         appointmentsYesterdayMTD: mtd.appointmentsYesterday,
+        warmTransfersMTD: mtd.warmTransfers,
         inboundUniqueLeadsMTD: mtd.inboundUniqueLeads,
         outboundUniqueReachedMTD: mtd.outboundUniqueReached,
         outboundConnectRateMTD: mtd.outboundConnectRate,
@@ -432,7 +429,7 @@ async function backfill(start, end) {
         const mtd = await fetchMetrics(L.team_id, L.department, w.monthStart, w.yEnd);
         const ai = await fetchActionItems(L.team_id, L.department, w.yStart, w.yEnd);
         const camps = await fetchCampaigns(L.team_id, L.department, w.yStart, w.yEnd);
-        const m = { ...dayM, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
+        const m = { ...dayM, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
         const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
         const g = guardrail(m);

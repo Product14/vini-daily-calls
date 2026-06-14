@@ -65,7 +65,7 @@ export function renderDigestEmail(metrics: DigestMetrics, opts: RenderOpts): str
     <td valign="top" align="right"><div style="font-size:13px;font-weight:700;">${esc(opts.rooftopName)}</div><div style="font-size:12px;color:#6B7280;">${esc(dateLabel)}</div></td>
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:8px 22px 0;"><table width="100%"><tr>
-    <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">Appointments yesterday</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${n(m.appointmentsYesterday)}</div><div style="margin-top:12px;"><span style="display:inline-block;font-size:11px;font-weight:600;color:#4600F2;background:#EEF0FF;border-radius:9999px;padding:4px 10px;">${n(m.appointmentsYesterdayMTD)} month to date</span></div></div></td>
+    <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">${Number(m.appointmentsYesterday) > 0 ? "Appointments yesterday" : "Leads warmed"}</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${Number(m.appointmentsYesterday) > 0 ? n(m.appointmentsYesterday) : n(m.inboundUniqueLeads)}</div><div style="margin-top:12px;"><span style="display:inline-block;font-size:11px;font-weight:600;color:#4600F2;background:#EEF0FF;border-radius:9999px;padding:4px 10px;">${n(m.appointmentsYesterdayMTD)} ${Number(m.appointmentsYesterday) > 0 ? "month to date" : "appointments MTD"}</span></div></div></td>
     <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">Conversations handled</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${conv}</div>${hasConv ? channelBar : `<div style="font-size:11px;color:#9CA3AF;margin-top:10px;">No conversations yesterday</div>`}</div></td>
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:14px 28px 4px;">${btnP("View appointments", L.appointments)} ${btnS("Open conversation inbox", L.conversations)}</td></tr>
@@ -75,13 +75,9 @@ export function renderDigestEmail(metrics: DigestMetrics, opts: RenderOpts): str
     <table width="100%"><tr>
       ${mini("Appointments", n(m.appointmentsYesterday), `Yesterday · ${n(m.appointmentsYesterdayMTD)} MTD`)}
       ${mini("Unique leads", n(m.inboundUniqueLeads), `Yesterday · ${n(m.inboundUniqueLeadsMTD)} MTD`)}
-      ${isSvc ? mini("Transfer rate", `${n(m.transferRate)}%`, `${n(m.transferCount)} transfers`) : mini("Avg response time", (m.avgResponseTime as string) || "—", (m.avgResponseTimeMTD as string) || "—")}
+      ${mini("Warm transfers", n(m.warmTransfers), `Yesterday · ${n(m.warmTransfersMTD)} MTD`)}
     </tr></table>
-    <div style="padding:0 6px;">${hasInboundConv ? `${sect("Channel breakdown")}${mkBar(callIn, smsIn, chatIn)}
-      <table width="100%" style="margin-top:14px;"><tr>
-        <td valign="top" width="50%"><div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#6B7280;font-weight:600;">After-hours</div><div style="font-size:13px;margin-top:3px;"><b>${n(m.afterHoursLeads)}</b> leads engaged · <b>${n(m.afterHoursAppts)}</b> appts booked</div></td>
-        <td valign="top" width="50%"><div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#6B7280;font-weight:600;">Warm transfers</div><div style="font-size:13px;margin-top:3px;"><b>${n(m.warmTransfers)}</b> · ${n(m.warmTransfersMTD)} MTD</div></td>
-      </tr></table>` : ""}
+    <div style="padding:0 6px;">${hasInboundConv ? `${sect("Channel breakdown")}${mkBar(callIn, smsIn, chatIn)}` : ""}
       ${tv.length ? `${sect("Top vehicles of interest")}<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;">${tv.map((v, i) => `<tr><td style="padding:12px 14px;${i ? "border-top:1px solid #E5E7EB;" : ""}"><table width="100%"><tr><td style="font-size:13px;color:#111827;">${esc(v.name)}</td><td align="right" style="font-size:13px;font-weight:700;color:#111827;">${v.count}</td></tr></table></td></tr>`).join("")}</table>` : ""}
     </div>
   </td></tr>
