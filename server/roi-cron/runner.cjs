@@ -320,7 +320,17 @@ async function runOnce() {
     if (c && c.daily_enabled === false) return;
     const w = RUN_LOCAL_DATE ? { ...windowsForDate(RUN_LOCAL_DATE, tz), localHour: localParts(tz).localHour } : localParts(tz);
     const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
-    const upsert = (extra) => sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
+    // FAIL LOUD on write failure. The 'queued' upsert runs BEFORE the send, so if the DB write
+    // is blocked (e.g. ROI_SUPABASE_SERVICE_KEY is the anon key → RLS denies the insert), this
+    // throws and we NEVER send — preventing the silent "no row written → re-send every hour" loop.
+    const upsert = async (extra) => {
+      const { data, error } = await sb
+        .from("roi_digest_runs")
+        .upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" })
+        .select("id");
+      if (error) throw new Error(`roi_digest_runs write failed — is ROI_SUPABASE_SERVICE_KEY the service_role key (not anon)? ${error.message}`);
+      if (!data || data.length === 0) throw new Error("roi_digest_runs write affected 0 rows (RLS blocked — service_role key required)");
+    };
     try {
       // already sent today?
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
