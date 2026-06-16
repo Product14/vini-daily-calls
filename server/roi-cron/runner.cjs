@@ -3,8 +3,8 @@
  *
  * Flow (per the spec):
  *   Step 0&1  finalized set = roi_live_departments.is_live + roi_recipients (who receives)
- *   Step 2    fetch metrics from the PUBLIC EMBEDDING (params: department + team_id) → store in
- *             roi_digest_runs with status 'queued' (data fetched, not sent yet)
+ *   Step 2    fetch metrics from the Reporting API (reporting-vini, Supabase-backed) per team+dept
+ *             → store in roi_digest_runs with status 'queued' (data fetched, not sent yet)
  *   Step 3    validate guardrails on the data
  *   Step 4    SEND via the mail curl IFF: team live ✔ · recipients added ✔ · guardrails pass ✔ ·
  *             send-hour reached ✔ · not already sent today ✔
@@ -18,25 +18,15 @@
  *   node runner.cjs --loop     # run now, then every hour
  */
 const { createClient } = require("@supabase/supabase-js");
-const jwt = require("jsonwebtoken");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
-// 'metabase-embed' (signed JWT — default) | 'metabase' (public card) | 'clickhouse'
-const EMBEDDING_TYPE = process.env.EMBEDDING_TYPE || "metabase-embed";
-const CH_KEY_ID = process.env.CLICKHOUSE_KEY_ID, CH_KEY_SECRET = process.env.CLICKHOUSE_KEY_SECRET;
-// signed-embed config
-const MB_SITE = process.env.METABASE_SITE_URL || "https://metabase.spyne.ai";
-const MB_SECRET = process.env.METABASE_SECRET_KEY;
-const Q_METRICS = process.env.METABASE_METRICS_QUESTION;        // e.g. 12215
-const Q_ACTION = process.env.METABASE_ACTION_QUESTION;          // e.g. 12216
-const Q_CAMPAIGNS = process.env.METABASE_CAMPAIGNS_QUESTION;    // e.g. 12217
-// public-card config (alt)
-const EMBEDDING_URL = process.env.EMBEDDING_URL;
 const MAIL_URL = process.env.MAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
 const MAIL_TEMPLATE = process.env.MAIL_TEMPLATE || "email-control-tower-report";
 const MAIL_TOKEN = process.env.MAIL_TOKEN || "";
 const DRY_RUN = process.env.DRY_RUN !== "false";               // default ON
+// Metrics source: the Reporting API (Supabase-backed) at reporting-vini. Metabase has been removed.
+const REPORTING_API_BASE = process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app";
 
 // --rerender only re-renders rendered_html from already-stored metrics → Supabase only, no Metabase.
 const RERENDER_ONLY = process.argv.includes("--rerender");
@@ -45,11 +35,6 @@ const RERENDER_ONLY = process.argv.includes("--rerender");
 const IS_CLI = require.main === module;
 if (IS_CLI) {
   if (!SB_URL || !SB_KEY) { console.error("Set ROI_SUPABASE_URL + ROI_SUPABASE_SERVICE_KEY"); process.exit(1); }
-  if (!RERENDER_ONLY) {
-    if (EMBEDDING_TYPE === "metabase-embed") {
-      if (!MB_SECRET || !Q_METRICS) { console.error("Set METABASE_SECRET_KEY + METABASE_METRICS_QUESTION (+ ACTION/CAMPAIGNS)"); process.exit(1); }
-    } else if (!EMBEDDING_URL) { console.error("Set EMBEDDING_URL"); process.exit(1); }
-  }
 }
 const sb = createClient(SB_URL || "http://invalid.local", SB_KEY || "noop", { auth: { persistSession: false } });
 
@@ -71,85 +56,75 @@ function localParts(tz) {
   const monthStart = localToUTC(Y, M, 1, tz);
   const localDate = `${Y}-${String(M).padStart(2, "0")}-${String(D - 1).padStart(2, "0")}`;
   const dateLabel = new Date(yStart.getTime()).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-  return { localHour: H, localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart) };
+  return { localHour: H, localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
+    apiStart: localDate, apiEnd: `${Y}-${String(M).padStart(2, "0")}-${String(D).padStart(2, "0")}`, apiMonthStart: `${Y}-${String(M).padStart(2, "0")}-01` };
 }
 
-// ── call an embedding card with the 4 params (team_id, start, end, dept) ─────
-// `source` = Metabase question id (signed embed) OR a card URL (public/clickhouse).
-async function callEmbed(source, teamId, dept, start, end) {
-  const params = { team_id: teamId, dept, start, end };
-  if (EMBEDDING_TYPE === "metabase-embed") {
-    const token = jwt.sign({ resource: { question: Number(source) }, params, exp: Math.round(Date.now() / 1000) + 600 }, MB_SECRET);
-    const res = await fetch(`${MB_SITE}/api/embed/card/${token}/query/json`, { headers: { Accept: "application/json" } });
-    if (!res.ok) throw new Error(`embed q${source} ${res.status}: ${(await res.text()).slice(0, 160)}`);
-    return await res.json();
-  }
-  if (EMBEDDING_TYPE === "clickhouse") {
-    const res = await fetch(source, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${CH_KEY_ID}:${CH_KEY_SECRET}`).toString("base64")}` }, body: JSON.stringify({ queryVariables: params, format: "JSONEachRow" }) });
-    if (!res.ok) throw new Error(`embed ${res.status}: ${(await res.text()).slice(0, 160)}`);
-    const t = await res.text(); return t.trim() ? t.trim().split("\n").map((l) => JSON.parse(l)) : [];
-  }
-  const parameters = encodeURIComponent(JSON.stringify([
-    { type: "category", value: teamId, target: ["variable", ["template-tag", "team_id"]] },
-    { type: "category", value: dept, target: ["variable", ["template-tag", "dept"]] },
-    { type: "category", value: start, target: ["variable", ["template-tag", "start"]] },
-    { type: "category", value: end, target: ["variable", ["template-tag", "end"]] },
-  ]));
-  const res = await fetch(`${source}?parameters=${parameters}`, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`embed ${res.status}: ${(await res.text()).slice(0, 160)}`);
-  return await res.json();
+// ── Reporting API source (reporting-vini, Supabase-backed) — the only metrics source ──
+// One team/window fetch returns all 4 agents (Sales/Service × Inbound/Outbound). We combine
+// each dept's Inbound+Outbound into the same `m` shape the Metabase path produces.
+const _apiCache = new Map(); // dedupe + memoize (team|start|end) within a run
+async function apiReport(teamId, start, end) {
+  const k = `${teamId}|${start}|${end}`;
+  if (_apiCache.has(k)) return _apiCache.get(k);
+  const p = (async () => {
+    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}`);
+    if (!res.ok) throw new Error(`reporting-api ${res.status} (${teamId} ${start}..${end}): ${(await res.text()).slice(0, 120)}`);
+    const j = await res.json();
+    const byName = {};
+    for (const a of j.agents || []) byName[a.name] = a;
+    return byName;
+  })();
+  _apiCache.set(k, p);
+  return p;
 }
-// resolve the right source per card kind (question id for embed, URL otherwise)
-const CARD = {
-  metrics: () => (EMBEDDING_TYPE === "metabase-embed" ? Q_METRICS : EMBEDDING_URL),
-  action: () => (EMBEDDING_TYPE === "metabase-embed" ? Q_ACTION : process.env.ACTION_ITEMS_EMBEDDING_URL),
-  campaigns: () => (EMBEDDING_TYPE === "metabase-embed" ? Q_CAMPAIGNS : process.env.CAMPAIGNS_EMBEDDING_URL),
+const apiPickDept = (byName, dept) => {
+  const D = dept === "service" ? "Service" : "Sales";
+  return { ib: byName[`${D} Inbound`] || {}, ob: byName[`${D} Outbound`] || {} };
 };
-
-// metrics for ONE window (faithful metabase-metrics.sql columns)
-async function fetchMetrics(teamId, dept, start, end) {
-  const rows = await callEmbed(CARD.metrics(), teamId, dept, start, end);
-  const r = (Array.isArray(rows) ? rows[0] : rows) || {};
-  const num = (k) => { const v = parseInt(String(r[k] ?? 0), 10); return Number.isFinite(v) ? v : 0; };
-  const call = num("conv_call"), sms = num("conv_sms"), chat = num("conv_chat");
-  const callIn = num("conv_call_in"), smsIn = num("conv_sms_in"), chatIn = num("conv_chat_in");
-  const callOut = num("conv_call_out"), smsOut = num("conv_sms_out"), chatOut = num("conv_chat_out");
-  const obTotal = num("ob_total_calls"), obReached = num("ob_unique_reached"), obConnected = num("ob_connected");
-  const tTotal = num("transfer_total_calls"), tCount = num("transfer_count");
+async function apiMetrics(teamId, dept, start, end) {
+  const { ib, ob } = apiPickDept(await apiReport(teamId, start, end), dept);
+  const n = (v) => Number(v) || 0;
+  const im = ib.metrics || {}, om = ob.metrics || {}, ics = ib.channelSplit || {}, ocs = ob.channelSplit || {}, ir = ib.report || {};
+  const callIn = n(ics.voice), smsIn = n(ics.sms), callOut = n(ocs.voice), smsOut = n(ocs.sms);
+  const obCalls = n(om.calls), obRate = n(om.connectRate), cf = ir.callFlow || {};
   return {
-    appointmentsYesterday: num("appts_all"), appointmentsInbound: num("appts_inbound"),
-    inboundUniqueLeads: num("inbound_unique_leads"),
-    conversationsCall: call, conversationsSms: sms, conversationsChat: chat, conversationsHandled: call + sms + chat,
-    conversationsCallIn: callIn, conversationsSmsIn: smsIn, conversationsChatIn: chatIn,
-    conversationsCallOut: callOut, conversationsSmsOut: smsOut, conversationsChatOut: chatOut,
-    outboundUniqueReached: obReached, outboundTotalCalls: obTotal, outboundConnected: obConnected,
-    outboundConnectRate: obTotal ? Math.round((obConnected * 100) / obTotal) : 0,
-    outboundAppointmentsSet: num("ob_appts"),
-    warmTransfers: num("warm_transfers"),
-    transferTotalCalls: tTotal, transferCount: tCount, transferRate: tTotal ? Math.round((tCount * 100) / tTotal) : 0,
+    appointmentsYesterday: n(im.appointments) + n(om.appointments), appointmentsInbound: n(im.appointments),
+    inboundUniqueLeads: n(ir.leadsAttempted),
+    conversationsCall: callIn + callOut, conversationsSms: smsIn + smsOut, conversationsChat: 0, conversationsHandled: callIn + callOut + smsIn + smsOut,
+    conversationsCallIn: callIn, conversationsSmsIn: smsIn, conversationsChatIn: 0,
+    conversationsCallOut: callOut, conversationsSmsOut: smsOut, conversationsChatOut: 0,
+    outboundUniqueReached: n(om.conversations), outboundTotalCalls: obCalls, outboundConnected: Math.round((obCalls * obRate) / 100),
+    outboundConnectRate: obRate, outboundAppointmentsSet: n(om.appointments),
+    warmTransfers: n(cf.transferred), transferTotalCalls: n(cf.total), transferCount: n(cf.transferred), transferRate: 0,
   };
 }
-
-// action items by intent (metabase-action-items.sql) — total + breakdown
-async function fetchActionItems(teamId, dept, start, end) {
-  const src = CARD.action();
-  if (!src) return { total: 0, items: [] };
+async function apiActionItems(teamId, dept, start, end) {
   try {
-    const rows = await callEmbed(src, teamId, dept, start, end);
-    const items = (rows || []).map((r) => ({ intent: r.intent, count: Number(r.cnt) || 0 }));
+    const { ib } = apiPickDept(await apiReport(teamId, start, end), dept);
+    const items = ((ib.report || {}).intent || []).map((i) => ({ intent: i.label, count: Number(i.value) || 0 })).filter((i) => i.count > 0);
     return { total: items.reduce((s, i) => s + i.count, 0), items };
   } catch { return { total: 0, items: [] }; }
 }
-
-// active campaigns (metabase-campaigns.sql)
-async function fetchCampaigns(teamId, dept, start, end) {
-  const src = CARD.campaigns();
-  if (!src) return [];
+async function apiCampaigns(teamId, dept, start, end) {
   try {
-    const rows = await callEmbed(src, teamId, dept, start, end);
-    return (rows || []).map((c) => { const dials = Number(c.dials) || 0, appts = Number(c.appts) || 0; return { name: c.name, dials, appts, conversion: dials > 0 ? `${((appts * 100) / dials).toFixed(1)}%` : "0%" }; }).filter((c) => c.dials > 0); // drop zero-dial campaigns
+    const { ob } = apiPickDept(await apiReport(teamId, start, end), dept);
+    const mapped = ((ob.report || {}).activeCampaigns || []).map((c) => {
+      const dials = Number(c.enrolled) || 0, appts = Number(c.appts) || 0;
+      const conversion = c.apptRate != null ? `${Number(c.apptRate).toFixed(1)}%` : dials > 0 ? `${((appts * 100) / dials).toFixed(1)}%` : "0%";
+      return { name: (c.name || "").trim() || "Campaign", dials, appts, conversion };
+    }).filter((c) => c.dials > 0);
+    // dedupe by name (keep the highest-enrolled row), then surface the most productive — sorted by
+    // appts desc then enrolled desc, capped — so a long recall list can't bloat the email.
+    const byName = new Map();
+    for (const c of mapped) { const e = byName.get(c.name); if (!e || c.dials > e.dials) byName.set(c.name, c); }
+    return [...byName.values()].sort((a, b) => b.appts - a.appts || b.dials - a.dials).slice(0, 8);
   } catch { return []; }
 }
+// metric fetchers — Reporting API only (day window = apiStart..apiEnd, MTD = apiMonthStart..apiEnd)
+const getMetrics = (teamId, dept, w, win) => apiMetrics(teamId, dept, win === "mtd" ? w.apiMonthStart : w.apiStart, w.apiEnd);
+const getActionItems = (teamId, dept, w) => apiActionItems(teamId, dept, w.apiStart, w.apiEnd);
+const getCampaigns = (teamId, dept, w) => apiCampaigns(teamId, dept, w.apiStart, w.apiEnd);
 
 // ── guardrails ──────────────────────────────────────────────────────────────
 function guardrail(m) {
@@ -277,10 +252,9 @@ async function sendMail(to, subject, html) {
 async function runOnce() {
   const ts = new Date().toISOString();
   console.log(`\n── ROI cron pass @ ${ts} · DRY_RUN=${DRY_RUN} ──`);
-  // FAIL LOUD: a misconfigured serverless function (missing ROI_SUPABASE_* / Metabase env) used to
+  // FAIL LOUD: a misconfigured serverless function (missing ROI_SUPABASE_*) used to
   // silently return an all-zero summary because the Supabase error was swallowed. Surface it.
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
-  if (EMBEDDING_TYPE === "metabase-embed" && (!MB_SECRET || !Q_METRICS)) throw new Error("Missing METABASE_SECRET_KEY / METABASE_METRICS_QUESTION env.");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,digest_send_hour,daily_enabled"),
@@ -335,9 +309,9 @@ async function runOnce() {
       const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); return; }
       // step 2 — fetch via embedding (daily window + MTD window) + action items, store queued
-      const day = await fetchMetrics(L.team_id, L.department, w.yStart, w.yEnd);
-      const mtd = await fetchMetrics(L.team_id, L.department, w.monthStart, w.yEnd);
-      const ai = await fetchActionItems(L.team_id, L.department, w.yStart, w.yEnd);
+      const day = await getMetrics(L.team_id, L.department, w, "day");
+      const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
+      const ai = await getActionItems(L.team_id, L.department, w);
       const m = {
         ...day, actionItemsTotal: ai.total,
         appointmentsYesterdayMTD: mtd.appointmentsYesterday,
@@ -358,7 +332,7 @@ async function runOnce() {
       const sendHour = c?.digest_send_hour ?? 7;
       if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:00 < send ${String(sendHour).padStart(2, "0")}:00)`); return; }
       // active campaigns (3rd embedding) — only now, just before render
-      const camps = await fetchCampaigns(L.team_id, L.department, w.yStart, w.yEnd);
+      const camps = await getCampaigns(L.team_id, L.department, w);
       const metricsFull = { ...metrics, campaigns: camps };
       const html = renderHtml(name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, m, camps);
       const dry = DRY_RUN || L.dry_run === true;
@@ -395,7 +369,9 @@ function windowsForDate(localDate, tz) {
   const yEnd = new Date(localToUTC(y, m, d + 1, tz).getTime() - 1000);
   const monthStart = localToUTC(y, m, 1, tz);
   const dateLabel = new Date(yStart.getTime()).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-  return { localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart) };
+  const apiEnd = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  return { localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
+    apiStart: localDate, apiEnd, apiMonthStart: `${y}-${String(m).padStart(2, "0")}-01` };
 }
 function dateRange(start, end) {
   const out = []; const d = new Date(`${start}T00:00:00Z`); const last = new Date(`${end}T00:00:00Z`);
@@ -425,10 +401,10 @@ async function backfill(start, end) {
       const w = windowsForDate(day, tz);
       const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: day, dealer_timezone: tz, trigger: "backfill" };
       try {
-        const dayM = await fetchMetrics(L.team_id, L.department, w.yStart, w.yEnd);
-        const mtd = await fetchMetrics(L.team_id, L.department, w.monthStart, w.yEnd);
-        const ai = await fetchActionItems(L.team_id, L.department, w.yStart, w.yEnd);
-        const camps = await fetchCampaigns(L.team_id, L.department, w.yStart, w.yEnd);
+        const dayM = await getMetrics(L.team_id, L.department, w, "day");
+        const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
+        const ai = await getActionItems(L.team_id, L.department, w);
+        const camps = await getCampaigns(L.team_id, L.department, w);
         const m = { ...dayM, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
         const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
@@ -500,7 +476,7 @@ async function rerender() {
 }
 
 // Importable surface for the Vercel serverless cron (api/cron/roi-email.js) + tests.
-module.exports = { runOnce, backfill, rerender, renderHtml, fetchMetrics, fetchCampaigns };
+module.exports = { runOnce, backfill, rerender, renderHtml, apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {
