@@ -1304,19 +1304,19 @@ function AccountTable({ rows, state, rooftopStack, onOpen }: {
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
         <colgroup>
-          <col style={{ width: 210 }} />  {/* Rooftop */}
-          <col style={{ width: 90 }}  />  {/* Agent */}
-          <col style={{ width: 90 }}  />  {/* MRR */}
-          <col style={{ width: 130 }} />  {/* CSM */}
-          <col style={{ width: 110 }} />  {/* CRM */}
-          <col style={{ width: 110 }} />  {/* Service Scheduler */}
-          <col style={{ width: 100 }} />  {/* DMS */}
-          <col style={{ width: 78 }}  />  {/* RAG */}
-          <col style={{ width: 78 }}  />  {/* ROI */}
-          <col style={{ width: 130 }} />  {/* Cohort */}
-          <col style={{ width: 100 }} />  {/* 30d Leads */}
-          <col style={{ width: 100 }} />  {/* 30d Appts */}
-          <col />                          {/* Next Step — flexes */}
+          <col style={{ width: 220 }} />  {/* Rooftop (enterprise name wraps to 2 lines via line-clamp) */}
+          <col style={{ width: 72 }}  />  {/* Agent */}
+          <col style={{ width: 78 }}  />  {/* MRR */}
+          <col style={{ width: 104 }} />  {/* CSM */}
+          <col style={{ width: 88 }}  />  {/* CRM */}
+          <col style={{ width: 88 }}  />  {/* Service Scheduler */}
+          <col style={{ width: 78 }}  />  {/* DMS */}
+          <col style={{ width: 64 }}  />  {/* RAG */}
+          <col style={{ width: 60 }}  />  {/* ROI */}
+          <col style={{ width: 96 }}  />  {/* Cohort */}
+          <col style={{ width: 70 }}  />  {/* 30d Leads */}
+          <col style={{ width: 70 }}  />  {/* 30d Appts */}
+          <col style={{ minWidth: 240 }} />  {/* Next Step — flexes, with floor */}
         </colgroup>
         <thead style={{ background: "#f9fafb" }}>
           <tr>
@@ -1342,8 +1342,11 @@ function AccountTable({ rows, state, rooftopStack, onOpen }: {
               <tr key={a.key} onClick={()=>onOpen(a.key)} style={{ ...Sx.tr, verticalAlign: "top" }}>
                 <Td>
                   <div style={Sx.cellTruncate}>
-                    <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.rooftopName}</div>
-                    <div style={{ fontSize: 11, color: "#6b7280", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.enterpriseName}</div>
+                    <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.rooftopName}>{a.rooftopName}</div>
+                    <div
+                      title={a.enterpriseName}
+                      style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                    >{a.enterpriseName}</div>
                   </div>
                 </Td>
                 <Td>{AGENT_LABELS[a.agentType]}</Td>
@@ -1710,19 +1713,19 @@ function NextStepsView({ accounts, state, onOpen }: {
         </div>
       )}
 
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, overflowX: "auto", WebkitOverflowScrolling: "touch" as const }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 1100 }}>
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, tableLayout: "fixed" }}>
           <colgroup>
-            <col style={{ width: 84 }}  />   {/* Status */}
-            <col style={{ width: 240 }} />   {/* Task */}
+            <col style={{ width: 78 }}  />   {/* Status */}
+            <col />                          {/* Task — flexes to take leftover */}
             <col style={{ width: 130 }} />   {/* Owner */}
-            <col style={{ width: 92 }}  />   {/* Team */}
-            <col style={{ width: 76 }}  />   {/* ETA */}
-            <col style={{ width: 200 }} />   {/* Rooftop */}
-            <col style={{ width: 76 }}  />   {/* Agent */}
-            <col style={{ width: 78 }}  />   {/* RAG */}
-            <col style={{ width: 90 }}  />   {/* ARR */}
-            <col style={{ width: 120 }} />   {/* Cohort */}
+            <col style={{ width: 80 }}  />   {/* Team */}
+            <col style={{ width: 72 }}  />   {/* ETA */}
+            <col style={{ width: 170 }} />   {/* Rooftop */}
+            <col style={{ width: 80 }}  />   {/* Agent */}
+            <col style={{ width: 70 }}  />   {/* RAG */}
+            <col style={{ width: 88 }}  />   {/* ARR */}
+            <col style={{ width: 96 }}  />   {/* Cohort */}
           </colgroup>
           <thead style={{ background: "#f9fafb" }}>
             <tr>
