@@ -12,8 +12,6 @@
  */
 import { supabase, isSupabaseConfigured } from "./supabaseClient";
 import {
-  ROOFTOPS as MOCK_ROOFTOPS,
-  TRACKER_META,
   type AgentType,
   type Cadence,
   type CellRun,
@@ -27,7 +25,7 @@ import {
   type SendStatus,
 } from "./mockData";
 
-export type RooftopSource = "supabase" | "mock";
+export type RooftopSource = "supabase" | "unconfigured" | "error";
 export type LoadResult = {
   rooftops: RooftopRow[];
   source: RooftopSource;
@@ -49,7 +47,7 @@ type RunRow = {
   message_id: string | null;
   sent_at: string | null;
 };
-type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null };
+type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null; digest_send_hour: number | null; digest_send_minute: number | null };
 type RecipientRow = {
   team_id: string; email: string; name: string | null;
   receives_sales: boolean; receives_service: boolean; email_enabled: boolean;
@@ -113,23 +111,25 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
 }
 
 export async function loadRooftops(): Promise<LoadResult> {
+  const todayIso = new Date().toISOString().slice(0, 10);
   if (!isSupabaseConfigured || !supabase) {
-    return { rooftops: MOCK_ROOFTOPS, source: "mock", today: TRACKER_META.today, lastSynced: new Date() };
+    // No mock fallback — surface an explicit unconfigured state so the UI shows a message, not fake data.
+    return { rooftops: [], source: "unconfigured", today: todayIso, lastSynced: new Date() };
   }
 
   const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
     supabase.from("roi_digest_runs")
       .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at")
       .order("local_date", { ascending: false }).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name"),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,digest_send_hour,digest_send_minute"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
 
   const err = runsRes.error || cfgRes.error || recRes.error || liveRes.error;
   if (err) {
-    console.warn("[tracker] Supabase read failed, falling back to mock:", err.message);
-    return { rooftops: MOCK_ROOFTOPS, source: "mock", today: TRACKER_META.today, lastSynced: new Date() };
+    console.warn("[tracker] Supabase read failed:", err.message);
+    return { rooftops: [], source: "error", today: todayIso, lastSynced: new Date() };
   }
 
   const runs = (runsRes.data ?? []) as RunRow[];
@@ -187,11 +187,14 @@ export async function loadRooftops(): Promise<LoadResult> {
     for (const rec of latestWithRecips?.recipients ?? []) {
       recvMap.set(rec.email.toLowerCase(), rec.received === true && rec.bounced !== true);
     }
-    const recips: Recipient[] = (recByTeam.get(teamId) ?? [])
-      .filter(r => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled)
-      .map(r => ({ email: r.email, name: r.name ?? undefined, received: recvMap.get(r.email.toLowerCase()) ?? false }));
+    // every recipient routed to this department (incl. disabled) → view + toggle
+    const recipsAll: Recipient[] = (recByTeam.get(teamId) ?? [])
+      .filter(r => (dept === "sales" ? r.receives_sales : r.receives_service))
+      .map(r => ({ email: r.email, name: r.name ?? undefined, received: recvMap.get(r.email.toLowerCase()) ?? false, enabled: r.email_enabled }));
+    // ENABLED subset → used for sending
+    const recips: Recipient[] = recipsAll.filter(r => r.enabled);
 
-    const departments: Department[] = [{ kind: dept, live: true, agents, recipients: recips }];
+    const departments: Department[] = [{ kind: dept, live: true, agents, recipients: recips, allRecipients: recipsAll }];
     const daily = buildCells(deptRuns, "daily");
     const current_block = daily[0] && daily[0].status === "not_sent" ? daily[0].reason ?? null : null;
 
@@ -203,6 +206,8 @@ export async function loadRooftops(): Promise<LoadResult> {
       department: dept,
       dryRun: live.dry_run !== false, // default true (dry-run on) when unset
       timezone: cfg?.timezone ?? undefined,
+      sendHour: cfg?.digest_send_hour ?? undefined,
+      sendMinute: cfg?.digest_send_minute ?? undefined,
       csm: cfg?.csm_name?.trim() || "Unassigned",
       group: enterpriseId ? `Ent ${enterpriseId.slice(0, 6)}` : undefined,
       agents_live: agents,

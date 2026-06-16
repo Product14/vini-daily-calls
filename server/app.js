@@ -2205,10 +2205,10 @@ app.post("/api/email/roi-send-now", async (req, res) => {
     if (!recipients.length) return res.status(400).json({ error: "no recipients" });
     if (!html) return res.status(400).json({ error: "no html" });
 
-    // 1) send via the internal mail proxy (same contract as the Daily Snapshot)
-    const mailUrl = process.env.EMAIL_PROXY_URL || process.env.INTERNAL_EMAIL_API_URL;
-    if (!mailUrl) return res.status(500).json({ error: "EMAIL_PROXY_URL not set on server" });
-    const template = process.env.EMAIL_PROXY_TEMPLATE || "email-control-tower-report";
+    // 1) send via the internal mail proxy. Use the SAME env as the cron (MAIL_PROXY_URL) so manual
+    // send works wherever the cron does; fall back to the legacy names and a sane default.
+    const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || process.env.INTERNAL_EMAIL_API_URL || "https://mail.spyne.ai/api/v1/send-template-email";
+    const template = process.env.MAIL_TEMPLATE || process.env.EMAIL_PROXY_TEMPLATE || "email-control-tower-report";
     const mailRes = await fetch(mailUrl, {
       method: "POST",
       headers: {
@@ -2252,7 +2252,7 @@ app.post("/api/email/roi-send-now", async (req, res) => {
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
 app.post("/api/recipients", async (req, res) => {
   try {
-    const { teamId, department, email, name } = req.body ?? {};
+    const { teamId, department, email, name, emailEnabled } = req.body ?? {};
     const dept = department === "service" ? "service" : "sales";
     const addr = String(email || "").trim();
     if (!teamId || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId + valid email required" });
@@ -2262,12 +2262,13 @@ app.post("/api/recipients", async (req, res) => {
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
     // preserve the other department's existing flag if the recipient already exists
     const { data: existing, error: selErr } = await sb.from("roi_recipients")
-      .select("id,receives_sales,receives_service").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+      .select("id,receives_sales,receives_service,email_enabled").eq("team_id", teamId).ilike("email", addr).maybeSingle();
     if (selErr) return res.status(500).json({ error: selErr.message });
     const patch = {
       receives_sales: dept === "sales" ? true : (existing?.receives_sales ?? false),
       receives_service: dept === "service" ? true : (existing?.receives_service ?? false),
-      email_enabled: true,
+      // email_enabled: honor explicit flag; else new rows default ON, existing rows keep their state.
+      email_enabled: typeof emailEnabled === "boolean" ? emailEnabled : (existing ? existing.email_enabled : true),
     };
     const q = existing
       ? sb.from("roi_recipients").update(patch).eq("id", existing.id)
@@ -2278,6 +2279,102 @@ app.post("/api/recipients", async (req, res) => {
   } catch (err) {
     console.error("POST /api/recipients error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "add recipient failed" });
+  }
+});
+
+// ── Toggle a recipient's email_enabled (store state, no send) ────────────────
+app.post("/api/recipients/toggle", async (req, res) => {
+  try {
+    const { teamId, email, enabled } = req.body ?? {};
+    const addr = String(email || "").trim();
+    if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { error } = await sb.from("roi_recipients").update({ email_enabled: !!enabled }).eq("team_id", teamId).ilike("email", addr);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, email: addr, email_enabled: !!enabled });
+  } catch (err) {
+    console.error("POST /api/recipients/toggle error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "toggle failed" });
+  }
+});
+
+// ── Update a rooftop's send hour / minute / timezone ─────────────────────────
+app.post("/api/rooftop-config", async (req, res) => {
+  try {
+    const { teamId, sendHour, sendMinute, timezone } = req.body ?? {};
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    const patch = {};
+    if (sendHour != null) { const h = Number(sendHour); if (!Number.isInteger(h) || h < 0 || h > 23) return res.status(400).json({ error: "sendHour must be 0–23" }); patch.digest_send_hour = h; }
+    if (sendMinute != null) { const m = Number(sendMinute); if (!Number.isInteger(m) || m < 0 || m > 59) return res.status(400).json({ error: "sendMinute must be 0–59" }); patch.digest_send_minute = m; }
+    if (typeof timezone === "string" && timezone.trim()) patch.timezone = timezone.trim();
+    if (!Object.keys(patch).length) return res.status(400).json({ error: "nothing to update" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, ...patch });
+  } catch (err) {
+    console.error("POST /api/rooftop-config error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "update failed" });
+  }
+});
+
+// ── Assign a CSM (name + email both required) → set csm_name + enable BOTH depts ──
+app.post("/api/csm", async (req, res) => {
+  try {
+    const { teamId, name, email } = req.body ?? {};
+    const nm = String(name || "").trim();
+    const addr = String(email || "").trim();
+    if (!teamId || !nm || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId, CSM name and a valid CSM email are all required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { error: cfgErr } = await sb.from("roi_rooftop_config").update({ csm_name: nm }).eq("team_id", teamId);
+    if (cfgErr) return res.status(500).json({ error: cfgErr.message });
+    const { data: existing } = await sb.from("roi_recipients").select("id").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+    const patch = { receives_sales: true, receives_service: true, email_enabled: true };
+    const q = existing
+      ? sb.from("roi_recipients").update({ ...patch, name: nm }).eq("id", existing.id)
+      : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: nm, ...patch });
+    const { error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, csm: nm, email: addr });
+  } catch (err) {
+    console.error("POST /api/csm error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "assign CSM failed" });
+  }
+});
+
+// ── Report a missing rooftop → email product@spyne.ai + subhav.malhotra@spyne.ai ──
+app.post("/api/missing-rooftop", async (req, res) => {
+  try {
+    const { teamId, teamName, departments, csm, csmEmail, note } = req.body ?? {};
+    if (!teamId && !teamName) return res.status(400).json({ error: "teamId or teamName required" });
+    const esc = (v) => String(v ?? "—").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const rows = [
+      ["Team ID", teamId], ["Team name", teamName], ["Departments live", Array.isArray(departments) ? departments.join(", ") : departments],
+      ["CSM", csm], ["CSM email", csmEmail], ["Note", note],
+    ].map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#6B7280;">${esc(k)}</td><td style="padding:4px 0;font-weight:600;">${esc(v)}</td></tr>`).join("");
+    const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;color:#111827;"><p>A rooftop is missing from the ROI digest tracker and needs onboarding:</p><table>${rows}</table></div>`;
+    const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
+    const template = process.env.MAIL_TEMPLATE || "email-control-tower-report";
+    const to = "product@spyne.ai,subhav.malhotra@spyne.ai";
+    const mailRes = await fetch(mailUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}) },
+      body: JSON.stringify({ to, subject: `Missing ROI rooftop: ${teamName || teamId}`, template, templateData: { HTMLdata: html } }),
+    });
+    if (!mailRes.ok) { const t = await mailRes.text().catch(() => ""); return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` }); }
+    return res.json({ ok: true, to });
+  } catch (err) {
+    console.error("POST /api/missing-rooftop error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "report failed" });
   }
 });
 

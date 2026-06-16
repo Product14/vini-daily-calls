@@ -10,7 +10,7 @@ import {
 } from "./mockData";
 import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
-import { sendDigestNow, addRecipientNow } from "./sendDigest";
+import { sendDigestNow, addRecipientNow, toggleRecipientNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
 
 /**
  * Cell-action drawer.
@@ -179,6 +179,12 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                 onReload={onReload}
               />
             </Section>
+            <Section eyebrow="Schedule" title="Send time & timezone">
+              <ScheduleEditor rooftop={rooftop} onSaved={onReload} />
+            </Section>
+            <Section eyebrow="CSM" title={rooftop.csm && rooftop.csm !== "Unassigned" ? "Customer Success Manager" : "Assign a CSM"}>
+              <CsmSection rooftop={rooftop} onSaved={onReload} />
+            </Section>
             {isSent ? (
               <>
                 <Section eyebrow="Sent to" title="Email IDs on this send">
@@ -265,23 +271,42 @@ function Section({
    ============================================================ */
 const validEmail = (e: string) => e.trim() !== "" && e !== "m" && /\S+@\S+\.\S+/.test(e.trim());
 
+// Zero-data guard — a digest the backend wouldn't send must NEVER be sendable from the UI.
+// Matches the engine's guardrail: a day is actionable only when appointments, inbound leads, or
+// action items exist (conversations alone = "not_actionable" → never sent). No metrics → not sendable.
+const hasSendableData = (m?: DigestMetrics): boolean => {
+  if (!m) return false;
+  const num = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
+  return num(m.appointmentsYesterday) + num(m.inboundUniqueLeads) + num((m as { actionItemsTotal?: number }).actionItemsTotal) > 0;
+};
+
 type SendResult = { ok: boolean; error?: string };
 
 // Add a recipient and PERSIST it to roi_recipients (rooftop+dept enabled), then reload the tracker.
+// Add a recipient (name + email) and PERSIST it to roi_recipients for this rooftop+dept.
+// Per Case 2 it's added DISABLED (email_enabled=false) — the user then flips the On toggle.
 function AddRecipientInline({ teamId, dept, onAdded }: { teamId?: string; dept: DeptKind; onAdded: () => void }) {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
   const submit = async () => {
     if (!validEmail(email)) { setState("error"); setMsg("Enter a valid email."); return; }
     setState("saving"); setMsg("");
-    const r = await addRecipientNow({ teamId, dept, email: email.trim() });
-    if (r.ok) { setState("done"); setMsg("Added ✓ — enabled for this rooftop & department"); setEmail(""); onAdded(); setTimeout(() => setState("idle"), 1500); }
+    const r = await addRecipientNow({ teamId, dept, email: email.trim(), name: name.trim() || undefined, emailEnabled: false });
+    if (r.ok) { setState("done"); setMsg("Added (disabled) — flip the On toggle to start sending"); setName(""); setEmail(""); onAdded(); setTimeout(() => setState("idle"), 1800); }
     else { setState("error"); setMsg(r.error || "Add failed"); }
   };
   return (
     <div className="mt-1.5">
       <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Name (optional)"
+          className="min-w-0 w-28 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
+        />
         <input
           type="email"
           value={email}
@@ -300,6 +325,88 @@ function AddRecipientInline({ teamId, dept, onAdded }: { teamId?: string; dept: 
         </button>
       </div>
       {msg ? <p className={`mt-1 text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</p> : null}
+    </div>
+  );
+}
+
+// #4 — view + edit a rooftop's local send hour:minute + timezone (persists to roi_rooftop_config).
+function ScheduleEditor({ rooftop, onSaved }: { rooftop: RooftopRow; onSaved?: () => void }) {
+  const [hour, setHour] = useState<string>(rooftop.sendHour != null ? String(rooftop.sendHour) : "7");
+  const [minute, setMinute] = useState<string>(rooftop.sendMinute != null ? String(rooftop.sendMinute) : "0");
+  const [tz, setTz] = useState<string>(rooftop.timezone || "America/New_York");
+  const [edit, setEdit] = useState(false);
+  const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const pad = (n: string) => String(n).padStart(2, "0");
+  const save = async () => {
+    const h = Number(hour), m = Number(minute);
+    if (!Number.isInteger(h) || h < 0 || h > 23) { setState("error"); setMsg("Hour must be 0–23"); return; }
+    if (!Number.isInteger(m) || m < 0 || m > 59) { setState("error"); setMsg("Minute must be 0–59"); return; }
+    setState("saving"); setMsg("");
+    const r = await updateRooftopConfigNow({ teamId: rooftop.team_id, sendHour: h, sendMinute: m, timezone: tz.trim() });
+    if (r.ok) { setState("done"); setMsg("Saved ✓"); setEdit(false); onSaved?.(); setTimeout(() => setState("idle"), 1500); }
+    else { setState("error"); setMsg(r.error || "Save failed"); }
+  };
+  if (!edit) {
+    return (
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[12px] text-text-primary">{pad(hour)}:{pad(minute)} <span className="text-text-muted">· {tz}</span></div>
+        <button type="button" onClick={() => setEdit(true)} className="shrink-0 rounded-md border border-border-subtle px-2.5 py-1 text-[11px] font-semibold text-text-secondary hover:bg-surface-subtle">Edit</button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5">
+        <input type="number" min={0} max={23} value={hour} onChange={(e) => setHour(e.target.value)} className="w-14 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]" />
+        <span className="text-text-muted">:</span>
+        <input type="number" min={0} max={59} value={minute} onChange={(e) => setMinute(e.target.value)} className="w-14 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]" />
+        <input type="text" value={tz} onChange={(e) => setTz(e.target.value)} placeholder="America/New_York" className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]" />
+      </div>
+      <div className="flex items-center gap-1.5">
+        <button type="button" onClick={() => void save()} disabled={state === "saving"} className="rounded-md bg-brand-primary px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">{state === "saving" ? "Saving…" : "Save"}</button>
+        <button type="button" onClick={() => setEdit(false)} className="rounded-md border border-border-subtle px-3 py-1.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-subtle">Cancel</button>
+        {msg ? <span className={`text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</span> : null}
+      </div>
+      <p className="text-[10px] text-text-muted">Local send time for this rooftop · applies on the next scheduled run.</p>
+    </div>
+  );
+}
+
+// #5 — view CSM, or assign one (name + email BOTH required → enables email for sales + service).
+function CsmSection({ rooftop, onSaved }: { rooftop: RooftopRow; onSaved?: () => void }) {
+  const assigned = !!rooftop.csm && rooftop.csm !== "Unassigned";
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState(assigned ? rooftop.csm : "");
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const save = async () => {
+    if (!name.trim()) { setState("error"); setMsg("CSM name is required."); return; }
+    if (!validEmail(email)) { setState("error"); setMsg("A valid CSM email is required."); return; }
+    setState("saving"); setMsg("");
+    const r = await addCsmNow({ teamId: rooftop.team_id, name: name.trim(), email: email.trim() });
+    if (r.ok) { setState("done"); setMsg("CSM saved ✓ — email enabled for sales + service"); setOpen(false); onSaved?.(); setTimeout(() => setState("idle"), 1800); }
+    else { setState("error"); setMsg(r.error || "Save failed"); }
+  };
+  if (assigned && !open) {
+    return (
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[12px] font-medium text-text-primary">{rooftop.csm}</div>
+        <button type="button" onClick={() => setOpen(true)} className="shrink-0 rounded-md border border-border-subtle px-2.5 py-1 text-[11px] font-semibold text-text-secondary hover:bg-surface-subtle">Change</button>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="CSM name (required)" className="w-full rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]" />
+      <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); if (state === "error") setState("idle"); }} placeholder="csm@spyne.ai (required)" className="w-full rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]" />
+      <div className="flex items-center gap-1.5">
+        <button type="button" onClick={() => void save()} disabled={state === "saving"} className="rounded-md bg-brand-primary px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">{state === "saving" ? "Saving…" : "Save CSM"}</button>
+        {assigned ? <button type="button" onClick={() => setOpen(false)} className="rounded-md border border-border-subtle px-3 py-1.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-subtle">Cancel</button> : null}
+        {msg ? <span className={`text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</span> : null}
+      </div>
+      <p className="text-[10px] text-text-muted">Name + email required · saving enables email for both sales & service on this rooftop.</p>
     </div>
   );
 }
@@ -335,11 +442,11 @@ function RecipientManager({
   // "Sent" row always lists who got it — even if they aren't in the configured roi_recipients.
   const [depts, setDepts] = useState(() =>
     rooftop.departments.map((d) => {
-      const base = d.recipients.map((r) => ({ ...r, received: r.received || recvByEmail.get(r.email.toLowerCase()) || false }));
+      const base = (d.allRecipients ?? d.recipients).map((r) => ({ ...r, received: r.received || recvByEmail.get(r.email.toLowerCase()) || false }));
       if (dept && d.kind === dept) {
         for (const sr of sentRecipients ?? []) {
           if (!base.some((b) => b.email.toLowerCase() === sr.email.toLowerCase())) {
-            base.push({ email: sr.email, received: sr.received === true && sr.bounced !== true });
+            base.push({ email: sr.email, received: sr.received === true && sr.bounced !== true, enabled: true });
           }
         }
       }
@@ -368,6 +475,15 @@ function RecipientManager({
     setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, received: true } : r)) } : d)));
   const setEmail = (deptKind: DeptKind, idx: number, email: string) =>
     setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, email } : r)) } : d)));
+  // Toggle email_enabled — persists, never sends. Optimistic; reverts on failure.
+  const setEnabledLocal = (deptKind: DeptKind, idx: number, val: boolean) =>
+    setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, enabled: val } : r)) } : d)));
+  const toggleEnabled = async (deptKind: DeptKind, idx: number, email: string, next: boolean) => {
+    setEnabledLocal(deptKind, idx, next);
+    setSelected((prev) => { const n = new Set(prev); next ? n.add(email.toLowerCase()) : n.delete(email.toLowerCase()); return n; });
+    const r = await toggleRecipientNow({ teamId: rooftop.team_id, email, enabled: next });
+    if (!r.ok) setEnabledLocal(deptKind, idx, !next); // revert
+  };
 
   // the REAL send — to a specific set of emails for a department
   const sendTo = async (emails: string[], deptKind: DeptKind): Promise<SendResult> => {
@@ -397,11 +513,13 @@ function RecipientManager({
     return <p className="text-[12px] text-text-muted">No departments classified for this rooftop.</p>;
   }
 
+  const noData = !hasSendableData(metrics);
+
   return (
     <div className="space-y-4">
-      {!metrics ? (
-        <p className="rounded-md border border-info-border bg-info-soft px-3 py-1.5 text-[11px] leading-snug text-info">
-          No stored metrics for this cell yet — a send will render from whatever data is available.
+      {noData ? (
+        <p className="rounded-md border border-warning/40 bg-warning-soft px-3 py-1.5 text-[11px] leading-snug text-warning">
+          No data for this day — there’s nothing to send, so sending is disabled. You can still add/enable recipients; they’ll receive on the next day with activity.
         </p>
       ) : null}
       {depts.map((d) => {
@@ -427,8 +545,10 @@ function RecipientManager({
                       key={idx}
                       recipient={rec}
                       isSent={isSent}
+                      disabled={noData}
                       checked={validEmail(rec.email) && selected.has(rec.email.toLowerCase())}
                       onToggle={() => toggle(rec.email)}
+                      onToggleEnabled={validEmail(rec.email) ? (next: boolean) => void toggleEnabled(d.kind, idx, rec.email, next) : undefined}
                       onSend={async (email) => {
                         // commit the typed address into the list + select it, THEN send
                         setEmail(d.kind, idx, email);
@@ -445,9 +565,12 @@ function RecipientManager({
                   <button
                     type="button"
                     onClick={() => void sendSelected(d.kind, emails)}
-                    disabled={bulk === "sending" || chosenCount === 0}
+                    disabled={bulk === "sending" || chosenCount === 0 || noData}
+                    title={noData ? "No data for this day — nothing to send" : undefined}
                     className={`mt-2 w-full rounded-md px-3 py-2 text-[12px] font-semibold ${
-                      bulk === "sent"
+                      noData
+                        ? "cursor-not-allowed bg-surface-subtle text-text-muted"
+                        : bulk === "sent"
                         ? "bg-positive/10 text-positive"
                         : bulk === "error"
                         ? "bg-negative-soft text-negative"
@@ -479,18 +602,23 @@ function RecipientRow({
   checked,
   onToggle,
   onSend,
+  onToggleEnabled,
+  disabled = false,
 }: {
   recipient: Recipient;
   isSent: boolean;
   checked: boolean;
   onToggle: () => void;
   onSend: (email: string) => Promise<SendResult>;
+  onToggleEnabled?: (next: boolean) => void;
+  disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(recipient.email);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [msg, setMsg] = useState("");
   const hasEmail = validEmail(recipient.email);
   const valid = validEmail(draft);
+  const enabled = recipient.enabled !== false; // undefined (e.g. sent-run recipients) → treat as on
 
   const fire = async (email: string) => {
     setState("sending"); setMsg("");
@@ -515,10 +643,11 @@ function RecipientRow({
           />
           <button
             type="button"
-            onClick={() => valid && void fire(draft.trim())}
-            disabled={!valid || state === "sending"}
+            onClick={() => valid && !disabled && void fire(draft.trim())}
+            disabled={!valid || disabled || state === "sending"}
+            title={disabled ? "No data for this day — nothing to send" : undefined}
             className={`shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-semibold ${
-              valid ? "bg-brand-primary text-white hover:bg-brand-primary-hover" : "cursor-not-allowed bg-surface-subtle text-text-muted"
+              valid && !disabled ? "bg-brand-primary text-white hover:bg-brand-primary-hover" : "cursor-not-allowed bg-surface-subtle text-text-muted"
             }`}
           >
             {state === "sending" ? "Sending…" : "Add & send"}
@@ -550,18 +679,32 @@ function RecipientRow({
         className="h-3.5 w-3.5 shrink-0 accent-brand-primary"
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[12px] text-text-primary">{recipient.email}</div>
+        <div className="truncate text-[12px] text-text-primary">{recipient.email}{recipient.name ? <span className="ml-1 text-text-muted">· {recipient.name}</span> : null}</div>
         <div className={`text-[10px] ${recipient.received ? "text-positive" : isSent ? "text-negative" : "text-text-muted"}`}>
           {recipient.received ? "✓ Received" : isSent ? "Didn't receive" : "Not sent yet"}
         </div>
       </div>
+      {/* email_enabled status + toggle (persists; never sends) */}
+      {onToggleEnabled ? (
+        <button
+          type="button"
+          onClick={() => onToggleEnabled(!enabled)}
+          title={enabled ? "Email ON — click to disable (won’t receive sends)" : "Email OFF — click to enable (no send, just enable)"}
+          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-positive/10 text-positive" : "bg-surface-subtle text-text-muted"}`}
+        >
+          <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${enabled ? "bg-positive" : "bg-text-muted"}`} />
+          {enabled ? "On" : "Off"}
+        </button>
+      ) : null}
       <button
         type="button"
-        onClick={() => void fire(recipient.email)}
-        disabled={state === "sending"}
-        title={recipient.received ? "Resend individually to this recipient" : "Send individually to this recipient"}
+        onClick={() => !disabled && void fire(recipient.email)}
+        disabled={disabled || state === "sending"}
+        title={disabled ? "No data for this day — nothing to send" : recipient.received ? "Resend individually to this recipient" : "Send individually to this recipient"}
         className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold ${
-          state === "sent"
+          disabled
+            ? "cursor-not-allowed bg-surface-subtle text-text-muted"
+            : state === "sent"
             ? "bg-positive/10 text-positive"
             : state === "error"
             ? "bg-negative-soft text-negative"
@@ -938,10 +1081,11 @@ function SendNowLiveSection({
   const inFlight = useRef(false); // guarantees ONE send per click (no double-fire)
   const emails = (recipients ?? []).map((r) => r.email).filter(Boolean);
 
+  const noData = !hasSendableData(metrics);
   const click = async () => {
     if (inFlight.current) return; // already sending — ignore extra clicks
     if (!emails.length) { setState("error"); setMsg("No recipients configured for this department."); return; }
-    if (!metrics) { setState("error"); setMsg("No metrics for this rooftop yet — resync first."); return; }
+    if (noData) { setState("error"); setMsg("No data for this day — nothing to send."); return; }
     inFlight.current = true;
     setState("sending"); setMsg("");
     const r = await sendDigestNow({
@@ -970,16 +1114,19 @@ function SendNowLiveSection({
       <button
         type="button"
         onClick={click}
-        disabled={state === "sending"}
+        disabled={state === "sending" || noData}
+        title={noData ? "No data for this day — nothing to send" : undefined}
         className={`w-full rounded-md px-3 py-2 text-[12px] font-semibold ${
-          state === "sent"
+          noData
+            ? "cursor-not-allowed bg-surface-subtle text-text-muted"
+            : state === "sent"
             ? "bg-positive/10 text-positive"
             : state === "error"
             ? "bg-negative-soft text-negative"
             : "bg-negative text-white hover:opacity-90 disabled:opacity-60"
         }`}
       >
-        {state === "sending" ? "Sending…" : state === "sent" ? "✓ Sent — resend" : state === "error" ? "Retry send" : "Send now (real email)"}
+        {noData ? "No data — can’t send" : state === "sending" ? "Sending…" : state === "sent" ? "✓ Sent — resend" : state === "error" ? "Retry send" : "Send now (real email)"}
       </button>
       <p className="text-[10px] text-text-muted">
         {msg || `Clicking sends a real email to ${emails.join(", ") || "the recipients"} via mail.spyne.ai (renders the actual digest).`}

@@ -38,13 +38,16 @@ export type Recipient = {
   name?: string;
   /** Did this person receive the most recent send for this rooftop? */
   received: boolean;
+  /** roi_recipients.email_enabled — whether this recipient currently receives sends. */
+  enabled?: boolean;
 };
 
 export type Department = {
   kind: DeptKind;
   live: boolean; // has at least one live agent
   agents: AgentType[]; // which agent types power this department
-  recipients: Recipient[];
+  recipients: Recipient[]; // ENABLED recipients (used for sending)
+  allRecipients?: Recipient[]; // every configured recipient incl. disabled (view + toggle)
 };
 
 /** Loose shape of the stored digest payload (roi_digest_runs.metrics jsonb). */
@@ -82,6 +85,9 @@ export type RooftopRow = {
   dryRun?: boolean;
   /** Dealer timezone (roi_rooftop_config.timezone) — used to build link windows. */
   timezone?: string;
+  /** Local send hour (0–23) / minute (roi_rooftop_config.digest_send_hour/minute). */
+  sendHour?: number;
+  sendMinute?: number;
   csm: string;
   group?: string;
   /** Detected live agents · present even when the rooftop isn't classified */

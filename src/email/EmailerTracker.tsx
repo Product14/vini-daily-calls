@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import {
   NOT_SENT_REASON_CTA,
   NOT_SENT_REASON_LABEL,
-  ROOFTOPS,
-  TRACKER_META,
   computeSummary,
   reasonBreakdown,
   type Cadence,
@@ -16,6 +14,7 @@ import { loadRooftops } from "./dataSource";
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runDryPipeline, runRespectPipeline } from "./pipeline";
+import { reportMissingRooftopNow } from "./sendDigest";
 
 export function EmailerTracker() {
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -26,12 +25,14 @@ export function EmailerTracker() {
   const [sentNow, setSentNow] = useState<Record<string, true>>({});
   const [activeCell, setActiveCell] = useState<{ rooftop: RooftopRow; cell: SendCell } | null>(null);
 
-  // Live data (roi_digest_runs + mailservice engagement), mock fallback.
-  const [rooftops, setRooftops] = useState<RooftopRow[]>(ROOFTOPS);
-  const [today, setToday] = useState<string>(TRACKER_META.today);
-  const [source, setSource] = useState<string>(TRACKER_META.source);
+  // Live data from roi_digest_runs (+ mailservice engagement). No mock fallback — empty until loaded.
+  const [rooftops, setRooftops] = useState<RooftopRow[]>([]);
+  const [today, setToday] = useState<string>("");
+  const [source, setSource] = useState<string>("");
+  const [sourceKind, setSourceKind] = useState<"supabase" | "unconfigured" | "error" | "">("");
   const [lastSynced, setLastSynced] = useState<Date>(new Date());
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true); // start in loading so we never flash mock/empty
+  const [loadedOnce, setLoadedOnce] = useState(false);
   // Global manual pipeline triggers
   const [dryRunState, setDryRunState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [dryRunMsg, setDryRunMsg] = useState("");
@@ -44,12 +45,15 @@ export function EmailerTracker() {
       const res = await loadRooftops();
       setRooftops(res.rooftops);
       setToday(res.today);
-      setSource(res.source === "supabase" ? "Supabase · roi_digest_runs" : TRACKER_META.source);
+      setSourceKind(res.source);
+      setSource(res.source === "supabase" ? "Supabase · roi_digest_runs" : res.source === "error" ? "Connection error" : "Not connected");
       setLastSynced(res.lastSynced);
     } catch (e) {
       console.warn("[tracker] load failed:", e);
+      setSourceKind("error");
     } finally {
       setLoading(false);
+      setLoadedOnce(true);
     }
   }, []);
 
@@ -136,6 +140,33 @@ export function EmailerTracker() {
   const salesRows = rooftops.filter((r) => r.department === "sales").length;
   const serviceRows = rooftops.filter((r) => r.department === "service").length;
 
+  // Loader while the first load is in flight — no mock dataset is ever shown.
+  if (!loadedOnce && loading) {
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3 text-text-muted">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-border-subtle border-t-brand-primary" />
+        <div className="text-[13px] font-semibold">Loading rooftop tracker…</div>
+      </div>
+    );
+  }
+  // Explicit empty/error state instead of fake mock data.
+  if (rooftops.length === 0) {
+    const unconfigured = sourceKind === "unconfigured";
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
+        <div className="text-[15px] font-bold text-text-primary">{unconfigured ? "Tracker not connected" : "Couldn’t load rooftops"}</div>
+        <p className="max-w-md text-[12px] text-text-secondary">
+          {unconfigured
+            ? "Supabase isn’t configured for this build — set VITE_ROI_SUPABASE_URL and VITE_ROI_SUPABASE_KEY, then reload."
+            : "The roi_digest_runs read failed. Check the Supabase connection and try again."}
+        </p>
+        <button type="button" onClick={() => void reload()} disabled={loading} className="rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">
+          {loading ? "Retrying…" : "↻ Retry"}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col bg-surface-background">
       {/* Header */}
@@ -209,6 +240,7 @@ export function EmailerTracker() {
                 ? "Send failed"
                 : `▶ Send live (${liveCount})`}
             </button>
+            <MissingRooftopButton />
           </div>
         </div>
         {dryRunMsg || liveMsg ? (
@@ -453,40 +485,123 @@ function DeptBadge({ dept }: { dept?: DeptKind }) {
 /* ============================================================
    Per-department dry-run toggle → writes roi_live_departments.dry_run
    ============================================================ */
-function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
-  const [on, setOn] = useState<boolean>(rooftop.dryRun !== false);
-  const [busy, setBusy] = useState(false);
-  const toggle = async () => {
-    if (busy || !rooftop.team_id || !rooftop.department) return;
-    const next = !on;
-    setOn(next);
-    if (!supabase) return; // mock mode — local only
-    setBusy(true);
-    const { error } = await supabase
-      .from("roi_live_departments")
-      .update({ dry_run: next })
-      .eq("team_id", rooftop.team_id)
-      .eq("department", rooftop.department);
-    if (error) setOn(!next); // revert on failure
-    setBusy(false);
+// #3 — report a rooftop missing from the tracker → emails product@ + subhav@ with details.
+function MissingRooftopButton() {
+  const [open, setOpen] = useState(false);
+  const [f, setF] = useState({ teamId: "", teamName: "", departments: "", csm: "", csmEmail: "", note: "" });
+  const [state, setState] = useState<"idle" | "sending" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const upd = (k: keyof typeof f) => (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF((p) => ({ ...p, [k]: e.target.value }));
+  const submit = async () => {
+    if (!f.teamId.trim() && !f.teamName.trim()) { setState("error"); setMsg("Team ID or team name is required."); return; }
+    setState("sending"); setMsg("");
+    const r = await reportMissingRooftopNow({
+      teamId: f.teamId.trim(), teamName: f.teamName.trim(),
+      departments: f.departments.split(",").map((s) => s.trim()).filter(Boolean),
+      csm: f.csm.trim(), csmEmail: f.csmEmail.trim(), note: f.note.trim(),
+    });
+    if (r.ok) { setState("done"); setMsg("Sent to product@spyne.ai + subhav.malhotra@spyne.ai ✓"); setTimeout(() => { setOpen(false); setState("idle"); setF({ teamId: "", teamName: "", departments: "", csm: "", csmEmail: "", note: "" }); }, 1600); }
+    else { setState("error"); setMsg(r.error || "Send failed"); }
   };
+  const inputCls = "w-full rounded-md border border-border-subtle bg-surface-background px-2.5 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none";
   return (
-    <button
-      type="button"
-      onClick={toggle}
-      disabled={busy}
-      title={
-        on
-          ? "Dry-run ON — emails held for this department. Click to allow live sends."
-          : "Dry-run OFF — live sends allowed. Click to hold (dry-run)."
-      }
-      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-        on ? "bg-warning-soft text-warning" : "bg-positive/10 text-positive"
-      } ${busy ? "opacity-50" : ""}`}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${on ? "bg-warning" : "bg-positive"}`} />
-      {on ? "Dry-run" : "Live"}
-    </button>
+    <>
+      <button type="button" onClick={() => setOpen(true)} className="rounded-md border border-border-subtle bg-surface-card px-2.5 py-1 text-[11px] font-semibold text-text-primary hover:bg-surface-subtle">+ Missing rooftop</button>
+      {open ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" onClick={() => setOpen(false)}>
+          <div className="w-full max-w-md rounded-xl border border-border-subtle bg-surface-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-bold text-text-primary">Report a missing rooftop</h3>
+            <p className="mt-1 text-[12px] text-text-secondary">Emails <b>product@spyne.ai</b> + <b>subhav.malhotra@spyne.ai</b> with the details below for onboarding.</p>
+            <div className="mt-3 space-y-2">
+              <input className={inputCls} value={f.teamId} onChange={upd("teamId")} placeholder="Team ID" />
+              <input className={inputCls} value={f.teamName} onChange={upd("teamName")} placeholder="Team / rooftop name" />
+              <input className={inputCls} value={f.departments} onChange={upd("departments")} placeholder="Departments live (e.g. sales, service)" />
+              <input className={inputCls} value={f.csm} onChange={upd("csm")} placeholder="CSM name" />
+              <input className={inputCls} value={f.csmEmail} onChange={upd("csmEmail")} placeholder="CSM email" />
+              <textarea className={inputCls} rows={2} value={f.note} onChange={upd("note")} placeholder="Note (optional)" />
+            </div>
+            {msg ? <p className={`mt-2 text-[11px] ${state === "error" ? "text-negative" : "text-positive"}`}>{msg}</p> : null}
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setOpen(false)} className="rounded-md border border-border-subtle px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle">Cancel</button>
+              <button type="button" disabled={state === "sending"} onClick={() => void submit()} className="rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">
+                {state === "sending" ? "Sending…" : "Send report"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
+  const [on, setOn] = useState<boolean>(rooftop.dryRun !== false); // on = dry-run held
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+
+  const persist = async (nextDry: boolean): Promise<boolean> => {
+    setBusy(true);
+    if (supabase && rooftop.team_id && rooftop.department) {
+      const { error } = await supabase
+        .from("roi_live_departments").update({ dry_run: nextDry })
+        .eq("team_id", rooftop.team_id).eq("department", rooftop.department);
+      if (error) { setBusy(false); return false; }
+    }
+    setOn(nextDry); setBusy(false); return true;
+  };
+
+  const onClick = () => {
+    if (busy || !rooftop.team_id || !rooftop.department) return;
+    if (on) setConfirm(true);     // dry → LIVE: show disclaimer first
+    else void persist(true);      // live → dry (hold): safe, no prompt
+  };
+
+  // who will start receiving once live = enabled recipients for this dept
+  const recipients = (rooftop.departments?.find((d) => d.kind === rooftop.department)?.recipients
+    ?? rooftop.departments?.[0]?.recipients ?? []).map((r) => r.email).filter(Boolean);
+  const pad = (n?: number) => String(n ?? (n === 0 ? 0 : 7)).padStart(2, "0");
+  const sendTime = `${pad(rooftop.sendHour)}:${String(rooftop.sendMinute ?? 0).padStart(2, "0")}`;
+  const tz = rooftop.timezone || "America/New_York";
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={busy}
+        title={on ? "Dry-run ON — emails held. Click to go Live." : "Live — sends allowed. Click to hold (dry-run)."}
+        className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${on ? "bg-warning-soft text-warning" : "bg-positive/10 text-positive"} ${busy ? "opacity-50" : ""}`}
+      >
+        <span className={`h-1.5 w-1.5 rounded-full ${on ? "bg-warning" : "bg-positive"}`} />
+        {on ? "Dry-run" : "Live"}
+      </button>
+      {confirm ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" onClick={() => setConfirm(false)}>
+          <div className="w-full max-w-md rounded-xl border border-border-subtle bg-surface-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-bold text-text-primary">Enable live emails for {rooftop.name}?</h3>
+            <p className="mt-1 text-[12px] text-text-secondary">
+              The <b>{rooftop.department}</b> digest will start sending on the next scheduled run at <b>{sendTime} {tz}</b>.
+            </p>
+            <div className="mt-3 rounded-md border border-border-subtle bg-surface-background p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Will start receiving ({recipients.length})</div>
+              {recipients.length ? (
+                <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
+                  {recipients.map((e) => <li key={e} className="text-[12px] text-text-primary">{e}</li>)}
+                </ul>
+              ) : (
+                <p className="mt-1 text-[12px] text-warning">No enabled recipients — nobody will receive until you enable some.</p>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setConfirm(false)} className="rounded-md border border-border-subtle px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle">Cancel</button>
+              <button type="button" disabled={busy} onClick={async () => { const ok = await persist(false); if (ok) setConfirm(false); }} className="rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">
+                {busy ? "Saving…" : "Save · go live"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }
 
