@@ -16,6 +16,24 @@ export type SendDigestOpts = {
   recipients: string[];
 };
 
+/** Add a recipient to roi_recipients for a rooftop+department (email_enabled + receives_<dept>=true). */
+export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; email: string; name?: string }): Promise<{ ok: boolean; error?: string }> {
+  const email = String(opts.email || "").trim();
+  if (!/\S+@\S+\.\S+/.test(email)) return { ok: false, error: "Enter a valid email." };
+  try {
+    const res = await fetch("/api/recipients", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Add failed (HTTP ${res.status})` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 export async function sendDigestNow(opts: SendDigestOpts): Promise<{ ok: boolean; error?: string }> {
   const recipients = (opts.recipients ?? []).map((s) => String(s || "").trim()).filter((e) => /\S+@\S+\.\S+/.test(e));
   if (!recipients.length) return { ok: false, error: "No valid recipient email." };

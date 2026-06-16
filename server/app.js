@@ -2248,6 +2248,39 @@ app.post("/api/email/roi-send-now", async (req, res) => {
   }
 });
 
+// ── Add a recipient to a rooftop+department (tracker "Add recipient") ────────
+// Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
+app.post("/api/recipients", async (req, res) => {
+  try {
+    const { teamId, department, email, name } = req.body ?? {};
+    const dept = department === "service" ? "service" : "sales";
+    const addr = String(email || "").trim();
+    if (!teamId || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId + valid email required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    // preserve the other department's existing flag if the recipient already exists
+    const { data: existing, error: selErr } = await sb.from("roi_recipients")
+      .select("id,receives_sales,receives_service").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+    if (selErr) return res.status(500).json({ error: selErr.message });
+    const patch = {
+      receives_sales: dept === "sales" ? true : (existing?.receives_sales ?? false),
+      receives_service: dept === "service" ? true : (existing?.receives_service ?? false),
+      email_enabled: true,
+    };
+    const q = existing
+      ? sb.from("roi_recipients").update(patch).eq("id", existing.id)
+      : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: name || null, ...patch });
+    const { error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, department: dept, email: addr, created: !existing });
+  } catch (err) {
+    console.error("POST /api/recipients error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "add recipient failed" });
+  }
+});
+
 // ── Hourly ROI digest cron (Vercel Cron → this route) ───────────────────────
 // Runs the full daily-digest pass for EVERY live rooftop (roi_live_departments.is_live=true).
 // With DRY_RUN=false it really emails the rooftops where dry_run=false and suppresses the rest,

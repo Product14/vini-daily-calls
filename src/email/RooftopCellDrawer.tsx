@@ -10,7 +10,7 @@ import {
 } from "./mockData";
 import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
-import { sendDigestNow } from "./sendDigest";
+import { sendDigestNow, addRecipientNow } from "./sendDigest";
 
 /**
  * Cell-action drawer.
@@ -159,10 +159,10 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
               {isSent
                 ? primary?.renderedHtml
                   ? "Email sent · exact HTML"
-                  : "Email sent · re-rendered from stored metrics"
-                : "Daily digest · preview (not sent)"}
+                  : "Email sent · exact HTML not stored"
+                : "Daily digest · default template preview"}
             </div>
-            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={primary?.renderedHtml} view={view} />
+            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={primary?.renderedHtml} isSent={isSent} view={view} />
           </div>
 
           <aside className="space-y-4">
@@ -176,6 +176,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                 sentRecipients={primary?.recipients}
                 isSent={isSent}
                 onSend={() => onSend(rooftop.rooftop_id, cell.date, cell.cadence)}
+                onReload={onReload}
               />
             </Section>
             {isSent ? (
@@ -266,6 +267,43 @@ const validEmail = (e: string) => e.trim() !== "" && e !== "m" && /\S+@\S+\.\S+/
 
 type SendResult = { ok: boolean; error?: string };
 
+// Add a recipient and PERSIST it to roi_recipients (rooftop+dept enabled), then reload the tracker.
+function AddRecipientInline({ teamId, dept, onAdded }: { teamId?: string; dept: DeptKind; onAdded: () => void }) {
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const submit = async () => {
+    if (!validEmail(email)) { setState("error"); setMsg("Enter a valid email."); return; }
+    setState("saving"); setMsg("");
+    const r = await addRecipientNow({ teamId, dept, email: email.trim() });
+    if (r.ok) { setState("done"); setMsg("Added ✓ — enabled for this rooftop & department"); setEmail(""); onAdded(); setTimeout(() => setState("idle"), 1500); }
+    else { setState("error"); setMsg(r.error || "Add failed"); }
+  };
+  return (
+    <div className="mt-1.5">
+      <div className="flex items-center gap-1.5">
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => { setEmail(e.target.value); if (state === "error") setState("idle"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
+          placeholder="name@dealer.com"
+          className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={state === "saving"}
+          className="flex-shrink-0 rounded-md bg-brand-primary px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60"
+        >
+          {state === "saving" ? "Adding…" : state === "done" ? "Added ✓" : "+ Add"}
+        </button>
+      </div>
+      {msg ? <p className={`mt-1 text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</p> : null}
+    </div>
+  );
+}
+
 function RecipientManager({
   rooftop,
   dept,
@@ -274,6 +312,7 @@ function RecipientManager({
   sentRecipients,
   isSent,
   onSend,
+  onReload,
 }: {
   rooftop: RooftopRow;
   dept?: DeptKind;
@@ -282,6 +321,7 @@ function RecipientManager({
   sentRecipients?: { email: string; received?: boolean; bounced?: boolean }[];
   isSent: boolean;
   onSend: () => void;
+  onReload?: () => void;
 }) {
   // received overlay from the actual run (who really got it)
   const recvByEmail = useMemo(() => {
@@ -328,8 +368,6 @@ function RecipientManager({
     setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, received: true } : r)) } : d)));
   const setEmail = (deptKind: DeptKind, idx: number, email: string) =>
     setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, email } : r)) } : d)));
-  const addRecipient = (deptKind: DeptKind) =>
-    setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: [...d.recipients, { email: "", received: false }] } : d)));
 
   // the REAL send — to a specific set of emails for a department
   const sendTo = async (emails: string[], deptKind: DeptKind): Promise<SendResult> => {
@@ -380,13 +418,7 @@ function RecipientManager({
               </span>
             </div>
             {d.recipients.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => addRecipient(d.kind)}
-                className="w-full rounded-md border border-dashed border-border-strong bg-surface-background px-3 py-2 text-[12px] font-semibold text-text-secondary hover:border-brand-primary hover:text-brand-primary"
-              >
-                + Add recipient
-              </button>
+              <AddRecipientInline teamId={rooftop.team_id} dept={d.kind} onAdded={() => (onReload ? onReload() : onSend())} />
             ) : (
               <>
                 <ul className="space-y-1.5">
@@ -408,13 +440,7 @@ function RecipientManager({
                     />
                   ))}
                 </ul>
-                <button
-                  type="button"
-                  onClick={() => addRecipient(d.kind)}
-                  className="mt-1.5 text-[11px] font-semibold text-brand-primary hover:underline"
-                >
-                  + Add recipient
-                </button>
+                <AddRecipientInline teamId={rooftop.team_id} dept={d.kind} onAdded={() => (onReload ? onReload() : onSend())} />
                 {emails.length > 0 ? (
                   <button
                     type="button"
@@ -739,6 +765,7 @@ function DigestEmail({
   metrics,
   dept,
   renderedHtml,
+  isSent = false,
   view = "email",
 }: {
   rooftop: RooftopRow;
@@ -746,22 +773,37 @@ function DigestEmail({
   metrics?: DigestMetrics;
   dept?: DeptKind;
   renderedHtml?: string;
+  isSent?: boolean;
   view?: "desktop" | "email";
 }) {
-  // STRICT: the preview is the SAME HTML as the email. Prefer the stored rendered_html
-  // (the exact bytes that were sent); only if absent fall back to the same renderer.
-  const html = renderedHtml || (metrics ? renderDigestEmail(metrics, {
-    rooftopName: rooftop.name, dept, teamId: rooftop.team_id, enterpriseId: rooftop.enterprise_id,
-    reportDate: (metrics as { reportDate?: string }).reportDate ?? cell.date, timezone: rooftop.timezone,
-  }) : null);
-  if (!html) return <EmailSnippetCard rooftop={rooftop} />;
+  // SENT → show ONLY the exact HTML that was emailed (stored rendered_html). Never re-render
+  // from data; if it wasn't stored, say so rather than fabricate a preview.
+  // NOT SENT (preview / add-recipient) → ALWAYS the default digest template: the stored body if
+  // present, otherwise render the canonical template from metrics (zeros when none) — never a stub.
+  let html: string | null;
+  const exact = !!renderedHtml;
+  if (isSent) {
+    html = renderedHtml || null;
+  } else {
+    html = renderedHtml || renderDigestEmail((metrics ?? {}) as DigestMetrics, {
+      rooftopName: rooftop.name, dept, teamId: rooftop.team_id, enterpriseId: rooftop.enterprise_id,
+      reportDate: ((metrics ?? {}) as { reportDate?: string }).reportDate ?? cell.date, timezone: rooftop.timezone,
+    });
+  }
+  if (!html) {
+    return (
+      <div className="rounded-xl border border-border-subtle bg-surface-card px-4 py-10 text-center text-[12px] text-text-muted">
+        The exact sent email HTML wasn’t stored for this run, so it can’t be shown.
+      </div>
+    );
+  }
   // view toggle: 'email' = ~400px (mobile/inbox, triggers the email's @media stacking);
   // 'desktop' = full 640px card. The HTML is identical — only the viewport width changes.
   const maxWidth = view === "email" ? 400 : 680;
   return (
     <div style={{ maxWidth, margin: "0 auto" }} className="transition-[max-width] duration-200">
       <div className="overflow-hidden rounded-xl border border-border-subtle bg-white">
-        <iframe title={renderedHtml ? "Email — exact HTML sent" : "Daily digest preview"} srcDoc={html} className="block w-full bg-white" style={{ height: 980, border: 0 }} />
+        <iframe title={isSent ? "Email — exact HTML sent" : exact ? "Daily digest — stored body" : "Daily digest — default template"} srcDoc={html} className="block w-full bg-white" style={{ height: 980, border: 0 }} />
       </div>
     </div>
   );
