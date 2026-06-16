@@ -65,10 +65,10 @@ type Account = {
 
 // ─── ROI model (mirrors AgentsDashboard) ───────────────────────────────────
 const COST_PER_APPT: Record<AgentType, number> = {
-  "Sales Inbound": 100,
-  "Sales Outbound": 250,
-  "Service Inbound": 50,
-  "Service Outbound": 75,
+  "Sales Inbound":   200,
+  "Sales Outbound":  250,
+  "Service Inbound": 100,
+  "Service Outbound":200,
 };
 const PREMIUM_DEALER_APPT_COST = 750;
 const PREMIUM_DEALERS = new Set<string>(["mercedes-benz of arlington"]);

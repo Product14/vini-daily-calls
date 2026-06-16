@@ -83,10 +83,10 @@ const AGENT_COLORS: Record<AgentType, string> = {
 // = (appts × cost-per-appt) ÷ MRR — i.e. how many times the monthly fee the
 // agent paid back in booked-appointment value this period.
 const COST_PER_APPT: Record<AgentType, number> = {
-  "Sales Inbound": 100,
-  "Sales Outbound": 250,
-  "Service Inbound": 50,
-  "Service Outbound": 75,
+  "Sales Inbound":   200,
+  "Sales Outbound":  250,
+  "Service Inbound": 100,
+  "Service Outbound":200,
 };
 // Premium dealers get a flat $750 per appointment regardless of agent type
 // (higher-value showrooms where each booked visit is worth far more). Editable
