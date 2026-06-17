@@ -1,10 +1,26 @@
 import { Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   AGENTS, COLS, AGENT_COLOR, GRAINS, TREND_LIMITS, TV_LIMITS, SECTIONS, TV_METRICS,
-  periodLabel, colLabel, periodEnd, swing, fmtInt, fmtPct, fmtMoneyCompact,
+  periodLabel, colLabel, periodEnd, swing, fmtInt, fmtPct, fmtMoneyCompact, abrColor,
   agentsLiveAsOf, useOverallData, useAgentSheetSummary,
   type Grain, type AgentCol, type GrainBundle, type MetricRow, type AgentSummaryMap,
 } from "./overallData";
+
+// Conditional formatting for the at-a-glance views (snapshot + TV wall):
+//   • heat  → ABR cells get a red/amber/green band (abrColor, per agent type) + white bold text
+//   • emph  → appointment-count cells get a solid highlight + white bold text
+// Both also enlarge the row (ov-big) so they read from across the room.
+const EMPH_BG = "#1d4ed8";
+type FmtMeta = { heat?: (r: MetricRow) => number | null; emph?: boolean };
+function fmtCellStyle(m: FmtMeta, r: MetricRow | undefined, agent: AgentCol): CSSProperties | undefined {
+  if (m.heat && r) {
+    const c = abrColor(m.heat(r), agent);
+    if (c) return { background: c.bg, color: c.fg, fontWeight: 800 };
+  }
+  if (m.emph) return { background: EMPH_BG, color: "#fff", fontWeight: 800 };
+  return undefined;
+}
+const isBig = (m: FmtMeta) => Boolean(m.heat || m.emph);
 
 // "Overall" view on /agents — company-wide, agent-type-level performance, ported
 // natively from the Vini-Product-Metrics dashboard. Three sub-views:
@@ -79,6 +95,19 @@ export function OverallView() {
   const [immersive, setImmersive] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // Auto-sync every 20 min so an always-on screen never goes stale. Visible-tab
+  // only and silent (refresh keeps the current data on screen until the fresh
+  // pull lands). A ref keeps the interval (set up once) calling the latest
+  // refresh closure. Source is Q12227 via the live ClickHouse query.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") refreshRef.current();
+    }, 20 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Auto-rotate the granularity while the TV wall is open (set up once per entry).
   useEffect(() => {
     if (view !== "tv") return;
@@ -147,6 +176,9 @@ export function OverallView() {
         .ov-crit td{background:#f5f3ff}
         .ov-badge{font-size:9px;color:${ACCENT};border:1px solid ${ACCENT};border-radius:4px;padding:1px 5px;margin-left:8px;vertical-align:middle;text-transform:uppercase;letter-spacing:.04em;opacity:.85}
         .ov-pct{font-weight:700}
+        /* conditional-formatting rows (ABR heatmap + appointment highlight): bigger for 10m reads */
+        .ov-table tr.ov-big td{font-size:15px}
+        .ov-tvtable tr.ov-big td{font-size:1.3em;line-height:1.3}
         /* trend matrix */
         .ov-scroll{overflow:auto;border:1px solid ${BORDER};border-radius:10px;max-height:70vh}
         .ov-matrix{border:0;border-radius:0}
@@ -317,12 +349,12 @@ function SnapshotSection({ sec, pd }: { sec: typeof SECTIONS[number]; pd: Partia
     <>
       <tr className="ov-sec"><td colSpan={COLS.length + 1}>{sec.name}</td></tr>
       {sec.metrics.map((m) => (
-        <tr key={m.label} className={m.crit ? "ov-crit" : undefined}>
+        <tr key={m.label} className={[m.crit ? "ov-crit" : "", isBig(m) ? "ov-big" : ""].filter(Boolean).join(" ") || undefined}>
           <td className="metric">{m.label}{m.crit && <span className="ov-badge">critical</span>}</td>
           {COLS.map((c) => {
             const r = pd[c];
             return (
-              <td key={c} className={c === "Total" ? "tot" : undefined}>
+              <td key={c} className={c === "Total" ? "tot" : undefined} style={fmtCellStyle(m, r, c)}>
                 <span className={m.pct ? "ov-pct" : undefined}>{r ? m.value(r) : "—"}</span>
               </td>
             );
@@ -451,11 +483,11 @@ function TvView({ gb, grain, generated, summary, immersive }: {
                           })}
                         </tr>
                       )}
-                      <tr className={m.pct ? "pct" : undefined}>
+                      <tr className={[m.pct ? "pct" : "", isBig(m) ? "ov-big" : ""].filter(Boolean).join(" ") || undefined}>
                         <td className="m">{m.label}</td>
                         {periods.map((p, i) => {
                           const r = gb.data[p]?.[agent];
-                          return <td key={p} className={i === 0 ? "latest" : undefined}>{r ? m.value(r) : "—"}</td>;
+                          return <td key={p} className={i === 0 ? "latest" : undefined} style={fmtCellStyle(m, r, agent)}>{r ? m.value(r) : "—"}</td>;
                         })}
                       </tr>
                     </Fragment>

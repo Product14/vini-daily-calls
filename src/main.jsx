@@ -19,8 +19,12 @@ function Router() {
   if (path === "/programs" || path.startsWith("/programs/")) {
     return <ProgramsDashboard />;
   }
+  // Two faces of the agent dashboard, split by route:
+  //   "/"       → Overall (company-wide, agent-type level)
+  //   "/agents" → Rooftop level (per-rooftop ROI table)
+  // The in-page toggle navigates between these two paths.
   if (path === "/agents" || path.startsWith("/agents/")) {
-    return <AgentsDashboard />;
+    return <AgentsDashboard mainView="rooftop" />;
   }
   if (path === "/dream" || path.startsWith("/dream/")) {
     return <DreamDashboard />;
@@ -31,6 +35,14 @@ function Router() {
         <EmailerTracker />
       </div>
     );
+  }
+  // VIN inventory dashboard — moved off "/" (now the Overall view) to an
+  // explicit path; still the fallback for any unmatched route.
+  if (path === "/inventory" || path.startsWith("/inventory/")) {
+    return <Dashboard />;
+  }
+  if (path === "/") {
+    return <AgentsDashboard mainView="overall" />;
   }
   return <Dashboard />;
 }

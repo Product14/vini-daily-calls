@@ -394,19 +394,17 @@ type RagResult = { roi: number | null; status: RagStatus; note: string };
 // `periodMonths` pro-rates the monthly MRR to the selected date range (days/30,
 // or 1 for the all-time "ALL" range) so the multiple compares like-for-like.
 // Priority:
-//   1. No Metabase activity → Red.
-//   2. Top-of-funnel < 100 leads → Red (too little volume to judge ROI).
-//   3. MRR unknown → can't compute ROI → Red.
-//   4. ROI ≥ 5× Green · 3–5× Amber · < 3× Red.
+//   1. No activity in range → Red.
+//   2. MRR unknown → can't compute ROI → Red.
+//   3. ROI ≥ 5× Green · 3–5× Amber · < 3× Red.
+// (The old top-of-funnel volume gate is gone: the Q12227 source has no
+// "new leads created" figure, and New Leads / Capture Rate are hidden anyway.)
 function computeRag(mrr: number | null, total: Bucket, periodMonths: number): RagResult {
   if (!hasMetabaseActivity(total)) {
-    return { roi: null, status: "red", note: "No Metabase activity" };
+    return { roi: null, status: "red", note: "No activity in range" };
   }
   const denom = mrr != null && mrr > 0 ? mrr * periodMonths : null;
   const roi = denom != null && denom > 0 ? total.roiValue / denom : null;
-  if (total.newLeads < TOFU_MIN_LEADS) {
-    return { roi, status: "red", note: `Top-of-funnel < ${TOFU_MIN_LEADS} leads (${fmtNum(total.newLeads)}) — too little volume to judge` };
-  }
   if (roi == null) {
     return { roi: null, status: "red", note: "MRR unknown — ROI can't be computed" };
   }
@@ -415,17 +413,23 @@ function computeRag(mrr: number | null, total: Bucket, periodMonths: number): Ra
   return { roi, status: "red", note: `ROI ${fmtRoi(roi)} — below ${ROI_AMBER}×` };
 }
 
-function AgentsDashboard() {
+function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "rooftop" }) {
   const [dailyRows, setDailyRows] = useState<AgentRowDaily[]>([]);
   const [totalsRows, setTotalsRows] = useState<AgentRowTotals[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
 
-  // Top-level view: company-wide "Overall" (the ported agent-performance
-  // dashboard) vs the per-rooftop view below. Defaults to Overall; the heavy
-  // /api/agents Metabase pull is deferred until the rooftop view is first opened.
-  const [mainView, setMainView] = useState<"overall" | "rooftop">("overall");
+  // Top-level view comes from the route: "/" → Overall (company-wide), "/agents"
+  // → the per-rooftop view. The toggle navigates between those two paths (SPA
+  // nav). The heavy /api/agents Metabase pull is deferred until the rooftop
+  // view is actually shown.
+  const navigateMainView = (v: "overall" | "rooftop") => {
+    const target = v === "overall" ? "/" : "/agents";
+    if (window.location.pathname === target) return;
+    window.history.pushState({}, "", target);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  };
   const [activeAgent, setActiveAgent] = useState<ActiveAgent>("All");
   const [dateRange, setDateRange] = useState<DateRange>("D30");
   const [customRange, setCustomRange] = useState<CustomRange>(() => ({ from: "", to: todayIso() }));
@@ -512,6 +516,18 @@ function AgentsDashboard() {
       rooftopLoaded.current = true;
       load(false);
     }
+  }, [mainView]);
+
+  // Auto-sync the rooftop data every 20 min while it's the active view and the
+  // tab is visible — force=true bypasses the server's 20-min cache for a fresh
+  // ClickHouse (Q12227) pull. Keeps an always-on screen current.
+  useEffect(() => {
+    if (mainView !== "rooftop") return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") load(true);
+    }, 20 * 60 * 1000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainView]);
 
   // Stage roster from Google Sheets (via /api/agent-stages). Response shape:
@@ -1152,21 +1168,26 @@ function AgentsDashboard() {
         </div>
       </div>
 
-      {/* Top-level view toggle — company-wide Overall vs the per-rooftop view. */}
+      {/* Top-level view toggle — company-wide Overall ("/") vs the per-rooftop
+          view ("/agents"). Real links (so middle-click / open-in-new-tab work)
+          that navigate within the SPA on plain click. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
         {(["overall", "rooftop"] as const).map(v => {
           const active = v === mainView;
           const label = v === "overall" ? "Overall" : "Rooftop level";
+          const href = v === "overall" ? "/" : "/agents";
           return (
-            <button key={v} onClick={() => setMainView(v)}
+            <a key={v} href={href}
+              onClick={e => { if (!e.metaKey && !e.ctrlKey && e.button === 0) { e.preventDefault(); navigateMainView(v); } }}
               style={{
                 padding: "8px 18px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                textDecoration: "none", display: "inline-block",
                 border: `1px solid ${active ? "#111827" : "#e5e7eb"}`,
                 background: active ? "#111827" : "#fff",
                 color: active ? "#fff" : "#374151",
               }}>
               {label}
-            </button>
+            </a>
           );
         })}
       </div>

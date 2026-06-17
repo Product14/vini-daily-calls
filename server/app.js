@@ -14,6 +14,7 @@ import { getAllDeploymentStatuses, upsertDeploymentStatus } from "./viniStatuses
 import { mapMetabaseRows } from "./viniRooftopMap.js";
 import { sendProgramsReportEmail } from "./programsEmail.js";
 import { runAgentMetrics, hasClickhouseCreds } from "./agentMetrics.js";
+import { runAgentRooftops } from "./agentRooftop.js";
 
 // Some local resolvers (mac dev boxes, restrictive networks) break dns.lookup() while
 // dns.resolve4() still works. Node's global fetch uses dns.lookup. Wrap https.request
@@ -1364,7 +1365,8 @@ function mergeAgentRows(rows, keyFields) {
 }
 
 let agentsCache = { daily: null, totals: null, fetchedAt: 0 };
-const AGENTS_TTL_MS = 5 * 60 * 1000; // 5 minutes
+let agentsInflight = null; // single-flight: concurrent callers share one query set
+const AGENTS_TTL_MS = 20 * 60 * 1000; // 20 minutes (matches the dashboards' auto-sync cadence)
 
 app.get("/api/agents", async (req, res) => {
   try {
@@ -1372,42 +1374,43 @@ app.get("/api/agents", async (req, res) => {
     const fresh = !force && agentsCache.daily && agentsCache.totals
                   && (Date.now() - agentsCache.fetchedAt) < AGENTS_TTL_MS;
     if (!fresh) {
-      const [daily, totals] = await Promise.all([
-        fetchFromMetabase(AGENTS_DAILY_URL, "AGENTS_DAILY", 1, 60000),
-        fetchFromMetabase(AGENTS_TOTALS_URL, "AGENTS_TOTALS", 1, 60000),
-      ]);
-      // Drop internal/test rooftops at the source so every consumer (the
-      // dashboard tabs, KPI strip, chart) sees a clean roster regardless of
-      // data-mode toggle. Logged once per refresh so we can tell from server
-      // logs whether the Metabase card still emits these.
-      const rawDaily  = Array.isArray(daily)  ? daily  : [];
-      const rawTotals = Array.isArray(totals) ? totals : [];
-      const filteredDaily  = rawDaily.filter(r  => !isExcludedAgentRooftop(r));
-      const filteredTotals = rawTotals.filter(r => !isExcludedAgentRooftop(r));
-      if (rawDaily.length !== filteredDaily.length || rawTotals.length !== filteredTotals.length) {
-        console.log(`[api/agents] excluded internal rooftops — daily ${rawDaily.length}→${filteredDaily.length}, totals ${rawTotals.length}→${filteredTotals.length}`);
+      // Reuse an in-flight run instead of launching another (avoids stacking
+      // memory-heavy ClickHouse scans when several clients refresh at once).
+      if (!agentsInflight) {
+        agentsInflight = (async () => {
+          let dailyRows, totalsRows, source;
+          if (hasClickhouseCreds()) {
+            // Primary path: Q12227 base_fact aggregated at rooftop grain on
+            // ClickHouse — the SAME source the Overall view uses, so the two
+            // reconcile. GROUP BY yields one row per key (no dedup needed).
+            const { daily, totals } = await runAgentRooftops();
+            dailyRows  = (Array.isArray(daily)  ? daily  : []).filter(r => !isExcludedAgentRooftop(r));
+            totalsRows = (Array.isArray(totals) ? totals : []).filter(r => !isExcludedAgentRooftop(r));
+            source = "clickhouse-q12227";
+            console.log(`[api/agents] ClickHouse Q12227 — daily ${dailyRows.length}, totals ${totalsRows.length} rows`);
+          } else {
+            // Fallback (only when CLICKHOUSE_* is unset): legacy Metabase
+            // agents_v2 cards. Drop internal/test rooftops, then de-dup the
+            // multiple rows Metabase emits per (team × agent [× day]).
+            const [daily, totals] = await Promise.all([
+              fetchFromMetabase(AGENTS_DAILY_URL, "AGENTS_DAILY", 1, 60000),
+              fetchFromMetabase(AGENTS_TOTALS_URL, "AGENTS_TOTALS", 1, 60000),
+            ]);
+            const filteredDaily  = (Array.isArray(daily)  ? daily  : []).filter(r => !isExcludedAgentRooftop(r));
+            const filteredTotals = (Array.isArray(totals) ? totals : []).filter(r => !isExcludedAgentRooftop(r));
+            dailyRows  = mergeAgentRows(filteredDaily,  ["team_id", "agent_type", "day"]);
+            totalsRows = mergeAgentRows(filteredTotals, ["team_id", "agent_type"]);
+            source = "metabase-agents_v2";
+            console.log(`[api/agents] Metabase fallback — daily ${dailyRows.length}, totals ${totalsRows.length} rows`);
+          }
+          agentsCache = { daily: dailyRows, totals: totalsRows, fetchedAt: Date.now(), source };
+        })().finally(() => { agentsInflight = null; });
       }
-      // De-dup pass — Metabase currently emits multiple rows per
-      // (team_id × agent_type [× day]) in 180 cases for daily and 2 for totals,
-      // typically one real row + one all-zero ghost (visible in the dashboard
-      // as duplicate dates with one zero row). Sum numeric fields; keep the
-      // first-seen non-empty value for identity/string fields. Schema also
-      // varies between the two cards (daily uses total_sms_conversations,
-      // totals uses total_sms) — normalise to total_sms by copying from
-      // total_sms_conversations when the latter is the only one present.
-      const dedupedDaily  = mergeAgentRows(filteredDaily,  ["team_id", "agent_type", "day"]);
-      const dedupedTotals = mergeAgentRows(filteredTotals, ["team_id", "agent_type"]);
-      if (filteredDaily.length !== dedupedDaily.length || filteredTotals.length !== dedupedTotals.length) {
-        console.log(`[api/agents] merged duplicate rows — daily ${filteredDaily.length}→${dedupedDaily.length}, totals ${filteredTotals.length}→${dedupedTotals.length}`);
-      }
-      agentsCache = {
-        daily: dedupedDaily,
-        totals: dedupedTotals,
-        fetchedAt: Date.now(),
-      };
+      await agentsInflight;
     }
     return res.json({
       fetchedAt: new Date(agentsCache.fetchedAt).toISOString(),
+      source: agentsCache.source,
       dailyRowCount: agentsCache.daily.length,
       totalsRowCount: agentsCache.totals.length,
       daily: agentsCache.daily,
@@ -2404,15 +2407,33 @@ app.get("/api/cron/roi-email", async (req, res) => {
 // against Prod-ClickHouse and returns { bundle, meta }. Returns 503 when the
 // CLICKHOUSE_* env vars are not set — the frontend then falls back to the
 // bundled snapshot (public/agent-overall-snapshot.json).
-app.get("/api/metrics", async (_req, res) => {
+// 20-minute in-process cache so repeated loads are instant and the live
+// ClickHouse query (~50s) only re-runs once per window. `?refresh=1` bypasses
+// it (the dashboards' auto-refresh forces a fresh pull every 20 min).
+let metricsCache = { payload: null, fetchedAt: 0 };
+let metricsInflight = null; // single-flight: concurrent callers share one query set
+const METRICS_TTL_MS = 20 * 60 * 1000;
+
+app.get("/api/metrics", async (req, res) => {
   if (!hasClickhouseCreds()) {
     res.status(503).json({ error: "ClickHouse env vars not set (need CLICKHOUSE_HOST/PORT/USER/PASSWORD) — using bundled snapshot." });
     return;
   }
   try {
-    const payload = await runAgentMetrics();
-    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=300");
-    res.status(200).json(payload);
+    const force = req.query.refresh === "1";
+    const fresh = !force && metricsCache.payload && (Date.now() - metricsCache.fetchedAt) < METRICS_TTL_MS;
+    if (!fresh) {
+      // Reuse an in-flight run instead of launching another (avoids stacking
+      // memory-heavy ClickHouse scans when several clients refresh at once).
+      if (!metricsInflight) {
+        metricsInflight = runAgentMetrics()
+          .then((payload) => { metricsCache = { payload, fetchedAt: Date.now() }; })
+          .finally(() => { metricsInflight = null; });
+      }
+      await metricsInflight;
+    }
+    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=1200");
+    res.status(200).json(metricsCache.payload);
   } catch (err) {
     console.error("GET /api/metrics error:", err?.message ?? err);
     res.status(500).json({ error: String(err?.message ?? err) });

@@ -71,6 +71,27 @@ export const safeDiv = (n: unknown, den: unknown): number | null => {
   if (!d) return null;
   return Number(n) / d;
 };
+
+// Conditional formatting for ABR — discrete red / amber / green bands so the cell
+// reads from across the room. Thresholds are PER agent type because outbound ABR
+// runs structurally lower than inbound (a 1% outbound booking rate is healthy; a
+// 1% inbound rate is not). `ratio` is the ABR fraction (0–1); white text on the
+// strong fill. Returns null when there's nothing to colour.
+export type AbrBand = { green: number; amber: number }; // ratio ≥ green → green, ≥ amber → amber, else red
+export const ABR_BANDS: Record<AgentCol, AbrBand> = {
+  "Sales Outbound":   { green: 0.03, amber: 0.01 }, // per spec: ≥3% green, ≥1% amber, else red
+  "Service Outbound": { green: 0.03, amber: 0.01 }, // outbound default (mirrors Sales OB)
+  "Sales Inbound":    { green: 0.10, amber: 0.05 }, // default — adjust to taste
+  "Service Inbound":  { green: 0.12, amber: 0.06 }, // default — adjust to taste
+  "Total":            { green: 0.08, amber: 0.04 }, // default — adjust to taste
+};
+const ABR_RED = "#dc2626", ABR_AMBER = "#d97706", ABR_GREEN = "#16a34a";
+export function abrColor(ratio: number | null, agent: AgentCol): { bg: string; fg: string } | null {
+  if (ratio == null || !Number.isFinite(ratio)) return null;
+  const band = ABR_BANDS[agent] ?? ABR_BANDS.Total;
+  const bg = ratio >= band.green ? ABR_GREEN : ratio >= band.amber ? ABR_AMBER : ABR_RED;
+  return { bg, fg: "#fff" };
+}
 // Compact dollars for the TV-wall header chips (e.g. $1.2M, $840K, $0).
 export const fmtMoneyCompact = (n: unknown): string => {
   const v = Number(n);
@@ -120,6 +141,11 @@ export type Metric = {
   crit?: boolean;
   numv?: (r: MetricRow) => number | null;
   floor?: number;
+  // Conditional formatting (snapshot + TV wall): `heat` returns the 0–1 ratio to
+  // colour the cell red→green (ABR); `emph` flags a row to render big & bold
+  // with a solid highlight (appointment count). Both built for at-a-glance reads.
+  heat?: (r: MetricRow) => number | null;
+  emph?: boolean;
 };
 export type Section = { name: string; metrics: Metric[] };
 
@@ -139,8 +165,8 @@ export const SECTIONS: Section[] = [
       { label: "Unique leads touched", value: (r) => fmtInt(r.leads_touched) },
       { label: "Qualified leads (#)", value: (r) => fmtInt(r.leads_qualified) },
       { label: "% qualified leads", pct: true, value: (r) => fmtPct(r.leads_qualified, r.leads_touched), crit: true, numv: (r) => safeDiv(r.leads_qualified, r.leads_touched), floor: 0.03 },
-      { label: "Appointments (#)", value: (r) => fmtInt(r.appts) },
-      { label: "ABR % (appts / leads touched)", pct: true, value: (r) => fmtPct(r.appts, r.leads_touched), crit: true, numv: (r) => safeDiv(r.appts, r.leads_touched), floor: 0.02 },
+      { label: "Appointments (#)", value: (r) => fmtInt(r.appts), emph: true },
+      { label: "ABR % (appts / leads touched)", pct: true, value: (r) => fmtPct(r.appts, r.leads_touched), crit: true, numv: (r) => safeDiv(r.appts, r.leads_touched), floor: 0.02, heat: (r) => safeDiv(r.appts, r.leads_touched) },
     ],
   },
   {
@@ -181,10 +207,10 @@ export const SECTIONS: Section[] = [
 
 // TV-wall metric set: a focused KPI %-group on top, then a raw-count group.
 // `grp` starts the second (raw-count) group with a divider.
-export type TvMetric = { label: string; value: (r: MetricRow) => string; pct?: boolean; grp?: boolean };
+export type TvMetric = { label: string; value: (r: MetricRow) => string; pct?: boolean; grp?: boolean; heat?: (r: MetricRow) => number | null; emph?: boolean };
 export const TV_METRICS: TvMetric[] = [
   { label: "% Rooftops w/ appt", pct: true, value: (r) => fmtPct(r.rooftops_appt, r.rooftops_any) },
-  { label: "ABR %", pct: true, value: (r) => fmtPct(r.appts, r.leads_touched) },
+  { label: "ABR %", pct: true, value: (r) => fmtPct(r.appts, r.leads_touched), heat: (r) => safeDiv(r.appts, r.leads_touched) },
   { label: "Transfer %", pct: true, value: (r) => fmtPct(r.transfers, r.total_calls) },
   { label: "Call connection %", pct: true, value: (r) => fmtPct(r.connected_calls, r.total_calls) },
   { label: "SMS reply %", pct: true, value: (r) => fmtPct(r.sms_inbound, r.sms_outbound) },
@@ -192,7 +218,7 @@ export const TV_METRICS: TvMetric[] = [
   { label: "Rooftops w/ appointment", value: (r) => fmtInt(r.rooftops_appt) },
   { label: "Unique leads touched", value: (r) => fmtInt(r.leads_touched) },
   { label: "Qualified calls", value: (r) => fmtInt(r.leads_qualified_call) },
-  { label: "Appointments", value: (r) => fmtInt(r.appts) },
+  { label: "Appointments", value: (r) => fmtInt(r.appts), emph: true },
   { label: "Total calls", value: (r) => fmtInt(r.total_calls) },
   { label: "Total SMS outbound", value: (r) => fmtInt(r.sms_outbound) },
 ];
@@ -234,12 +260,12 @@ export function useOverallData(): OverallData {
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     setLoading(true);
     setError(null);
-    // 1) live ClickHouse
+    // 1) live ClickHouse (`force` bypasses the server's 20-min cache for a fresh pull)
     try {
-      const r = await fetch(`${API_BASE}/api/metrics`, { cache: "no-store" });
+      const r = await fetch(`${API_BASE}/api/metrics${force ? "?refresh=1" : ""}`, { cache: "no-store" });
       if (r.ok) {
         const j = await r.json();
         if (j && j.bundle) {
@@ -270,7 +296,7 @@ export function useOverallData(): OverallData {
 
   useEffect(() => { load(); }, [load]);
 
-  return { bundle, meta, loading, error, live, refresh: load };
+  return { bundle, meta, loading, error, live, refresh: () => load(true) };
 }
 
 // ─── Per-agent ARR + go-live roster (Vini funnel master sheet) ──────────────────

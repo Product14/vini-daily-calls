@@ -17,7 +17,34 @@ export function hasClickhouseCreds() {
   return Boolean(process.env.CLICKHOUSE_HOST && process.env.CLICKHOUSE_PASSWORD);
 }
 
-async function run(sql) {
+// Global concurrency cap across ALL ClickHouse queries (both /api/metrics and
+// /api/agents). base_fact scans are memory-heavy; too many at once OOMs the
+// cluster (Code 241 — it sits right at its 57.6 GiB ceiling). 4 leaves headroom
+// while still finishing a cold /api/metrics (6 queries) in two waves. Extra
+// queries queue. Tune via CH_MAX_CONCURRENCY.
+const CH_MAX = Number(process.env.CH_MAX_CONCURRENCY) || 4;
+let chActive = 0;
+const chWaiters = [];
+function chAcquire() {
+  if (chActive < CH_MAX) { chActive++; return Promise.resolve(); }
+  return new Promise((resolve) => chWaiters.push(resolve));
+}
+function chRelease() {
+  const next = chWaiters.shift();
+  if (next) next();           // hand the slot straight to the next waiter
+  else chActive--;
+}
+
+export async function runClickhouse(sql) {
+  await chAcquire();
+  try {
+    return await runClickhouseRaw(sql);
+  } finally {
+    chRelease();
+  }
+}
+
+async function runClickhouseRaw(sql) {
   const host = process.env.CLICKHOUSE_HOST;
   const port = process.env.CLICKHOUSE_PORT || "8443";
   const user = process.env.CLICKHOUSE_USER || "default";
@@ -73,7 +100,7 @@ function assemble(R) {
 export async function runAgentMetrics() {
   const parts = Object.keys(QUERIES);
   const R = {};
-  await Promise.all(parts.map(async (p) => { R[p] = await run(QUERIES[p]); }));
+  await Promise.all(parts.map(async (p) => { R[p] = await runClickhouse(QUERIES[p]); }));
   const today = new Date().toISOString().slice(0, 10);
   return {
     bundle: assemble(R),
