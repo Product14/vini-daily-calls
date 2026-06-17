@@ -97,55 +97,45 @@ function renderRagSplit(overall, perAgent) {
   `;
 }
 
-// ─── Section 2 — Tasks grouped by owner ─────────────────────────────────────
-// Each owner gets a banded section header showing their name + team(s) +
-// combined ARR. Rows inside list their tasks sorted by ARR desc. Columns:
-// RAG · Agent · Next Step · Rooftop/ARR. Unassigned tasks bucket at the end
-// in a red "(no owner)" band — a deliberate prompt to fix accountability.
-function renderTasksByOwner(section2) {
-  const rowsHtml = section2.map(({ ownerLabel, rows, subtotalArr, teams, taskDri }) => {
-    const teamLabel = teams.length === 0 ? "" : teams.length === 1 ? teams[0] : "Multiple teams";
-    const labelHtml = taskDri
+// ─── Section 2 — Per-owner RAG summary ──────────────────────────────────────
+// For each Task DRI, count how many of their live accounts are Red / Amber /
+// Green, with ARR sums. One row per (owner × RAG bucket), grouped via
+// rowspan=3 so the owner cell spans its three RAG rows. Owners sorted by
+// Not-Green ARR desc; "(no owner)" pinned to the bottom.
+function renderOwnerRagSummary(section2) {
+  const ownerCellStyle = "padding:8px 10px;font-weight:700;color:#111827;font-size:12px;font-family:Arial,Helvetica,sans-serif;background:#f9fafb;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;vertical-align:top;";
+  const ragRowTds = (b, rag) => `
+    ${ragLabelCell(rag)}
+    <td style="${cellTd}text-align:right;">${b.count}</td>
+    <td style="${cellTd}text-align:right;">${fmtMoney(b.arr)}</td>
+  `;
+  const ownerHtml = ({ ownerLabel, taskDri, red, amber, green }) => {
+    const labelMarkup = taskDri
       ? `<span style="color:#111827;">${escapeHtml(ownerLabel)}</span>`
       : `<span style="color:#dc2626;">(no owner)</span>`;
-    const bandRow = `
+    return `
       <tr>
-        <td colspan="3" style="${bandTd}">
-          ${labelHtml}
-          ${teamLabel ? `<span style="font-weight:400;color:#6b7280;font-size:11px;margin-left:8px;">${escapeHtml(teamLabel)}</span>` : ""}
-        </td>
-        <td style="${bandTd}text-align:right;">${fmtMoney(subtotalArr)}</td>
+        <td rowspan="3" style="${ownerCellStyle}">${labelMarkup}</td>
+        ${ragRowTds(red, "red")}
       </tr>
+      <tr>${ragRowTds(amber, "amber")}</tr>
+      <tr>${ragRowTds(green, "green")}</tr>
     `;
-    if (!rows || rows.length === 0) return bandRow;
-    const rowHtml = rows.map(r => `
-      <tr>
-        ${ragLabelCell(r.rag)}
-        <td style="${cellTd}vertical-align:top;">${escapeHtml(AGENT_LABELS[r.agent] ?? r.agent)}</td>
-        <td style="${cellTd}vertical-align:top;white-space:normal;line-height:1.3;">
-          ${escapeHtml(r.title)}
-          ${r.earliestEta ? `<div style="font-size:10px;color:#6b7280;margin-top:2px;font-family:Arial,Helvetica,sans-serif;">ETA · ${escapeHtml(fmtEtaShort(r.earliestEta))}</div>` : ""}
-        </td>
-        <td style="${cellTd}vertical-align:top;text-align:right;">
-          <div style="font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">${r.rooftopCount}</div>
-          <div style="font-size:10px;color:#374151;margin-top:2px;font-family:Arial,Helvetica,sans-serif;">${fmtMoney(r.arrSum)}</div>
-        </td>
-      </tr>
-    `).join("");
-    return bandRow + rowHtml;
-  }).join("");
-
+  };
+  const bodyHtml = section2.length
+    ? section2.map(ownerHtml).join("")
+    : `<tr><td colspan="4" style="${cellTd}color:#9ca3af;text-align:center;">No owners with open tasks on live accounts.</td></tr>`;
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;width:100%;">
       <thead>
         <tr>
-          <th style="${headTh}width:50px;">RAG</th>
-          <th style="${headTh}width:84px;">Agent</th>
-          <th style="${headTh}">Next Step</th>
-          <th style="${headTh}width:72px;text-align:right;">Rooftop / ARR</th>
+          <th style="${headTh}width:140px;border-right:1px solid #cbd5e1;">Owner</th>
+          <th style="${headTh}width:72px;">RAG</th>
+          <th style="${headTh}text-align:right;"># Agents</th>
+          <th style="${headTh}text-align:right;">$ ARR</th>
         </tr>
       </thead>
-      <tbody>${rowsHtml}</tbody>
+      <tbody>${bodyHtml}</tbody>
     </table>
   `;
 }
@@ -179,18 +169,21 @@ export function renderProgramsEmailHtml({ overall, perAgent, section2, dateText,
 
                 <div style="margin-top:24px;display:flex;align-items:center;">
                   <span style="display:inline-block;width:20px;height:20px;background:#111827;color:#ffffff;border-radius:4px;text-align:center;font-size:11px;font-weight:700;line-height:20px;font-family:Arial,Helvetica,sans-serif;">2</span>
-                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">Tasks by owner · path to green</span>
+                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">Owners · path to green</span>
                 </div>
-                <div style="margin-top:10px;">${renderTasksByOwner(section2)}</div>
+                <div style="margin-top:10px;">${renderOwnerRagSummary(section2)}</div>
 
                 <div style="margin-top:18px;font-size:11px;color:#9ca3af;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
-                  Section 2 collapses identical (task × team) across rooftops into one row per agent group. Rooftop count = distinct rooftops sharing the same ask; ARR = combined exposure. ETA shows the earliest date if any rooftop has one set.
+                  Each owner row counts the distinct live (rooftop × agent) accounts they have at least one open next-step on. Owners sorted by Not-Green ARR descending — the bigger their red/amber pile, the higher they appear.
                 </div>
 
                 ${dashboardUrl ? `
-                <div style="margin-top:18px;text-align:center;">
-                  <a href="${escapeHtml(dashboardUrl)}" style="display:inline-block;padding:8px 16px;background:#111827;color:#ffffff;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;font-family:Arial,Helvetica,sans-serif;">
-                    Open dashboard →
+                <div style="margin-top:24px;padding-top:18px;border-top:1px solid #e5e7eb;text-align:center;">
+                  <div style="font-size:12px;color:#6b7280;margin-bottom:10px;font-family:Arial,Helvetica,sans-serif;">
+                    Drill into the full task list, edit owners, ETAs, and statuses:
+                  </div>
+                  <a href="${escapeHtml(dashboardUrl)}#tasks" style="display:inline-block;padding:10px 22px;background:#0f766e;color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;font-family:Arial,Helvetica,sans-serif;letter-spacing:0.2px;">
+                    View Path to Green →
                   </a>
                 </div>` : ""}
               </td>

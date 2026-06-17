@@ -105,11 +105,13 @@ function costPerAppt(agentType: AgentType, rooftopName: string, enterpriseName: 
   return COST_PER_APPT[agentType] ?? 0;
 }
 
-// RAG thresholds. Green ROI ≥ 5×, Amber 3–5×, Performance red < 3×. A rooftop
+// RAG thresholds. Green ROI ≥ 3×, Amber 1.5×–3×, Performance red < 1.5×. A rooftop
 // with < 100 top-of-funnel (new) leads is Red regardless of ROI — too little
 // volume to trust the multiple.
-const ROI_GREEN = 5;
-const ROI_AMBER = 3;
+// RAG thresholds on the ROI multiple:
+//   ≥ 3× → Green   ·   1.5×–3× → Amber   ·   < 1.5× → Red
+const ROI_GREEN = 3;
+const ROI_AMBER = 1.5;
 const TOFU_MIN_LEADS = 100;
 
 // Every rooftop resolves to one of three states — never N/A. Anything we can't
@@ -396,7 +398,7 @@ type RagResult = { roi: number | null; status: RagStatus; note: string };
 // Priority:
 //   1. No activity in range → Red.
 //   2. MRR unknown → can't compute ROI → Red.
-//   3. ROI ≥ 5× Green · 3–5× Amber · < 3× Red.
+//   3. ROI ≥ 3× Green · 1.5×–3× Amber · < 1.5× Red.
 // (The old top-of-funnel volume gate is gone: the Q12227 source has no
 // "new leads created" figure, and New Leads / Capture Rate are hidden anyway.)
 function computeRag(mrr: number | null, total: Bucket, periodMonths: number): RagResult {
@@ -1606,7 +1608,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, 
             <th
               style={{ ...thStyle, ...sortableHeaderStyle("ROI"), textAlign: "center", minWidth: 84 }}
               onClick={() => onSort("ROI")}
-              title="ROI Multiple = (appts × cost-per-appt) ÷ (MRR pro-rated to the selected range). RAG: Green ≥ 5× · Amber 3–5× · Red < 3× (or < 100 top-of-funnel leads, or no Metabase data).">
+              title="ROI Multiple = (appts × cost-per-appt) ÷ (MRR pro-rated to the selected range). RAG: Green ≥ 3× · Amber 1.5×–3× · Red < 1.5× (or < 100 top-of-funnel leads, or no Metabase data).">
               ROI{sortIndicator("ROI")}
             </th>
           )}

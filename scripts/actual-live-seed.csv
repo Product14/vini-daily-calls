@@ -1,0 +1,89 @@
+Enterprise ID,Account,Team ID,Rooftop Name,Agent Opted
+b7a9c31a8,"I-40 Autos, LLC",b4df3297f5,"I-40 Autos, LLC",Sales Inbound
+d3216c3e4,John Hiester Chevrolet,0dcef03834,John Hiester Chevrolet,Service Inbound
+acb5f83e1,McGrath Acura of Westmont (Mcgrath Imports),bf524480-3,McGrath Acura,Service Inbound
+acb5f83e1,McGrath Acura of Westmont (Mcgrath Imports),987d7cb5f5,McGrath Acura,Sales Inbound
+21de286e9,Paragon Motors of Woodside Inc dba Paragon Honda,5895de05b,Paragon Honda,Sales Inbound
+06e65fbde,"Feldmann Imports, Inc.",5480771b21,"Feldmann Imports, Inc.",Sales Inbound
+9016eb535,Bridgeton Auto Mall,e4047018-c,Bridgeton Auto Mall,Sales Inbound
+e258a7579,Bob King Mazda,a9e37101ea,Bob King Mazda,Service Inbound
+9016eb535,Bridgeton Auto Mall,e4047018-c,Bridgeton Auto Mall,Sales Outbound
+06e65fbde,"Feldmann Imports, Inc.",5480771b21,"Feldmann Imports, Inc.",Service Inbound
+06e65fbde,"Feldmann Imports, Inc.",5480771b21,"Feldmann Imports, Inc.",Service Outbound
+ef09d889d,Victory Automotive Group,bf718528af,Victory Toyota of Midtown,Service Inbound
+6548557c2,Wolfchase Honda & Nissan,405beccbe9,Wolfchase Honda,Service Outbound
+6548557c2,Wolfchase Honda & Nissan,d14b8b8338,Wolfchase Nissan,Service Outbound
+6548557c2,Wolfchase Honda & Nissan,405beccbe9,Wolfchase Honda,Sales Outbound
+6548557c2,Wolfchase Honda & Nissan,d14b8b8338,Wolfchase Nissan,Sales Outbound
+6548557c2,Wolfchase Honda & Nissan,405beccbe9,Wolfchase Honda,Sales Inbound
+6548557c2,Wolfchase Honda & Nissan,d14b8b8338,Wolfchase Nissan,Sales Inbound
+4f772edd8,World Car Auto Group,d2999d21-c,World Car Kia San Antonio,Service Inbound
+4f772edd8,World Car Auto Group,d4c824c0-9,World Car Mazda San Antonio,Service Inbound
+f20ae28a0,DeNooyer Chevrolet Kalamazoo,723708ae8f,DeNooyer Chevrolet Kalamazoo,Service Inbound
+7d06f7427,Brandon Steven Motors,49a06313cf,Covina Kia,Sales Inbound
+7d06f7427,Brandon Steven Motors,49a06313cf,Covina Kia,Service Inbound
+7d06f7427,Brandon Steven Motors,49a06313cf,Covina Kia,Sales Outbound
+b5b6954c4,Landers CDJR,c18a7a6d8d,Landers CDJR,Sales Inbound
+7d06f7427,Brandon Steven Motors,9923577d07,Honda DTLA,Service Inbound
+7d06f7427,Brandon Steven Motors,a0a4332434,Subaru Wichita,Sales Outbound
+7d06f7427,Brandon Steven Motors,2b110492b6,Honda Reseda,Service Inbound
+7d06f7427,Brandon Steven Motors,2b110492b6,Honda Reseda,Sales Outbound
+7d06f7427,Brandon Steven Motors,2b110492b6,Honda Reseda,Service Outbound
+4c65517e7,Burns Hyundai,9c9e3d1259,Burns Hyundai,Service Inbound
+e551635ea,Murgado,f222a4f3ff,Mercedes Laguna Niguel,Service Inbound
+e551635ea,Murgado,8f59b8483b,Mercedes Benz Foothill,Service Inbound
+5b81be4b1,Dream Automotive,6730ea9132,Dream Lawrence Nissan,Sales Inbound
+5b81be4b1,Dream Automotive,6730ea9132,Dream Lawrence Nissan,Sales Outbound
+3e291ce0f,Horne Mazda,c885afdbe9,Horne Mazda,Sales Outbound
+b5b6954c4,Landers CDJR,c18a7a6d8d,Landers CDJR,Service Inbound
+b5b6954c4,Landers CDJR,c18a7a6d8d,Landers CDJR,Sales Outbound
+6b9a25d35,Sport Durst Automotive Group,27029bf75c,Sport Durst Mazda,Service Inbound
+6b9a25d35,Sport Durst Automotive Group,5f6644c1f1,Sport Durst Hyundai,Service Inbound
+6b9a25d35,Sport Durst Automotive Group,73ff62fd21,Sport Durst VW of Goldsboro,Service Inbound
+6b9a25d35,Sport Durst Automotive Group,5b65de92e5,Sport Durst VW of Jacksonville,Service Inbound
+6b9a25d35,Sport Durst Automotive Group,cb9198f115,Sport Durst Subaru,Service Inbound
+46cf87af0,Jones Motor Company,9c1ad81386,Jones CDJR,Sales Inbound
+46cf87af0,Jones Motor Company,9c1ad81386,Jones CDJR,Sales Outbound
+cd34da2f2,Beaver County Auto,9a72db996f,Beaver County Auto,Sales Outbound
+cd34da2f2,Beaver County Auto,9a72db996f,Beaver County Auto,Sales Inbound
+178e04bf2,Heiser Automotive Group,b7184697be,Heiser Chevrolet of West Allis,Service Inbound
+dab960b7c,Mercedes-Benz of Arlington,341a56683a,Mercedes-Benz of Arlington,Sales Inbound
+dab960b7c,Mercedes-Benz of Arlington,341a56683a,Mercedes-Benz of Arlington,Sales Outbound
+c946af83e,Zeigler Hyundai of Racine,f618492d10,Zeigler Hyundai of Racine,Sales Inbound
+c946af83e,Zeigler Hyundai of Racine,f618492d10,Zeigler Hyundai of Racine,Sales Outbound
+c946af83e,Zeigler Hyundai of Racine,f618492d10,Zeigler Hyundai of Racine,Service Inbound
+5b81be4b1,Dream Automotive,3d3deabc98,Dream Nissan Midwest,Sales Inbound
+5b81be4b1,Dream Automotive,3d3deabc98,Dream Nissan Midwest,Sales Outbound
+5b81be4b1,Dream Automotive,7607d0e6f5,Dream Nissan Kansas City,Sales Inbound
+5b81be4b1,Dream Automotive,7607d0e6f5,Dream Nissan Kansas City,Sales Outbound
+6add25efd,Vatland Auto Group,e05e67affb,Vatland Honda,Sales Inbound
+6add25efd,Vatland Auto Group,e05e67affb,Vatland Honda,Sales Outbound
+82255fce5,Toronto,26fe9492b9,Toronto Honda,Service Inbound
+82255fce5,Toronto,26fe9492b9,Toronto Honda,Service Outbound
+9d4468871,Dutch Miller Auto Group,e08ec18b4f,Dutch Miller Kia Charlotte,Sales Inbound
+9d4468871,Dutch Miller Auto Group,e08ec18b4f,Dutch Miller Kia Charlotte,Sales Outbound
+9d4468871,Dutch Miller Auto Group,e08ec18b4f,Dutch Miller Kia Charlotte,Service Inbound
+b81a8498a,CornHusker Group,37329f9976,CornHusker Nissan,Sales Inbound
+b81a8498a,CornHusker Group,37329f9976,CornHusker Nissan,Sales Outbound
+b81a8498a,CornHusker Group,37329f9976,CornHusker Nissan,Service Inbound
+b81a8498a,CornHusker Group,3f96401f8d,Courtesy Ford,Sales Inbound
+b81a8498a,CornHusker Group,3f96401f8d,Courtesy Ford,Sales Outbound
+b81a8498a,CornHusker Group,3f96401f8d,Courtesy Ford,Service Inbound
+b81a8498a,CornHusker Group,3b8dee0632,CornHusker Auto Center,Sales Inbound
+b81a8498a,CornHusker Group,3b8dee0632,CornHusker Auto Center,Sales Outbound
+b81a8498a,CornHusker Group,3b8dee0632,CornHusker Auto Center,Service Inbound
+f07925222,Principle Automotive Group,fdec030155,Principle BMW MINI of San Antonio,Sales Inbound
+f07925222,Principle Automotive Group,fdec030155,Principle BMW MINI of San Antonio,Service Inbound
+6c19cc7c4,Super Autos Miami,7fb99e6ee1,Super Autos Miami,Sales Inbound
+6c19cc7c4,Super Autos Miami,7fb99e6ee1,Super Autos Miami,Sales Outbound
+aec6e372f,Grand Motorcars,34ddfad075,Autoplex,Sales Inbound
+aec6e372f,Grand Motorcars,a5c07ee7d2,Hyundai of Canton,Sales Inbound
+c53b9eaab,Elway Powersport,cb5d950847,John Elway Harley-Davidson,Service Inbound
+3d5f779d7,Rick Weaver Chevrolet,d4a682cb2a,Rick Weaver Chevrolet,Service Inbound
+3d5f779d7,Rick Weaver Chevrolet,d4a682cb2a,Rick Weaver Chevrolet,Service Outbound
+97e494b63,Lucki Mazda,b60b1bb221,Lucki Mazda,Service Inbound
+97e494b63,Lucki Mazda,b60b1bb221,Lucki Mazda,Sales Inbound
+aa323b917,Car Revolution,eba56ec9aa,Pointe Buick GMC,Service Inbound
+aa323b917,Car Revolution,eba56ec9aa,Pointe Buick GMC,Sales Outbound
+aa323b917,Car Revolution,7aa04a1a2d,Revolution Cars of Avenel,Sales Outbound
+21de286e9,Worldwide Motors LTD dba Paragon Acura,e9e19bca63,Paragon Acura,Service Outbound
