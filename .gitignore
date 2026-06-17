@@ -4,3 +4,4 @@ dist/
 server/vins.db
 *.env
 !.env.example
+.vercel

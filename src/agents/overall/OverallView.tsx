@@ -92,7 +92,14 @@ export function OverallView() {
   const [period, setPeriod] = useState<string | null>(null);
   const [trendAgent, setTrendAgent] = useState<AgentCol>("Sales Inbound");
   const [intentAgent, setIntentAgent] = useState<AgentCol>("Total");
-  const [immersive, setImmersive] = useState(false);
+  // Immersive (full-viewport, chrome hidden) has two independent sources:
+  //   • idleImmersive — auto, after 10s with no interaction on the TV wall
+  //   • isFs          — the browser Fullscreen API (the ⛶ button / Esc)
+  // Either one is immersive; keeping them separate is what stops the manual
+  // fullscreen button from cancelling the auto-fullscreen (and vice-versa).
+  const [idleImmersive, setIdleImmersive] = useState(false);
+  const [isFs, setIsFs] = useState(false);
+  const immersive = idleImmersive || isFs;
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Auto-sync every 20 min so an always-on screen never goes stale. Visible-tab
@@ -117,23 +124,66 @@ export function OverallView() {
     return () => clearInterval(t);
   }, [view]);
 
-  // Go immersive (full-viewport, chrome hidden) after IMMERSIVE_IDLE_MS of no
-  // interaction on the TV wall; any pointer/key activity exits and re-arms it.
+  // Auto-immersive after IMMERSIVE_IDLE_MS idle on the TV wall. Pointer/key
+  // activity exits and re-arms it — EXCEPT activity on the fullscreen button
+  // (data-ov-fs), so clicking ⛶ never kicks us out of the auto-fullscreen.
   useEffect(() => {
-    if (view !== "tv") { setImmersive(false); return; }
+    if (view !== "tv") { setIdleImmersive(false); return; }
     let timer: ReturnType<typeof setTimeout>;
-    const arm = () => {
-      clearTimeout(timer);
-      setImmersive(false);
-      timer = setTimeout(() => setImmersive(true), IMMERSIVE_IDLE_MS);
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(() => setIdleImmersive(true), IMMERSIVE_IDLE_MS); };
+    const onActivity = (e: Event) => {
+      const t = e.target as HTMLElement | null;
+      if (t && t.closest && t.closest("[data-ov-fs]")) return; // ignore the fullscreen button
+      setIdleImmersive(false);
+      schedule();
     };
-    arm();
+    schedule();
     const evs: (keyof WindowEventMap)[] = ["mousemove", "mousedown", "keydown", "touchstart", "wheel"];
-    evs.forEach((e) => window.addEventListener(e, arm, { passive: true }));
-    return () => { clearTimeout(timer); evs.forEach((e) => window.removeEventListener(e, arm)); };
+    evs.forEach((e) => window.addEventListener(e, onActivity, { passive: true }));
+    return () => { clearTimeout(timer); evs.forEach((e) => window.removeEventListener(e, onActivity)); };
   }, [view]);
 
-  // Manual, true browser fullscreen (needs the click as a user gesture).
+  // Track the browser Fullscreen API so isFs reflects ⛶ / Esc.
+  useEffect(() => {
+    const onFs = () => setIsFs(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  // Fit the TV tables to whatever screen they're on: measure the real table
+  // height and shrink the font until it fits with NO scroll, then grow to fill.
+  // Measurement-based (not a formula), so it's correct on any aspect ratio /
+  // resolution and accounts for the taller ABR/appointment rows automatically.
+  // Re-runs when immersive turns on, on grain rotation, on data refresh, on
+  // resize, and again ~300ms later to catch the fullscreen layout settling.
+  useEffect(() => {
+    if (!immersive) return;
+    const fitOne = (wrap: HTMLElement, tbl: HTMLElement) => {
+      const avail = wrap.clientHeight;
+      if (!avail) return;
+      let fs = 16, guard = 80;
+      tbl.style.fontSize = fs + "px";
+      while (tbl.offsetHeight > avail && fs > 8 && guard-- > 0) { fs -= 1; tbl.style.fontSize = fs + "px"; }      // shrink to fit
+      while (tbl.offsetHeight < avail - 2 && fs < 34 && guard-- > 0) {                                            // grow to fill
+        fs += 1; tbl.style.fontSize = fs + "px";
+        if (tbl.offsetHeight > avail) { fs -= 1; tbl.style.fontSize = fs + "px"; break; }
+      }
+    };
+    const fit = () => {
+      document.querySelectorAll<HTMLElement>(".ov-immersive .ov-tvblock").forEach((block) => {
+        const wrap = block.querySelector<HTMLElement>(".ov-tvwrap");
+        const tbl = block.querySelector<HTMLElement>(".ov-tvtable");
+        if (wrap && tbl) fitOne(wrap, tbl);
+      });
+    };
+    const raf = requestAnimationFrame(fit);
+    const settle = setTimeout(fit, 300);
+    window.addEventListener("resize", fit);
+    return () => { cancelAnimationFrame(raf); clearTimeout(settle); window.removeEventListener("resize", fit); };
+  }, [immersive, grain, bundle]);
+
+  // Manual browser fullscreen (needs the click as a user gesture). Esc / the
+  // fullscreenchange listener clears isFs. This is independent of idleImmersive.
   const toggleFullscreen = () => {
     const el = rootRef.current;
     if (!el) return;
@@ -217,9 +267,10 @@ export function OverallView() {
         .ov-immersive .ov-itop{display:flex;align-items:center;gap:12px;font-weight:800;font-size:20px;color:#111827}
         .ov-immersive .ov-itop .sub{margin-left:auto;color:#9ca3af;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
         .ov-immersive .ov-tvgrid{flex:1 1 auto;grid-template-rows:1fr 1fr;min-height:0}
-        .ov-immersive .ov-tvhead{font-size:16px;padding:10px 15px}
-        .ov-immersive .ov-tvtable{font-size:14px}
-        .ov-immersive .ov-tvtable th,.ov-immersive .ov-tvtable td{padding:5px 14px}
+        .ov-immersive .ov-tvhead{font-size:16px;padding:8px 15px;flex:0 0 auto}
+        .ov-immersive .ov-tvwrap{overflow:hidden}          /* no scroll — the fit routine measures & scales */
+        .ov-immersive .ov-tvtable{font-size:14px}          /* base; the fit routine overrides per screen */
+        .ov-immersive .ov-tvtable th,.ov-immersive .ov-tvtable td{padding:2px 12px;line-height:1.15}
       `}</style>
 
       {!immersive && (
@@ -255,7 +306,7 @@ export function OverallView() {
           )}
           {view === "tv" && (
             <div style={{ ...group, paddingLeft: 18, borderLeft: `1px solid ${BORDER}`, gap: 10 }}>
-              <button onClick={toggleFullscreen}
+              <button data-ov-fs onClick={toggleFullscreen}
                 style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 13px", borderRadius: 9, border: `1px solid ${ACCENT}`, background: ACCENT, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                 ⛶ Fullscreen
               </button>
