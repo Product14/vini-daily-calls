@@ -6,6 +6,7 @@ import AgentsDashboard from "./agents/AgentsDashboard.tsx";
 import DreamDashboard from "./dream/DreamDashboard.tsx";
 import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
 import { EmailerTracker } from "./email/EmailerTracker.tsx";
+import { Analytics } from "@vercel/analytics/react";
 
 function Router() {
   const [path, setPath] = useState(() => window.location.pathname);
@@ -50,5 +51,6 @@ function Router() {
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <Router />
+    <Analytics />
   </StrictMode>
 );
