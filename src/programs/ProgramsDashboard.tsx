@@ -2478,64 +2478,89 @@ function EmailReportView({ accounts, state, overall }: {
         </tbody>
       </table>
 
-      {/* ─── Section 2: Tasks by agent ────────────────────────────────── */}
-      <div style={{ marginTop: 28 }}>
+      {/* ─── CTA between sections ─────────────────────────────────────── */}
+      <div style={{ marginTop: 22, textAlign: "center" }}>
+        <a href="#tasks" style={{
+          display: "inline-block",
+          padding: "10px 22px",
+          background: "#0f766e",
+          color: "#ffffff",
+          borderRadius: 8,
+          fontSize: 13,
+          fontWeight: 700,
+          textDecoration: "none",
+          letterSpacing: "0.2px",
+        }}>View all tasks →</a>
+      </div>
+
+      {/* ─── Section 2: Per-owner RAG summary (RAG buckets as columns) ── */}
+      <div style={{ marginTop: 24 }}>
         <ReportSectionTitle index={2}>Owners · path to green</ReportSectionTitle>
       </div>
 
-      <table style={Sx.reportTable}>
+      <table style={{ ...Sx.reportTable, width: "auto", margin: "0 auto" }}>
         <colgroup>
-          <col style={{ width: 140 }} />  {/* Owner (rowspan 3) */}
-          <col style={{ width: 72 }} />   {/* RAG */}
-          <col />                          {/* # Agents */}
-          <col />                          {/* $ ARR */}
+          <col style={{ width: 140 }} />  {/* Owner (rowspan 2) */}
+          <col style={{ width: 80 }} />   {/* Metric label */}
+          <col style={{ width: 80 }} />   {/* Red */}
+          <col style={{ width: 80 }} />   {/* Amber */}
+          <col style={{ width: 80 }} />   {/* Green */}
         </colgroup>
         <thead>
           <tr>
             <Th2>Owner</Th2>
-            <Th2>RAG</Th2>
-            <Th2 right># Agents</Th2>
-            <Th2 right>$ ARR</Th2>
+            <Th2></Th2>
+            <Th2 right style={{ background: RAG_COLORS.red.bg,   color: RAG_COLORS.red.fg }}>Red</Th2>
+            <Th2 right style={{ background: RAG_COLORS.amber.bg, color: RAG_COLORS.amber.fg }}>Amber</Th2>
+            <Th2 right style={{ background: RAG_COLORS.green.bg, color: RAG_COLORS.green.fg }}>Green</Th2>
           </tr>
         </thead>
         <tbody>
           {section2.length === 0 ? (
-            <tr><td colSpan={4} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No owners with open tasks on live accounts.</td></tr>
+            <tr><td colSpan={5} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No owners with open tasks on live accounts.</td></tr>
           ) : section2.map(({ ownerLabel, taskDri, red, amber, green }) => {
-            const ownerCell = (
-              <td rowSpan={3} style={{
-                padding: "8px 10px",
-                fontWeight: 700,
-                color: taskDri ? "#111827" : "#dc2626",
-                fontSize: 12,
-                background: "#f9fafb",
-                borderTop: "1px solid #e5e7eb",
-                borderRight: "1px solid #e5e7eb",
-                verticalAlign: "top",
-              }}>{taskDri ? ownerLabel : "(no owner)"}</td>
-            );
-            const ragRow = (rag: RagStatus, b: { count: number; arr: number }, showOwner: boolean) => (
-              <tr key={`${taskDri}-${rag}`}>
-                {showOwner && ownerCell}
-                <td style={{ ...Sx.reportCellTight, background: RAG_COLORS[rag].bg, color: RAG_COLORS[rag].fg, fontWeight: 700 }}>
-                  {rag === "red" ? "Red" : rag === "amber" ? "Amber" : "Green"}
-                </td>
-                <td style={{ ...Sx.reportCellTight, textAlign: "right" }}>{b.count}</td>
-                <td style={{ ...Sx.reportCellTight, textAlign: "right" }}>{fmtMoney(b.arr)}</td>
-              </tr>
-            );
+            const ownerCellStyle: CSSProperties = {
+              padding: "8px 10px",
+              fontWeight: 700,
+              color: taskDri ? "#111827" : "#dc2626",
+              fontSize: 12,
+              background: "#f9fafb",
+              borderTop: "1px solid #e5e7eb",
+              borderRight: "1px solid #e5e7eb",
+              verticalAlign: "middle",
+            };
+            const metricStyle: CSSProperties = {
+              padding: "6px 10px", borderTop: "1px solid #f3f4f6",
+              color: "#374151", fontSize: 11, fontWeight: 700,
+              background: "#fafafa", borderRight: "1px solid #e5e7eb", whiteSpace: "nowrap",
+            };
+            const valStyle = (rag: RagStatus): CSSProperties => ({
+              padding: "6px 10px", borderTop: "1px solid #f3f4f6",
+              color: RAG_COLORS[rag].fg, fontSize: 11, fontWeight: 700,
+              background: RAG_COLORS[rag].bg, textAlign: "right",
+            });
             return (
               <Fragment key={taskDri || "(no owner)"}>
-                {ragRow("red", red, true)}
-                {ragRow("amber", amber, false)}
-                {ragRow("green", green, false)}
+                <tr>
+                  <td rowSpan={2} style={ownerCellStyle}>{taskDri ? ownerLabel : "(no owner)"}</td>
+                  <td style={metricStyle}># Agents</td>
+                  <td style={valStyle("red")}>{red.count}</td>
+                  <td style={valStyle("amber")}>{amber.count}</td>
+                  <td style={valStyle("green")}>{green.count}</td>
+                </tr>
+                <tr>
+                  <td style={metricStyle}>$ ARR</td>
+                  <td style={valStyle("red")}>{fmtMoney(red.arr)}</td>
+                  <td style={valStyle("amber")}>{fmtMoney(amber.arr)}</td>
+                  <td style={valStyle("green")}>{fmtMoney(green.arr)}</td>
+                </tr>
               </Fragment>
             );
           })}
         </tbody>
       </table>
 
-      <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 14, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 14, lineHeight: 1.5, textAlign: "center" }}>
         Each owner row counts the distinct live (rooftop × agent) accounts they have at least one open next-step on. Owners sorted by Not-Green ARR descending.
       </div>
     </div>
