@@ -99,40 +99,46 @@ function renderRagSplit(overall, perAgent) {
 
 // ─── Section 2 — Per-owner RAG summary ──────────────────────────────────────
 // For each Task DRI, count how many of their live accounts are Red / Amber /
-// Green, with ARR sums. One row per (owner × RAG bucket), grouped via
-// rowspan=3 so the owner cell spans its three RAG rows. Owners sorted by
-// Not-Green ARR desc; "(no owner)" pinned to the bottom.
+// Green, with ARR sums. RAG buckets become columns (tinted); each owner emits
+// two rows ("# Agents" + "$ ARR") joined by a rowspan=2 owner cell. Owners
+// sorted by Not-Green ARR desc; "(no owner)" pinned to the bottom.
 function renderOwnerRagSummary(section2) {
-  const ownerCellStyle = "padding:8px 10px;font-weight:700;color:#111827;font-size:12px;font-family:Arial,Helvetica,sans-serif;background:#f9fafb;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;vertical-align:top;";
-  const ragRowTds = (b, rag) => `
-    ${ragLabelCell(rag)}
-    <td style="${cellTd}text-align:right;">${b.count}</td>
-    <td style="${cellTd}text-align:right;">${fmtMoney(b.arr)}</td>
-  `;
+  const ownerCellStyle = "padding:8px 10px;font-weight:700;color:#111827;font-size:12px;font-family:Arial,Helvetica,sans-serif;background:#f9fafb;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;vertical-align:middle;";
+  const metricTd = `padding:6px 10px;border-top:1px solid #f3f4f6;color:#374151;font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:700;background:#fafafa;border-right:1px solid #e5e7eb;white-space:nowrap;`;
+  const valueTd  = (rag) => `padding:6px 10px;border-top:1px solid #f3f4f6;color:${RAG_COLORS[rag].fg};font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:700;text-align:right;background:${RAG_COLORS[rag].bg};`;
+  const headRagTh = (rag) => `padding:6px 10px;background:${RAG_COLORS[rag].bg};color:${RAG_COLORS[rag].fg};text-transform:uppercase;letter-spacing:0.3px;font-size:10px;font-weight:700;font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid #cbd5e1;text-align:right;`;
   const ownerHtml = ({ ownerLabel, taskDri, red, amber, green }) => {
     const labelMarkup = taskDri
       ? `<span style="color:#111827;">${escapeHtml(ownerLabel)}</span>`
       : `<span style="color:#dc2626;">(no owner)</span>`;
     return `
       <tr>
-        <td rowspan="3" style="${ownerCellStyle}">${labelMarkup}</td>
-        ${ragRowTds(red, "red")}
+        <td rowspan="2" style="${ownerCellStyle}">${labelMarkup}</td>
+        <td style="${metricTd}"># Agents</td>
+        <td style="${valueTd("red")}">${red.count}</td>
+        <td style="${valueTd("amber")}">${amber.count}</td>
+        <td style="${valueTd("green")}">${green.count}</td>
       </tr>
-      <tr>${ragRowTds(amber, "amber")}</tr>
-      <tr>${ragRowTds(green, "green")}</tr>
+      <tr>
+        <td style="${metricTd}">$ ARR</td>
+        <td style="${valueTd("red")}">${fmtMoney(red.arr)}</td>
+        <td style="${valueTd("amber")}">${fmtMoney(amber.arr)}</td>
+        <td style="${valueTd("green")}">${fmtMoney(green.arr)}</td>
+      </tr>
     `;
   };
   const bodyHtml = section2.length
     ? section2.map(ownerHtml).join("")
-    : `<tr><td colspan="4" style="${cellTd}color:#9ca3af;text-align:center;">No owners with open tasks on live accounts.</td></tr>`;
+    : `<tr><td colspan="5" style="${cellTd}color:#9ca3af;text-align:center;">No owners with open tasks on live accounts.</td></tr>`;
   return `
-    <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;width:100%;">
+    <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;margin:0 auto;">
       <thead>
         <tr>
-          <th style="${headTh}width:140px;border-right:1px solid #cbd5e1;">Owner</th>
-          <th style="${headTh}width:72px;">RAG</th>
-          <th style="${headTh}text-align:right;"># Agents</th>
-          <th style="${headTh}text-align:right;">$ ARR</th>
+          <th style="${headTh}width:140px;border-right:1px solid #cbd5e1;text-align:left;">Owner</th>
+          <th style="${headTh}width:80px;border-right:1px solid #cbd5e1;"></th>
+          <th style="${headRagTh("red")}width:80px;">Red</th>
+          <th style="${headRagTh("amber")}width:80px;">Amber</th>
+          <th style="${headRagTh("green")}width:80px;">Green</th>
         </tr>
       </thead>
       <tbody>${bodyHtml}</tbody>
@@ -167,6 +173,13 @@ export function renderProgramsEmailHtml({ overall, perAgent, section2, dateText,
                 </div>
                 <div style="margin-top:10px;">${renderRagSplit(overall, perAgent)}</div>
 
+                ${dashboardUrl ? `
+                <div style="margin-top:22px;text-align:center;">
+                  <a href="${escapeHtml(dashboardUrl)}#tasks" style="display:inline-block;padding:10px 22px;background:#0f766e;color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;font-family:Arial,Helvetica,sans-serif;letter-spacing:0.2px;">
+                    View all tasks →
+                  </a>
+                </div>` : ""}
+
                 <div style="margin-top:24px;display:flex;align-items:center;">
                   <span style="display:inline-block;width:20px;height:20px;background:#111827;color:#ffffff;border-radius:4px;text-align:center;font-size:11px;font-weight:700;line-height:20px;font-family:Arial,Helvetica,sans-serif;">2</span>
                   <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">Owners · path to green</span>
@@ -176,16 +189,6 @@ export function renderProgramsEmailHtml({ overall, perAgent, section2, dateText,
                 <div style="margin-top:18px;font-size:11px;color:#9ca3af;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
                   Each owner row counts the distinct live (rooftop × agent) accounts they have at least one open next-step on. Owners sorted by Not-Green ARR descending — the bigger their red/amber pile, the higher they appear.
                 </div>
-
-                ${dashboardUrl ? `
-                <div style="margin-top:24px;padding-top:18px;border-top:1px solid #e5e7eb;text-align:center;">
-                  <div style="font-size:12px;color:#6b7280;margin-bottom:10px;font-family:Arial,Helvetica,sans-serif;">
-                    Drill into the full task list, edit owners, ETAs, and statuses:
-                  </div>
-                  <a href="${escapeHtml(dashboardUrl)}#tasks" style="display:inline-block;padding:10px 22px;background:#0f766e;color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;font-family:Arial,Helvetica,sans-serif;letter-spacing:0.2px;">
-                    View Path to Green →
-                  </a>
-                </div>` : ""}
               </td>
             </tr>
           </table>
