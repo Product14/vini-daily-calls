@@ -80,8 +80,10 @@ function costPerAppt(t: AgentType, rooftop: string, enterprise: string): number 
   return COST_PER_APPT[t] ?? 0;
 }
 
-const ROI_GREEN = 5;
-const ROI_AMBER = 3;
+// RAG thresholds on the ROI multiple:
+//   ≥ 3× → Green   ·   1.5×–3× → Amber   ·   < 1.5× → Red
+const ROI_GREEN = 3;
+const ROI_AMBER = 1.5;
 const TOFU_MIN_LEADS = 100;
 
 const RAG_COLORS: Record<RagStatus, { bg: string; fg: string; dot: string }> = {
@@ -129,6 +131,7 @@ type AccountState = {
   rootCauses: RootCause[];
   tasks: Task[];
   accountDri: string;            // CSM override (sheet provides the default)
+  actualLive: boolean;           // operator-controlled "really shipping today" flag
   notes: string;
 };
 
@@ -248,6 +251,7 @@ const ACCOUNT_STATE_DEFAULTS: AccountState = {
   rootCauses: [],
   tasks: [],
   accountDri: "",
+  actualLive: false,
   notes: "",
 };
 function loadLocalMirror(): Record<string, AccountState> {
@@ -289,12 +293,13 @@ async function loadFromSupabase(): Promise<Record<string, AccountState> | null> 
         rootCauses: Array.isArray(r.root_causes) ? r.root_causes : [],
         tasks: [],
         accountDri: r.account_dri ?? "",
+        actualLive: r.actual_live === true,
         notes: r.notes ?? "",
       };
     }
     for (const t of tasksRes.data ?? []) {
       const k = t.account_key as string;
-      if (!out[k]) out[k] = { rootCauses: [], tasks: [], accountDri: "", notes: "" };
+      if (!out[k]) out[k] = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, notes: "" };
       out[k].tasks.push({
         id: t.id,
         title: t.title ?? "",
@@ -329,6 +334,7 @@ async function persistAccount(accountKey: string, current: AccountState): Promis
         rooftop_id: rooftopId,
         agent_type: agentType,
         account_dri: current.accountDri,
+        actual_live: current.actualLive,
         root_causes: current.rootCauses,
         notes: current.notes,
         updated_at: new Date().toISOString(),
@@ -436,7 +442,7 @@ function parseAccountKey(k: string): [string | null, string | null] {
   return [null, n ? n[1] : null];
 }
 
-const EMPTY_STATE: AccountState = { rootCauses: [], tasks: [], accountDri: "", notes: "" };
+const EMPTY_STATE: AccountState = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, notes: "" };
 type DbStatus = "loading" | "ready" | "saving" | "error" | "local-only";
 
 // ─── Component ─────────────────────────────────────────────────────────────
@@ -752,6 +758,15 @@ export default function ProgramsDashboard() {
   const emptyCell = (): Cell => ({ count: 0, arr: 0 });
   const ragRowMaker = () => ({ red: emptyCell(), amber: emptyCell(), green: emptyCell() });
 
+  // Only Actually-Live (rooftop × agent) rows count toward the aggregate
+  // widgets. Sheet stage = "Live" gets the row onto Account List + Path to
+  // Green so the operator can toggle it; the checkbox on Account List
+  // promotes it into every Overview / By-Cohort / Email aggregate.
+  const liveAccounts = useMemo(
+    () => accounts.filter(a => state[a.key]?.actualLive === true),
+    [accounts, state],
+  );
+
   // Per-agent RAG counts + $ARR (drives the top KPI cards)
   const agentByRag = useMemo(() => {
     const m: Record<AgentType, Record<RagStatus, Cell>> = {
@@ -760,12 +775,12 @@ export default function ProgramsDashboard() {
       "Sales Outbound":   ragRowMaker(),
       "Service Outbound": ragRowMaker(),
     };
-    for (const a of accounts) {
+    for (const a of liveAccounts) {
       m[a.agentType][a.rag].count += 1;
       m[a.agentType][a.rag].arr   += a.arr ?? 0;
     }
     return m;
-  }, [accounts]);
+  }, [liveAccounts]);
 
   // Per-agent Cohort breakdown (drives the four tables on Overview)
   const agentByCohort = useMemo(() => {
@@ -781,20 +796,20 @@ export default function ProgramsDashboard() {
       "Sales Outbound":   cohortRow(),
       "Service Outbound": cohortRow(),
     };
-    for (const a of accounts) {
+    for (const a of liveAccounts) {
       m[a.agentType][a.cohort][a.rag].count += 1;
       m[a.agentType][a.cohort][a.rag].arr   += a.arr ?? 0;
     }
     return m;
-  }, [accounts]);
+  }, [liveAccounts]);
 
   // Overall portfolio split: Red / Amber / Green / At-Risk(R+A) — each with
   // count + $ARR + share of total. Drives the top KPI bar on Overview.
   const overall = useMemo(() => {
-    const total = accounts.length;
-    const totalArr = accounts.reduce((s, a) => s + (a.arr ?? 0), 0);
+    const total = liveAccounts.length;
+    const totalArr = liveAccounts.reduce((s, a) => s + (a.arr ?? 0), 0);
     const bucket = (rags: RagStatus[]) => {
-      const xs = accounts.filter(a => rags.includes(a.rag));
+      const xs = liveAccounts.filter(a => rags.includes(a.rag));
       const count = xs.length;
       const arr = xs.reduce((s, a) => s + (a.arr ?? 0), 0);
       return {
@@ -811,7 +826,7 @@ export default function ProgramsDashboard() {
       green:  bucket(["green"]),
       atRisk: bucket(["red","amber"]),
     };
-  }, [accounts]);
+  }, [liveAccounts]);
 
   const openAccount = openKey ? accounts.find(a => a.key === openKey) ?? null : null;
   const openAccountState = openKey ? (state[openKey] ?? EMPTY_STATE) : EMPTY_STATE;
@@ -885,12 +900,12 @@ export default function ProgramsDashboard() {
         />
       )}
 
-      {tab === "list"   && <AccountTable rows={filtered} state={state} rooftopStack={rooftopStack} onOpen={setOpenKey} />}
+      {tab === "list"   && <AccountTable rows={filtered} state={state} rooftopStack={rooftopStack} onOpen={setOpenKey} onToggleActualLive={(k, v) => updateAccountState(k, { actualLive: v })} />}
       {tab === "cohort" && (
         <CohortView agentByCohort={agentByCohort} />
       )}
       {tab === "tasks"  && <NextStepsView accounts={accounts} state={state} onOpen={setOpenKey} />}
-      {tab === "report" && <EmailReportView accounts={accounts} state={state} overall={overall} />}
+      {tab === "report" && <EmailReportView accounts={liveAccounts} state={state} overall={overall} />}
 
       {openAccount && (() => {
         const rk = rooftopKeyFromAccountKey(openAccount.key);
@@ -964,25 +979,109 @@ type OverallStats = {
   totalCount: number; totalArr: number;
   red: OverallBucket; amber: OverallBucket; green: OverallBucket; atRisk: OverallBucket;
 };
+// RAG threshold descriptions surfaced on each card via an info icon. Single
+// source of truth — sits next to ROI_GREEN / ROI_AMBER above so the copy and
+// the actual thresholds can't drift apart.
+const RAG_TOOLTIPS = {
+  Red:   `ROI < ${ROI_AMBER}× · or no recent Metabase activity · or < ${TOFU_MIN_LEADS} top-of-funnel leads · or MRR unknown`,
+  Amber: `${ROI_AMBER}× ≤ ROI < ${ROI_GREEN}×`,
+  Green: `ROI ≥ ${ROI_GREEN}× · (or any Metabase activity for accounts in their first 7 days post-live)`,
+  "Total Live": "Every Live (rooftop × agent) on the funnel sheet. Counts include Red, Amber, and Green.",
+  "At Risk (R+A)": "Red + Amber combined. The portfolio slice that needs CSM / Eng / Product attention.",
+};
+
+function InfoIcon({ tooltip, fg }: { tooltip: string; fg: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span
+      style={{ position: "relative", display: "inline-flex", marginLeft: 4 }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+    >
+      <span
+        aria-label={tooltip}
+        role="img"
+        style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          width: 14, height: 14,
+          borderRadius: "50%",
+          border: `1px solid ${fg}`,
+          color: fg,
+          fontSize: 9, fontWeight: 700, fontStyle: "italic", lineHeight: 1,
+          cursor: "help",
+          opacity: open ? 1 : 0.6,
+          transition: "opacity 120ms ease",
+          background: open ? fg : "transparent",
+        }}
+      >
+        <span style={{ color: open ? "#fff" : fg, transition: "color 120ms ease" }}>i</span>
+      </span>
+      {open && (
+        <span
+          role="tooltip"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            left: 0,
+            minWidth: 220,
+            maxWidth: 320,
+            width: "max-content",
+            padding: "8px 10px",
+            background: "#111827",
+            color: "#ffffff",
+            fontSize: 11,
+            fontWeight: 500,
+            fontStyle: "normal",
+            textTransform: "none",
+            letterSpacing: 0,
+            lineHeight: 1.45,
+            borderRadius: 6,
+            boxShadow: "0 6px 16px rgba(15,23,42,0.2), 0 1px 3px rgba(15,23,42,0.12)",
+            whiteSpace: "normal",
+            zIndex: 50,
+            pointerEvents: "none",
+          }}
+        >
+          <span style={{
+            position: "absolute",
+            top: -4, left: 8,
+            width: 8, height: 8,
+            background: "#111827",
+            transform: "rotate(45deg)",
+          }} />
+          {tooltip}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function OverallRagBar({ overall }: { overall: OverallStats }) {
   const Card = ({ label, count, arr, pctCount, pctArr, accent, bg, fg }: {
     label: string; count: number; arr: number; pctCount?: number; pctArr?: number;
     accent: string; bg: string; fg: string;
-  }) => (
-    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 12, borderLeft: `3px solid ${accent}` }}>
-      <div style={{ fontSize: 11, color: fg, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, background: bg, display: "inline-block", padding: "2px 8px", borderRadius: 999 }}>{label}</div>
-      <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 800, color: "#111827", lineHeight: 1 }}>{count}</div>
-          {pctCount != null && <div style={{ fontSize: 11, color: "#6b7280" }}>{pctCount.toFixed(1)}% of agents</div>}
+  }) => {
+    const tooltip = RAG_TOOLTIPS[label as keyof typeof RAG_TOOLTIPS];
+    return (
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 12, borderLeft: `3px solid ${accent}` }}>
+        <div style={{ display: "inline-flex", alignItems: "center", fontSize: 11, color: fg, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, background: bg, padding: "2px 8px", borderRadius: 999 }}>
+          {label}
+          {tooltip && <InfoIcon tooltip={tooltip} fg={fg} />}
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{fmtMoney(arr)}</div>
-          {pctArr != null && <div style={{ fontSize: 11, color: "#6b7280" }}>{pctArr.toFixed(1)}% of ARR</div>}
+        <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 800, color: "#111827", lineHeight: 1 }}>{count}</div>
+            {pctCount != null && <div style={{ fontSize: 11, color: "#6b7280" }}>{pctCount.toFixed(1)}% of agents</div>}
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>{fmtMoney(arr)}</div>
+            {pctArr != null && <div style={{ fontSize: 11, color: "#6b7280" }}>{pctArr.toFixed(1)}% of ARR</div>}
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 12, marginBottom: 14 }}>
       <Card label="Total Live"
@@ -1294,32 +1393,34 @@ const CHIP_PALETTE_STATUS: Record<TaskStatus, ChipTone> = {
   "Done":        { bg: "#dcfce7", fg: "#166534", border: "#86efac" },
 };
 
-function AccountTable({ rows, state, rooftopStack, onOpen }: {
+function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive }: {
   rows: Account[];
   state: Record<string, AccountState>;
   rooftopStack: Record<string, RooftopStack>;
   onOpen:(k:string)=>void;
+  onToggleActualLive: (accountKey: string, value: boolean) => void;
 }) {
   return (
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
         <colgroup>
-          <col style={{ width: 220 }} />  {/* Rooftop (enterprise name wraps to 2 lines via line-clamp) */}
+          <col style={{ width: 50 }}  />  {/* Actual Live (checkbox) */}
+          <col style={{ width: 210 }} />  {/* Rooftop (enterprise name wraps to 2 lines via line-clamp) */}
           <col style={{ width: 72 }}  />  {/* Agent */}
           <col style={{ width: 78 }}  />  {/* MRR */}
-          <col style={{ width: 104 }} />  {/* CSM */}
-          <col style={{ width: 88 }}  />  {/* CRM */}
-          <col style={{ width: 88 }}  />  {/* Service Scheduler */}
-          <col style={{ width: 78 }}  />  {/* DMS */}
-          <col style={{ width: 64 }}  />  {/* RAG */}
-          <col style={{ width: 60 }}  />  {/* ROI */}
-          <col style={{ width: 96 }}  />  {/* Cohort */}
-          <col style={{ width: 70 }}  />  {/* 30d Leads */}
-          <col style={{ width: 70 }}  />  {/* 30d Appts */}
-          <col style={{ minWidth: 240 }} />  {/* Next Step — flexes, with floor */}
+          <col style={{ width: 100 }} />  {/* CSM */}
+          <col style={{ width: 84 }}  />  {/* CRM */}
+          <col style={{ width: 84 }}  />  {/* Service Scheduler */}
+          <col style={{ width: 76 }}  />  {/* DMS */}
+          <col style={{ width: 72 }}  />  {/* ROI */}
+          <col style={{ width: 92 }}  />  {/* Cohort */}
+          <col style={{ width: 68 }}  />  {/* 30d Leads */}
+          <col style={{ width: 68 }}  />  {/* 30d Appts */}
+          <col style={{ minWidth: 220 }} />  {/* Next Step — flexes, with floor */}
         </colgroup>
         <thead style={{ background: "#f9fafb" }}>
           <tr>
+            <Th><span title="Actually Live — drives every aggregate widget on Overview / By Cohort / Email Report. Toggle per row.">Live</span></Th>
             <Th>Rooftop</Th>
             <Th>Agent</Th>
             <Th right>MRR</Th>
@@ -1327,7 +1428,6 @@ function AccountTable({ rows, state, rooftopStack, onOpen }: {
             <Th>CRM</Th>
             <Th>Scheduler</Th>
             <Th>DMS</Th>
-            <Th>RAG</Th>
             <Th right>ROI</Th>
             <Th>Cohort</Th>
             <Th right>30d Leads</Th>
@@ -1340,6 +1440,20 @@ function AccountTable({ rows, state, rooftopStack, onOpen }: {
             const s = state[a.key] ?? EMPTY_STATE;
             return (
               <tr key={a.key} onClick={()=>onOpen(a.key)} style={{ ...Sx.tr, verticalAlign: "top" }}>
+                <Td>
+                  <label
+                    onClick={e => e.stopPropagation()}
+                    style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "100%", cursor: "pointer", padding: "4px 0" }}
+                    title={s.actualLive ? "Counted in aggregate widgets. Untick to exclude." : "Excluded from aggregate widgets. Tick to include."}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={s.actualLive}
+                      onChange={e => onToggleActualLive(a.key, e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: "#16a34a" }}
+                    />
+                  </label>
+                </Td>
                 <Td>
                   <div style={Sx.cellTruncate}>
                     <div style={{ fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.rooftopName}>{a.rooftopName}</div>
@@ -1382,7 +1496,6 @@ function AccountTable({ rows, state, rooftopStack, onOpen }: {
                     </Td>
                   </>;
                 })()}
-                <Td><RagPill rag={a.rag} /></Td>
                 <Td right><RoiPill roi={a.roi} /></Td>
                 <Td><CohortPill cohort={a.cohort} daysLive={a.daysLive} /></Td>
                 <Td right>{a.touched.toLocaleString()}</Td>
@@ -1418,7 +1531,7 @@ function CohortView({ agentByCohort }: {
           cohort="Ramp"
           range="7–30 days post-live"
           purpose="Volume is meaningful. ROI signal starts to stabilise. Highest-leverage cohort to intervene."
-          ragRule="Full ROI thresholds: ≥5× Green · 3–5× Amber · <3× Red. TOFU <100 leads forces Red."
+          ragRule="Full ROI thresholds: ≥3× Green · 1.5×–3× Amber · <1.5× Red. TOFU <100 leads forces Red."
         />
         <CohortDefCard
           cohort="Mature"
@@ -1955,25 +2068,17 @@ function TaskRowItem({ row, onOpen }: { row: TaskRow; onOpen:(k:string)=>void })
 //      so identical asks across multiple rooftops collapse into one row with
 //      "# Rooftops" and summed ARR.
 
-type Section2Row = {
-  rag: RagStatus;
-  agent: AgentType;
-  taskDri: string;         // raw owner (email or plain name); "" if unassigned
-  ownerLabel: string;      // unfurled display name; "" if unassigned
-  team: TaskFunction;
-  title: string;
-  earliestEta: string | null;
-  rooftopCount: number;
-  arrSum: number;
-};
-// Section 2 is grouped by owner so each accountable person sees their full
-// list at once. Within a group, rows are sorted by ARR (highest first).
-type Section2OwnerGroup = {
+// Section 2 — per-owner RAG portfolio summary.
+// For each Task DRI, we tally how many of THEIR accounts (the ones they have
+// open tasks on) are Red / Amber / Green, with ARR sums per bucket. One row
+// per (owner × rag) — rendered in the email as a rowspan-3 banded table.
+type Section2OwnerRagSummary = {
   taskDri: string;          // grouping key (lowercased); "" for unassigned
   ownerLabel: string;       // displayed name; "(no owner)" when unassigned
-  rows: Section2Row[];
-  subtotalArr: number;
-  teams: TaskFunction[];    // unique teams the owner is doing work on
+  red:   { count: number; arr: number };
+  amber: { count: number; arr: number };
+  green: { count: number; arr: number };
+  notGreenArr: number;      // red.arr + amber.arr, used for sort
 };
 
 function EmailReportView({ accounts, state, overall }: {
@@ -2006,72 +2111,64 @@ function EmailReportView({ accounts, state, overall }: {
     });
   }, [accounts]);
 
-  // Section 2 — outer grouping by OWNER (so each person sees their entire
-  // workload at once), inner aggregation by (rag × owner × agent × title)
-  // collapsed across rooftops. Sorted: owners by total ARR desc, rows by
-  // ARR desc inside each owner. Only not-Green accounts and not-Done tasks.
-  const section2: Section2OwnerGroup[] = useMemo(() => {
+  // Section 2 — per-owner RAG summary.
+  // For each Task DRI, count the UNIQUE accounts they own at least one open
+  // task on, bucketed by the account's RAG. ARR sums per bucket. Sorted by
+  // Not-Green ARR desc; "(no owner)" pinned to bottom.
+  // `accounts` is already filtered to Actually-Live by the parent — the
+  // email is about live agents only, so the summary reflects that.
+  const section2: Section2OwnerRagSummary[] = useMemo(() => {
     const accByKey = new Map(accounts.map(a => [a.key, a]));
-    // Pass 1: build flat aggregated rows.
-    const groups = new Map<string, Section2Row>();
+    // Pass 1: for each owner, collect the distinct set of accounts they own
+    // at least one open (non-Done) task on.
+    type OwnerCollect = { ownerLabel: string; accounts: Set<string> };
+    const owners = new Map<string, OwnerCollect>();
     for (const [accountKey, s] of Object.entries(state)) {
       const account = accByKey.get(accountKey);
       if (!account) continue;
-      if (account.rag === "green") continue;
       for (const task of s.tasks ?? []) {
         if (task.status === "Done") continue;
-        const ownerKey = (task.taskDri ?? "").trim().toLowerCase();
-        const key = `${account.rag}::${ownerKey}::${account.agentType}::${task.title.trim()}`;
-        const prev = groups.get(key);
-        const arr = account.arr ?? 0;
-        if (!prev) {
-          const taskDri = (task.taskDri ?? "").trim();
-          groups.set(key, {
-            rag: account.rag,
-            agent: account.agentType,
-            taskDri,
-            ownerLabel: taskDri ? (displayNameFromEmail(taskDri) || taskDri) : "",
-            team: task.function,
-            title: task.title || "(untitled)",
-            earliestEta: task.dueDate,
-            rooftopCount: 1,
-            arrSum: arr,
-          });
-        } else {
-          prev.rooftopCount += 1;
-          prev.arrSum += arr;
-          if (task.dueDate && (!prev.earliestEta || task.dueDate < prev.earliestEta)) prev.earliestEta = task.dueDate;
+        const driRaw = (task.taskDri ?? "").trim();
+        const driKey = driRaw.toLowerCase();        // "" for unassigned
+        let owner = owners.get(driKey);
+        if (!owner) {
+          owner = {
+            ownerLabel: driRaw ? (displayNameFromEmail(driRaw) || driRaw) : "(no owner)",
+            accounts: new Set<string>(),
+          };
+          owners.set(driKey, owner);
         }
+        owner.accounts.add(accountKey);
       }
     }
-    // Pass 2: bucket rows into owner groups.
-    const byOwner = new Map<string, Section2OwnerGroup>();
-    for (const row of groups.values()) {
-      const ownerKey = row.taskDri.toLowerCase();
-      let g = byOwner.get(ownerKey);
-      if (!g) {
-        g = {
-          taskDri: ownerKey,
-          ownerLabel: row.ownerLabel || "(no owner)",
-          rows: [],
-          subtotalArr: 0,
-          teams: [],
-        };
-        byOwner.set(ownerKey, g);
+    // Pass 2: tally R/A/G counts + ARR per owner.
+    const out: Section2OwnerRagSummary[] = [];
+    for (const [driKey, owner] of owners.entries()) {
+      const row: Section2OwnerRagSummary = {
+        taskDri: driKey,
+        ownerLabel: owner.ownerLabel,
+        red:   { count: 0, arr: 0 },
+        amber: { count: 0, arr: 0 },
+        green: { count: 0, arr: 0 },
+        notGreenArr: 0,
+      };
+      for (const k of owner.accounts) {
+        const a = accByKey.get(k);
+        if (!a) continue;
+        const arr = a.arr ?? 0;
+        row[a.rag].count += 1;
+        row[a.rag].arr   += arr;
       }
-      g.rows.push(row);
-      g.subtotalArr += row.arrSum;
-      if (!g.teams.includes(row.team)) g.teams.push(row.team);
+      row.notGreenArr = row.red.arr + row.amber.arr;
+      out.push(row);
     }
-    // Sort rows within each owner by ARR desc; sort owners by total ARR desc.
-    // Unassigned bucket pinned to the bottom regardless (so the call-to-action
-    // doesn't dominate the visual top of the section).
-    for (const g of byOwner.values()) g.rows.sort((a, b) => b.arrSum - a.arrSum);
-    return Array.from(byOwner.values()).sort((a, b) => {
+    // Sort: Not-Green ARR descending; "(no owner)" pinned to bottom regardless.
+    out.sort((a, b) => {
       if (!a.taskDri && b.taskDri) return 1;
       if (a.taskDri && !b.taskDri) return -1;
-      return b.subtotalArr - a.subtotalArr;
+      return b.notGreenArr - a.notGreenArr;
     });
+    return out;
   }, [accounts, state]);
 
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
@@ -2386,54 +2483,55 @@ function EmailReportView({ accounts, state, overall }: {
 
       {/* ─── Section 2: Tasks by agent ────────────────────────────────── */}
       <div style={{ marginTop: 28 }}>
-        <ReportSectionTitle index={2}>Tasks by owner · path to green</ReportSectionTitle>
+        <ReportSectionTitle index={2}>Owners · path to green</ReportSectionTitle>
       </div>
 
       <table style={Sx.reportTable}>
         <colgroup>
-          <col style={{ width: 50 }} />   {/* RAG */}
-          <col style={{ width: 84 }} />   {/* Agent */}
-          <col />                          {/* Next Step + ETA stacked */}
-          <col style={{ width: 72 }} />   {/* Rooftop + ARR stacked */}
+          <col style={{ width: 140 }} />  {/* Owner (rowspan 3) */}
+          <col style={{ width: 72 }} />   {/* RAG */}
+          <col />                          {/* # Agents */}
+          <col />                          {/* $ ARR */}
         </colgroup>
         <thead>
           <tr>
+            <Th2>Owner</Th2>
             <Th2>RAG</Th2>
-            <Th2>Agent</Th2>
-            <Th2>Next Step</Th2>
-            <Th2 right>Rooftop / ARR</Th2>
+            <Th2 right># Agents</Th2>
+            <Th2 right>$ ARR</Th2>
           </tr>
         </thead>
         <tbody>
-          {section2.map(({ ownerLabel, taskDri, rows, subtotalArr, teams }) => {
-            const teamLabel = teams.length === 0 ? "" : teams.length === 1 ? teams[0] : "Multiple teams";
+          {section2.length === 0 ? (
+            <tr><td colSpan={4} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No owners with open tasks on live accounts.</td></tr>
+          ) : section2.map(({ ownerLabel, taskDri, red, amber, green }) => {
+            const ownerCell = (
+              <td rowSpan={3} style={{
+                padding: "8px 10px",
+                fontWeight: 700,
+                color: taskDri ? "#111827" : "#dc2626",
+                fontSize: 12,
+                background: "#f9fafb",
+                borderTop: "1px solid #e5e7eb",
+                borderRight: "1px solid #e5e7eb",
+                verticalAlign: "top",
+              }}>{taskDri ? ownerLabel : "(no owner)"}</td>
+            );
+            const ragRow = (rag: RagStatus, b: { count: number; arr: number }, showOwner: boolean) => (
+              <tr key={`${taskDri}-${rag}`}>
+                {showOwner && ownerCell}
+                <td style={{ ...Sx.reportCellTight, background: RAG_COLORS[rag].bg, color: RAG_COLORS[rag].fg, fontWeight: 700 }}>
+                  {rag === "red" ? "Red" : rag === "amber" ? "Amber" : "Green"}
+                </td>
+                <td style={{ ...Sx.reportCellTight, textAlign: "right" }}>{b.count}</td>
+                <td style={{ ...Sx.reportCellTight, textAlign: "right" }}>{fmtMoney(b.arr)}</td>
+              </tr>
+            );
             return (
               <Fragment key={taskDri || "(no owner)"}>
-                <tr>
-                  <td colSpan={3} style={Sx.agentBandLabel}>
-                    <span style={{ color: taskDri ? "#111827" : "#dc2626" }}>{taskDri ? ownerLabel : "(no owner)"}</span>
-                    {teamLabel && <span style={{ fontWeight: 400, color: "#6b7280", fontSize: 11, marginLeft: 8 }}>{teamLabel}</span>}
-                  </td>
-                  <td style={{ ...Sx.agentBandLabel, textAlign: "right" }}>{fmtMoney(subtotalArr)}</td>
-                </tr>
-                {rows.length === 0 ? (
-                  <tr><td colSpan={4} style={{ padding: "6px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No open tasks.</td></tr>
-                ) : rows.map((r, i) => (
-                  <tr key={`${taskDri}-${i}`}>
-                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top", background: RAG_COLORS[r.rag].bg, color: RAG_COLORS[r.rag].fg, fontWeight: 700, textAlign: "center" }}>
-                      {r.rag === "red" ? "Red" : r.rag === "amber" ? "Amber" : "Green"}
-                    </td>
-                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top" }}>{AGENT_LABELS[r.agent]}</td>
-                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top", whiteSpace: "normal", lineHeight: 1.3 }}>
-                      {r.title}
-                      {r.earliestEta && <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>ETA · {fmtEtaShort(r.earliestEta)}</div>}
-                    </td>
-                    <td style={{ ...Sx.reportCellTight, verticalAlign: "top", textAlign: "right" }}>
-                      <div style={{ fontWeight: 700, color: "#111827" }}>{r.rooftopCount}</div>
-                      <div style={{ fontSize: 10, color: "#374151", marginTop: 2 }}>{fmtMoney(r.arrSum)}</div>
-                    </td>
-                  </tr>
-                ))}
+                {ragRow("red", red, true)}
+                {ragRow("amber", amber, false)}
+                {ragRow("green", green, false)}
               </Fragment>
             );
           })}
@@ -2441,7 +2539,7 @@ function EmailReportView({ accounts, state, overall }: {
       </table>
 
       <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 14, lineHeight: 1.5 }}>
-        Section 2 collapses identical (task × team) across rooftops into one row per agent group. "# Rooftops" = distinct rooftops sharing the same ask; ARR = combined exposure across those rooftops. ETA shows the earliest date if any rooftop has one set.
+        Each owner row counts the distinct live (rooftop × agent) accounts they have at least one open next-step on. Owners sorted by Not-Green ARR descending.
       </div>
     </div>
 
@@ -2799,8 +2897,8 @@ function RagPill({ rag, small }: { rag: RagStatus; small?: boolean }) {
   );
 }
 
-// ROI pill — colored by the ROI value itself (not the row's RAG). Green ≥5×,
-// Amber 3–5×, Red <3×, grey if unknown. Decouples ROI signal from RAG so an
+// ROI pill — colored by the ROI value itself (not the row's RAG). Green ≥3×,
+// Amber 1.5×–3×, Red <1.5×, grey if unknown. Decouples ROI signal from RAG so an
 // Activation account with low ROI still shows the ROI in red even though its
 // overall RAG is Green (insufficient time to penalise).
 function roiBucket(roi: number | null): RagStatus | "unknown" {
