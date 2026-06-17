@@ -84,7 +84,6 @@ function costPerAppt(t: AgentType, rooftop: string, enterprise: string): number 
 //   ≥ 3× → Green   ·   1.5×–3× → Amber   ·   < 1.5× → Red
 const ROI_GREEN = 3;
 const ROI_AMBER = 1.5;
-const TOFU_MIN_LEADS = 100;
 
 const RAG_COLORS: Record<RagStatus, { bg: string; fg: string; dot: string }> = {
   green: { bg: "#dcfce7", fg: "#166534", dot: "#16a34a" },
@@ -669,8 +668,6 @@ export default function ProgramsDashboard() {
         else { rag = "green"; ragNote = `Activation — ${daysLive ?? 0}d post-live, agent receiving activity`; }
       } else if (!hasActivity) {
         rag = "red"; ragNote = "No Metabase activity in last 30d";
-      } else if (agg.newLeads < TOFU_MIN_LEADS) {
-        rag = "red"; ragNote = `Top-of-funnel < ${TOFU_MIN_LEADS} (${agg.newLeads}) — too little volume to judge ROI`;
       } else if (denom == null) {
         rag = "red"; ragNote = "MRR unknown — ROI can't be computed";
       } else if (roi! >= ROI_GREEN) {
@@ -983,7 +980,7 @@ type OverallStats = {
 // source of truth — sits next to ROI_GREEN / ROI_AMBER above so the copy and
 // the actual thresholds can't drift apart.
 const RAG_TOOLTIPS = {
-  Red:   `ROI < ${ROI_AMBER}× · or no recent Metabase activity · or < ${TOFU_MIN_LEADS} top-of-funnel leads · or MRR unknown`,
+  Red:   `ROI < ${ROI_AMBER}× · or no recent Metabase activity · or MRR unknown`,
   Amber: `${ROI_AMBER}× ≤ ROI < ${ROI_GREEN}×`,
   Green: `ROI ≥ ${ROI_GREEN}× · (or any Metabase activity for accounts in their first 7 days post-live)`,
   "Total Live": "Every Live (rooftop × agent) on the funnel sheet. Counts include Red, Amber, and Green.",
