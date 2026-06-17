@@ -1,5 +1,6 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Analytics } from "@vercel/analytics/react";
 import "./index.css";
 import Dashboard from "../inventory-dashboard.tsx";
 import AgentsDashboard from "./agents/AgentsDashboard.tsx";
@@ -50,5 +51,6 @@ function Router() {
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <Router />
+    <Analytics />
   </StrictMode>
 );
