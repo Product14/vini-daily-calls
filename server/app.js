@@ -13,6 +13,7 @@ import { sendReport }     from "./emailClient.js";
 import { getAllDeploymentStatuses, upsertDeploymentStatus } from "./viniStatuses.js";
 import { mapMetabaseRows } from "./viniRooftopMap.js";
 import { sendProgramsReportEmail } from "./programsEmail.js";
+import { runAgentMetrics, hasClickhouseCreds } from "./agentMetrics.js";
 
 // Some local resolvers (mac dev boxes, restrictive networks) break dns.lookup() while
 // dns.resolve4() still works. Node's global fetch uses dns.lookup. Wrap https.request
@@ -2395,6 +2396,26 @@ app.get("/api/cron/roi-email", async (req, res) => {
   } catch (err) {
     console.error("GET /api/cron/roi-email error:", err?.message ?? err);
     return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
+  }
+});
+
+// ── GET /api/metrics — "Overall" agent-performance bundle (live ClickHouse) ──
+// Powers the Overall view on /agents. Runs the 6 day/week/month aggregations
+// against Prod-ClickHouse and returns { bundle, meta }. Returns 503 when the
+// CLICKHOUSE_* env vars are not set — the frontend then falls back to the
+// bundled snapshot (public/agent-overall-snapshot.json).
+app.get("/api/metrics", async (_req, res) => {
+  if (!hasClickhouseCreds()) {
+    res.status(503).json({ error: "ClickHouse env vars not set (need CLICKHOUSE_HOST/PORT/USER/PASSWORD) — using bundled snapshot." });
+    return;
+  }
+  try {
+    const payload = await runAgentMetrics();
+    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=300");
+    res.status(200).json(payload);
+  } catch (err) {
+    console.error("GET /api/metrics error:", err?.message ?? err);
+    res.status(500).json({ error: String(err?.message ?? err) });
   }
 });
 

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import OverallView from "./overall/OverallView";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
@@ -421,6 +422,10 @@ function AgentsDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
 
+  // Top-level view: company-wide "Overall" (the ported agent-performance
+  // dashboard) vs the per-rooftop view below. Defaults to Overall; the heavy
+  // /api/agents Metabase pull is deferred until the rooftop view is first opened.
+  const [mainView, setMainView] = useState<"overall" | "rooftop">("overall");
   const [activeAgent, setActiveAgent] = useState<ActiveAgent>("All");
   const [dateRange, setDateRange] = useState<DateRange>("D30");
   const [customRange, setCustomRange] = useState<CustomRange>(() => ({ from: "", to: todayIso() }));
@@ -499,7 +504,15 @@ function AgentsDashboard() {
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   };
-  useEffect(() => { load(false); }, []);
+  // Lazy-load the rooftop dataset: only hit /api/agents the first time the
+  // rooftop view is opened, so landing on Overall stays instant.
+  const rooftopLoaded = useRef(false);
+  useEffect(() => {
+    if (mainView === "rooftop" && !rooftopLoaded.current) {
+      rooftopLoaded.current = true;
+      load(false);
+    }
+  }, [mainView]);
 
   // Stage roster from Google Sheets (via /api/agent-stages). Response shape:
   //   { stages: { Live: [...names], Onboarding: [...] }, rooftopToStage: {<lower-name>: stage}, errors: {...} }
@@ -1139,6 +1152,29 @@ function AgentsDashboard() {
         </div>
       </div>
 
+      {/* Top-level view toggle — company-wide Overall vs the per-rooftop view. */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        {(["overall", "rooftop"] as const).map(v => {
+          const active = v === mainView;
+          const label = v === "overall" ? "Overall" : "Rooftop level";
+          return (
+            <button key={v} onClick={() => setMainView(v)}
+              style={{
+                padding: "8px 18px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                border: `1px solid ${active ? "#111827" : "#e5e7eb"}`,
+                background: active ? "#111827" : "#fff",
+                color: active ? "#fff" : "#374151",
+              }}>
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
+      {mainView === "overall" ? (
+        <OverallView />
+      ) : (
+      <>
       {error && (
         <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b", padding: "10px 14px", borderRadius: 8, fontSize: 13, marginBottom: 16 }}>
           Failed to load: {error}
@@ -1341,6 +1377,8 @@ function AgentsDashboard() {
           />
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }
