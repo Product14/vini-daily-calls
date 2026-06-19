@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { toPng } from "html-to-image";
 import { getProgramsClient, PROGRAMS_DB_CONFIGURED } from "./supabaseClient";
+import { OWNER_NAMES, teamForOwner } from "./owners";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
@@ -2065,13 +2066,14 @@ function TaskRowItem({ row, onOpen }: { row: TaskRow; onOpen:(k:string)=>void })
 //      so identical asks across multiple rooftops collapse into one row with
 //      "# Rooftops" and summed ARR.
 
-// Section 2 — per-owner RAG portfolio summary.
-// For each Task DRI, we tally how many of THEIR accounts (the ones they have
-// open tasks on) are Red / Amber / Green, with ARR sums per bucket. One row
-// per (owner × rag) — rendered in the email as a rowspan-3 banded table.
-type Section2OwnerRagSummary = {
-  taskDri: string;          // grouping key (lowercased); "" for unassigned
-  ownerLabel: string;       // displayed name; "(no owner)" when unassigned
+// Section 2 — per-CSM RAG portfolio summary.
+// For each account's CSM, we tally how many of THEIR accounts (the ones with
+// open tasks) are Red / Amber / Green, with ARR sums per bucket. One row per
+// (CSM × rag) — rendered in the email as a rowspan-2 banded table. Accounts
+// with no CSM bucket under "No CSM Mapped".
+type Section2CsmRagSummary = {
+  csmKey: string;           // grouping key (lowercased CSM email); "" = no CSM
+  csmLabel: string;         // displayed name; "No CSM Mapped" when absent
   red:   { count: number; arr: number };
   amber: { count: number; arr: number };
   green: { count: number; arr: number };
@@ -2108,48 +2110,45 @@ function EmailReportView({ accounts, state, overall }: {
     });
   }, [accounts]);
 
-  // Section 2 — per-owner RAG summary.
-  // For each Task DRI, count the UNIQUE accounts they own at least one open
-  // task on, bucketed by the account's RAG. ARR sums per bucket. Sorted by
-  // Not-Green ARR desc; "(no owner)" pinned to bottom.
+  // Section 2 — per-CSM RAG summary.
+  // For each account's CSM, count the UNIQUE accounts they cover that have at
+  // least one open (non-Done) task, bucketed by the account's RAG. ARR sums per
+  // bucket. Sorted by Not-Green ARR desc; "No CSM Mapped" pinned to bottom.
   // `accounts` is already filtered to Actually-Live by the parent — the
   // email is about live agents only, so the summary reflects that.
-  const section2: Section2OwnerRagSummary[] = useMemo(() => {
+  const section2: Section2CsmRagSummary[] = useMemo(() => {
     const accByKey = new Map(accounts.map(a => [a.key, a]));
-    // Pass 1: for each owner, collect the distinct set of accounts they own
-    // at least one open (non-Done) task on.
-    type OwnerCollect = { ownerLabel: string; accounts: Set<string> };
-    const owners = new Map<string, OwnerCollect>();
+    // Pass 1: for each CSM, collect the distinct set of their accounts that
+    // have at least one open task. An account rolls up under its own CSM
+    // regardless of who owns the individual tasks.
+    type CsmCollect = { csmLabel: string; accounts: Set<string> };
+    const csms = new Map<string, CsmCollect>();
     for (const [accountKey, s] of Object.entries(state)) {
       const account = accByKey.get(accountKey);
       if (!account) continue;
-      for (const task of s.tasks ?? []) {
-        if (task.status === "Done") continue;
-        const driRaw = (task.taskDri ?? "").trim();
-        const driKey = driRaw.toLowerCase();        // "" for unassigned
-        let owner = owners.get(driKey);
-        if (!owner) {
-          owner = {
-            ownerLabel: driRaw ? (displayNameFromEmail(driRaw) || driRaw) : "(no owner)",
-            accounts: new Set<string>(),
-          };
-          owners.set(driKey, owner);
-        }
-        owner.accounts.add(accountKey);
+      const hasOpenTask = (s.tasks ?? []).some(t => t.status !== "Done");
+      if (!hasOpenTask) continue;
+      const { email, name } = effectiveCsm(account, s);
+      const csmKey = (email ?? "").trim().toLowerCase();   // "" = no CSM
+      let csm = csms.get(csmKey);
+      if (!csm) {
+        csm = { csmLabel: name.trim() || "No CSM Mapped", accounts: new Set<string>() };
+        csms.set(csmKey, csm);
       }
+      csm.accounts.add(accountKey);
     }
-    // Pass 2: tally R/A/G counts + ARR per owner.
-    const out: Section2OwnerRagSummary[] = [];
-    for (const [driKey, owner] of owners.entries()) {
-      const row: Section2OwnerRagSummary = {
-        taskDri: driKey,
-        ownerLabel: owner.ownerLabel,
+    // Pass 2: tally R/A/G counts + ARR per CSM.
+    const out: Section2CsmRagSummary[] = [];
+    for (const [csmKey, csm] of csms.entries()) {
+      const row: Section2CsmRagSummary = {
+        csmKey,
+        csmLabel: csm.csmLabel,
         red:   { count: 0, arr: 0 },
         amber: { count: 0, arr: 0 },
         green: { count: 0, arr: 0 },
         notGreenArr: 0,
       };
-      for (const k of owner.accounts) {
+      for (const k of csm.accounts) {
         const a = accByKey.get(k);
         if (!a) continue;
         const arr = a.arr ?? 0;
@@ -2159,10 +2158,10 @@ function EmailReportView({ accounts, state, overall }: {
       row.notGreenArr = row.red.arr + row.amber.arr;
       out.push(row);
     }
-    // Sort: Not-Green ARR descending; "(no owner)" pinned to bottom regardless.
+    // Sort: Not-Green ARR descending; "No CSM Mapped" pinned to bottom regardless.
     out.sort((a, b) => {
-      if (!a.taskDri && b.taskDri) return 1;
-      if (a.taskDri && !b.taskDri) return -1;
+      if (!a.csmKey && b.csmKey) return 1;
+      if (a.csmKey && !b.csmKey) return -1;
       return b.notGreenArr - a.notGreenArr;
     });
     return out;
@@ -2493,14 +2492,14 @@ function EmailReportView({ accounts, state, overall }: {
         }}>View all tasks →</a>
       </div>
 
-      {/* ─── Section 2: Per-owner RAG summary (RAG buckets as columns) ── */}
+      {/* ─── Section 2: Per-CSM RAG summary (RAG buckets as columns) ──── */}
       <div style={{ marginTop: 24 }}>
-        <ReportSectionTitle index={2}>Owners · path to green</ReportSectionTitle>
+        <ReportSectionTitle index={2}>CSMs · path to green</ReportSectionTitle>
       </div>
 
       <table style={{ ...Sx.reportTable, width: "auto", margin: "0 auto" }}>
         <colgroup>
-          <col style={{ width: 140 }} />  {/* Owner (rowspan 2) */}
+          <col style={{ width: 140 }} />  {/* CSM (rowspan 2) */}
           <col style={{ width: 80 }} />   {/* Metric label */}
           <col style={{ width: 80 }} />   {/* Red */}
           <col style={{ width: 80 }} />   {/* Amber */}
@@ -2508,7 +2507,7 @@ function EmailReportView({ accounts, state, overall }: {
         </colgroup>
         <thead>
           <tr>
-            <Th2>Owner</Th2>
+            <Th2>CSM</Th2>
             <Th2></Th2>
             <Th2 right style={{ background: RAG_COLORS.red.bg,   color: RAG_COLORS.red.fg }}>Red</Th2>
             <Th2 right style={{ background: RAG_COLORS.amber.bg, color: RAG_COLORS.amber.fg }}>Amber</Th2>
@@ -2517,12 +2516,12 @@ function EmailReportView({ accounts, state, overall }: {
         </thead>
         <tbody>
           {section2.length === 0 ? (
-            <tr><td colSpan={5} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No owners with open tasks on live accounts.</td></tr>
-          ) : section2.map(({ ownerLabel, taskDri, red, amber, green }) => {
+            <tr><td colSpan={5} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No CSMs with open tasks on live accounts.</td></tr>
+          ) : section2.map(({ csmLabel, csmKey, red, amber, green }) => {
             const ownerCellStyle: CSSProperties = {
               padding: "8px 10px",
               fontWeight: 700,
-              color: taskDri ? "#111827" : "#dc2626",
+              color: csmKey ? "#111827" : "#dc2626",
               fontSize: 12,
               background: "#f9fafb",
               borderTop: "1px solid #e5e7eb",
@@ -2540,9 +2539,9 @@ function EmailReportView({ accounts, state, overall }: {
               background: RAG_COLORS[rag].bg, textAlign: "right",
             });
             return (
-              <Fragment key={taskDri || "(no owner)"}>
+              <Fragment key={csmKey || "no-csm"}>
                 <tr>
-                  <td rowSpan={2} style={ownerCellStyle}>{taskDri ? ownerLabel : "(no owner)"}</td>
+                  <td rowSpan={2} style={ownerCellStyle}>{csmLabel}</td>
                   <td style={metricStyle}># Agents</td>
                   <td style={valStyle("red")}>{red.count}</td>
                   <td style={valStyle("amber")}>{amber.count}</td>
@@ -2561,7 +2560,7 @@ function EmailReportView({ accounts, state, overall }: {
       </table>
 
       <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 14, lineHeight: 1.5, textAlign: "center" }}>
-        Each owner row counts the distinct live (rooftop × agent) accounts they have at least one open next-step on. Owners sorted by Not-Green ARR descending.
+        Each CSM row counts the distinct live (rooftop × agent) accounts they cover that have at least one open next-step. CSMs sorted by Not-Green ARR descending; accounts with no CSM bucket under "No CSM Mapped".
       </div>
     </div>
 
@@ -2776,7 +2775,19 @@ function AccountDrawer({ account, state, stack, stackOptions, onChange, onStackC
                 <button onClick={()=>removeTask(t.id)} style={{ ...Sx.select, color: "#dc2626", cursor: "pointer" }}>Delete</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-                <input placeholder="Task DRI (email/name)" value={t.taskDri} onChange={e=>updateTask(t.id, { taskDri: e.target.value })} style={Sx.input} />
+                <input
+                  list="task-owner-list"
+                  placeholder="Task owner"
+                  value={t.taskDri}
+                  onChange={e => {
+                    const name = e.target.value;
+                    // Picking a known owner auto-fills their default team; the
+                    // team stays editable below for the odd cross-team task.
+                    const team = teamForOwner(name);
+                    updateTask(t.id, team ? { taskDri: name, function: team } : { taskDri: name });
+                  }}
+                  style={Sx.input}
+                />
                 <select value={t.function} onChange={e=>updateTask(t.id, { function: e.target.value as TaskFunction })} style={Sx.select}>
                   {TASK_FUNCTIONS.map(f => <option key={f} value={f}>{f}</option>)}
                 </select>
@@ -2795,6 +2806,11 @@ function AccountDrawer({ account, state, stack, stackOptions, onChange, onStackC
         <button onClick={addTask} style={{ padding: "6px 12px", border: "1px solid #d1d5db", borderRadius: 8, background: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", marginBottom: 14 }}>
           + Add next step
         </button>
+        {/* Shared owner suggestions for every task's owner combobox. Typeahead +
+            free entry — picking a known name auto-fills the team. */}
+        <datalist id="task-owner-list">
+          {OWNER_NAMES.map(name => <option key={name} value={name} />)}
+        </datalist>
 
         <SectionTitle>Notes</SectionTitle>
         <textarea

@@ -97,20 +97,20 @@ function renderRagSplit(overall, perAgent) {
   `;
 }
 
-// ─── Section 2 — Per-owner RAG summary ──────────────────────────────────────
-// For each Task DRI, count how many of their live accounts are Red / Amber /
-// Green, with ARR sums. RAG buckets become columns (tinted); each owner emits
-// two rows ("# Agents" + "$ ARR") joined by a rowspan=2 owner cell. Owners
-// sorted by Not-Green ARR desc; "(no owner)" pinned to the bottom.
-function renderOwnerRagSummary(section2) {
+// ─── Section 2 — Per-CSM RAG summary ────────────────────────────────────────
+// For each account's CSM, count how many of their live accounts are Red /
+// Amber / Green, with ARR sums. RAG buckets become columns (tinted); each CSM
+// emits two rows ("# Agents" + "$ ARR") joined by a rowspan=2 CSM cell. CSMs
+// sorted by Not-Green ARR desc; "No CSM Mapped" pinned to the bottom.
+function renderCsmRagSummary(section2) {
   const ownerCellStyle = "padding:8px 10px;font-weight:700;color:#111827;font-size:12px;font-family:Arial,Helvetica,sans-serif;background:#f9fafb;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;vertical-align:middle;";
   const metricTd = `padding:6px 10px;border-top:1px solid #f3f4f6;color:#374151;font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:700;background:#fafafa;border-right:1px solid #e5e7eb;white-space:nowrap;`;
   const valueTd  = (rag) => `padding:6px 10px;border-top:1px solid #f3f4f6;color:${RAG_COLORS[rag].fg};font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:700;text-align:right;background:${RAG_COLORS[rag].bg};`;
   const headRagTh = (rag) => `padding:6px 10px;background:${RAG_COLORS[rag].bg};color:${RAG_COLORS[rag].fg};text-transform:uppercase;letter-spacing:0.3px;font-size:10px;font-weight:700;font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid #cbd5e1;text-align:right;`;
-  const ownerHtml = ({ ownerLabel, taskDri, red, amber, green }) => {
-    const labelMarkup = taskDri
-      ? `<span style="color:#111827;">${escapeHtml(ownerLabel)}</span>`
-      : `<span style="color:#dc2626;">(no owner)</span>`;
+  const ownerHtml = ({ csmLabel, csmKey, red, amber, green }) => {
+    const labelMarkup = csmKey
+      ? `<span style="color:#111827;">${escapeHtml(csmLabel)}</span>`
+      : `<span style="color:#dc2626;">No CSM Mapped</span>`;
     return `
       <tr>
         <td rowspan="2" style="${ownerCellStyle}">${labelMarkup}</td>
@@ -129,12 +129,12 @@ function renderOwnerRagSummary(section2) {
   };
   const bodyHtml = section2.length
     ? section2.map(ownerHtml).join("")
-    : `<tr><td colspan="5" style="${cellTd}color:#9ca3af;text-align:center;">No owners with open tasks on live accounts.</td></tr>`;
+    : `<tr><td colspan="5" style="${cellTd}color:#9ca3af;text-align:center;">No CSMs with open tasks on live accounts.</td></tr>`;
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;margin:0 auto;">
       <thead>
         <tr>
-          <th style="${headTh}width:140px;border-right:1px solid #cbd5e1;text-align:left;">Owner</th>
+          <th style="${headTh}width:140px;border-right:1px solid #cbd5e1;text-align:left;">CSM</th>
           <th style="${headTh}width:80px;border-right:1px solid #cbd5e1;"></th>
           <th style="${headRagTh("red")}width:80px;">Red</th>
           <th style="${headRagTh("amber")}width:80px;">Amber</th>
@@ -182,12 +182,12 @@ export function renderProgramsEmailHtml({ overall, perAgent, section2, dateText,
 
                 <div style="margin-top:24px;display:flex;align-items:center;">
                   <span style="display:inline-block;width:20px;height:20px;background:#111827;color:#ffffff;border-radius:4px;text-align:center;font-size:11px;font-weight:700;line-height:20px;font-family:Arial,Helvetica,sans-serif;">2</span>
-                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">Owners · path to green</span>
+                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">CSMs · path to green</span>
                 </div>
-                <div style="margin-top:10px;">${renderOwnerRagSummary(section2)}</div>
+                <div style="margin-top:10px;">${renderCsmRagSummary(section2)}</div>
 
                 <div style="margin-top:18px;font-size:11px;color:#9ca3af;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
-                  Each owner row counts the distinct live (rooftop × agent) accounts they have at least one open next-step on. Owners sorted by Not-Green ARR descending — the bigger their red/amber pile, the higher they appear.
+                  Each CSM row counts the distinct live (rooftop × agent) accounts they cover that have at least one open next-step. CSMs sorted by Not-Green ARR descending — the bigger their red/amber pile, the higher they appear. Accounts with no CSM bucket under "No CSM Mapped".
                 </div>
               </td>
             </tr>
