@@ -106,11 +106,15 @@ function renderCsmRagSummary(section2) {
   const ownerCellStyle = "padding:8px 10px;font-weight:700;color:#111827;font-size:12px;font-family:Arial,Helvetica,sans-serif;background:#f9fafb;border-top:1px solid #e5e7eb;border-right:1px solid #e5e7eb;vertical-align:middle;";
   const metricTd = `padding:6px 10px;border-top:1px solid #f3f4f6;color:#374151;font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:700;background:#fafafa;border-right:1px solid #e5e7eb;white-space:nowrap;`;
   const valueTd  = (rag) => `padding:6px 10px;border-top:1px solid #f3f4f6;color:${RAG_COLORS[rag].fg};font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:700;text-align:right;background:${RAG_COLORS[rag].bg};`;
+  const pctTd    = `padding:6px 10px;border-top:1px solid #f3f4f6;border-left:1px solid #e5e7eb;color:${RAG_COLORS.green.fg};font-size:11px;font-family:Arial,Helvetica,sans-serif;font-weight:800;text-align:right;background:${RAG_COLORS.green.bg};`;
   const headRagTh = (rag) => `padding:6px 10px;background:${RAG_COLORS[rag].bg};color:${RAG_COLORS[rag].fg};text-transform:uppercase;letter-spacing:0.3px;font-size:10px;font-weight:700;font-family:Arial,Helvetica,sans-serif;border-bottom:1px solid #cbd5e1;text-align:right;`;
+  const pct = (n, d) => d > 0 ? `${Math.round((n / d) * 100)}%` : "—";
   const ownerHtml = ({ csmLabel, csmKey, red, amber, green }) => {
     const labelMarkup = csmKey
       ? `<span style="color:#111827;">${escapeHtml(csmLabel)}</span>`
       : `<span style="color:#dc2626;">No CSM Mapped</span>`;
+    const totalCount = red.count + amber.count + green.count;
+    const totalArr   = red.arr   + amber.arr   + green.arr;
     return `
       <tr>
         <td rowspan="2" style="${ownerCellStyle}">${labelMarkup}</td>
@@ -118,18 +122,20 @@ function renderCsmRagSummary(section2) {
         <td style="${valueTd("red")}">${red.count}</td>
         <td style="${valueTd("amber")}">${amber.count}</td>
         <td style="${valueTd("green")}">${green.count}</td>
+        <td style="${pctTd}">${pct(green.count, totalCount)}</td>
       </tr>
       <tr>
         <td style="${metricTd}">$ ARR</td>
         <td style="${valueTd("red")}">${fmtMoney(red.arr)}</td>
         <td style="${valueTd("amber")}">${fmtMoney(amber.arr)}</td>
         <td style="${valueTd("green")}">${fmtMoney(green.arr)}</td>
+        <td style="${pctTd}">${pct(green.arr, totalArr)}</td>
       </tr>
     `;
   };
   const bodyHtml = section2.length
     ? section2.map(ownerHtml).join("")
-    : `<tr><td colspan="5" style="${cellTd}color:#9ca3af;text-align:center;">No CSMs with open tasks on live accounts.</td></tr>`;
+    : `<tr><td colspan="6" style="${cellTd}color:#9ca3af;text-align:center;">No CSMs with open tasks on live accounts.</td></tr>`;
   return `
     <table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border:1px solid #e5e7eb;margin:0 auto;">
       <thead>
@@ -139,6 +145,7 @@ function renderCsmRagSummary(section2) {
           <th style="${headRagTh("red")}width:80px;">Red</th>
           <th style="${headRagTh("amber")}width:80px;">Amber</th>
           <th style="${headRagTh("green")}width:80px;">Green</th>
+          <th style="${headRagTh("green")}width:72px;border-left:1px solid #e5e7eb;">% Green</th>
         </tr>
       </thead>
       <tbody>${bodyHtml}</tbody>
@@ -182,7 +189,7 @@ export function renderProgramsEmailHtml({ overall, perAgent, section2, dateText,
 
                 <div style="margin-top:24px;display:flex;align-items:center;">
                   <span style="display:inline-block;width:20px;height:20px;background:#111827;color:#ffffff;border-radius:4px;text-align:center;font-size:11px;font-weight:700;line-height:20px;font-family:Arial,Helvetica,sans-serif;">2</span>
-                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">CSMs · path to green</span>
+                  <span style="margin-left:8px;font-size:14px;font-weight:700;color:#111827;font-family:Arial,Helvetica,sans-serif;">CSMs - % Green</span>
                 </div>
                 <div style="margin-top:10px;">${renderCsmRagSummary(section2)}</div>
 

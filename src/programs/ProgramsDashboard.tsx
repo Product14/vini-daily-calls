@@ -1490,9 +1490,7 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
           <col style={{ width: 72 }}  />  {/* Agent */}
           <col style={{ width: 78 }}  />  {/* MRR */}
           <col style={{ width: 100 }} />  {/* CSM */}
-          <col style={{ width: 84 }}  />  {/* CRM */}
-          <col style={{ width: 84 }}  />  {/* Service Scheduler */}
-          <col style={{ width: 76 }}  />  {/* DMS */}
+          <col style={{ width: 200 }} />  {/* Tech stack — CRM / Scheduler / DMS stacked */}
           <col style={{ width: 72 }}  />  {/* ROI */}
           <col style={{ width: 92 }}  />  {/* Cohort */}
           <col style={{ width: 68 }}  />  {/* 30d Leads */}
@@ -1507,9 +1505,7 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
             <Th>Agent</Th>
             <Th right>MRR</Th>
             <Th>CSM</Th>
-            <Th>CRM</Th>
-            <Th>Scheduler</Th>
-            <Th>DMS</Th>
+            <Th>Tech stack</Th>
             <Th right>ROI</Th>
             <Th>Cohort</Th>
             <Th right>30d Leads</Th>
@@ -1576,23 +1572,24 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
                 </Td>
                 {(() => {
                   const stack = rooftopStack[rooftopKeyFromAccountKey(a.key)] ?? EMPTY_ROOFTOP_STACK;
-                  return <>
+                  // CRM / Scheduler / DMS stacked in one column to save width.
+                  // Names wrap (no truncation) so full vendor names always show;
+                  // the row height grows to fit.
+                  const line = (label: string, value: string) => (
+                    <div style={{ display: "flex", gap: 6, lineHeight: 1.3 }}>
+                      <span style={{ flexShrink: 0, width: 64, fontSize: 10, color: "#9ca3af", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3, paddingTop: 1 }}>{label}</span>
+                      <span style={{ color: value ? "#111827" : "#9ca3af", wordBreak: "break-word" }}>{value || "—"}</span>
+                    </div>
+                  );
+                  return (
                     <Td>
-                      {stack.crmName
-                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.crmName}</span>
-                        : <span style={{ color: "#9ca3af" }}>—</span>}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {line("CRM", stack.crmName)}
+                        {line("Sched", stack.serviceSchedulerName)}
+                        {line("DMS", stack.dmsName)}
+                      </div>
                     </Td>
-                    <Td>
-                      {stack.serviceSchedulerName
-                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.serviceSchedulerName}</span>
-                        : <span style={{ color: "#9ca3af" }}>—</span>}
-                    </Td>
-                    <Td>
-                      {stack.dmsName
-                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.dmsName}</span>
-                        : <span style={{ color: "#9ca3af" }}>—</span>}
-                    </Td>
-                  </>;
+                  );
                 })()}
                 <Td right><RoiPill roi={a.roi} /></Td>
                 <Td><CohortPill cohort={a.cohort} daysLive={a.daysLive} /></Td>
@@ -1603,7 +1600,7 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={14} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
+            <tr><td colSpan={12} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
           )}
         </tbody>
       </table>
@@ -2615,7 +2612,7 @@ function EmailReportView({ accounts, state, overall }: {
 
       {/* ─── Section 2: Per-CSM RAG summary (RAG buckets as columns) ──── */}
       <div style={{ marginTop: 24 }}>
-        <ReportSectionTitle index={2}>CSMs · path to green</ReportSectionTitle>
+        <ReportSectionTitle index={2}>CSMs - % Green</ReportSectionTitle>
       </div>
 
       <table style={{ ...Sx.reportTable, width: "auto", margin: "0 auto" }}>
@@ -2625,6 +2622,7 @@ function EmailReportView({ accounts, state, overall }: {
           <col style={{ width: 80 }} />   {/* Red */}
           <col style={{ width: 80 }} />   {/* Amber */}
           <col style={{ width: 80 }} />   {/* Green */}
+          <col style={{ width: 72 }} />   {/* % Green */}
         </colgroup>
         <thead>
           <tr>
@@ -2633,12 +2631,16 @@ function EmailReportView({ accounts, state, overall }: {
             <Th2 right style={{ background: RAG_COLORS.red.bg,   color: RAG_COLORS.red.fg }}>Red</Th2>
             <Th2 right style={{ background: RAG_COLORS.amber.bg, color: RAG_COLORS.amber.fg }}>Amber</Th2>
             <Th2 right style={{ background: RAG_COLORS.green.bg, color: RAG_COLORS.green.fg }}>Green</Th2>
+            <Th2 right style={{ background: RAG_COLORS.green.bg, color: RAG_COLORS.green.fg }}>% Green</Th2>
           </tr>
         </thead>
         <tbody>
           {section2.length === 0 ? (
-            <tr><td colSpan={5} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No CSMs with open tasks on live accounts.</td></tr>
+            <tr><td colSpan={6} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No CSMs with open tasks on live accounts.</td></tr>
           ) : section2.map(({ csmLabel, csmKey, red, amber, green }) => {
+            const totalCount = red.count + amber.count + green.count;
+            const totalArr   = red.arr   + amber.arr   + green.arr;
+            const pct = (n: number, d: number) => d > 0 ? `${Math.round((n / d) * 100)}%` : "—";
             const ownerCellStyle: CSSProperties = {
               padding: "8px 10px",
               fontWeight: 700,
@@ -2659,6 +2661,11 @@ function EmailReportView({ accounts, state, overall }: {
               color: RAG_COLORS[rag].fg, fontSize: 11, fontWeight: 700,
               background: RAG_COLORS[rag].bg, textAlign: "right",
             });
+            const pctStyle: CSSProperties = {
+              padding: "6px 10px", borderTop: "1px solid #f3f4f6", borderLeft: "1px solid #e5e7eb",
+              color: RAG_COLORS.green.fg, fontSize: 11, fontWeight: 800,
+              background: RAG_COLORS.green.bg, textAlign: "right",
+            };
             return (
               <Fragment key={csmKey || "no-csm"}>
                 <tr>
@@ -2667,12 +2674,14 @@ function EmailReportView({ accounts, state, overall }: {
                   <td style={valStyle("red")}>{red.count}</td>
                   <td style={valStyle("amber")}>{amber.count}</td>
                   <td style={valStyle("green")}>{green.count}</td>
+                  <td style={pctStyle}>{pct(green.count, totalCount)}</td>
                 </tr>
                 <tr>
                   <td style={metricStyle}>$ ARR</td>
                   <td style={valStyle("red")}>{fmtMoney(red.arr)}</td>
                   <td style={valStyle("amber")}>{fmtMoney(amber.arr)}</td>
                   <td style={valStyle("green")}>{fmtMoney(green.arr)}</td>
+                  <td style={pctStyle}>{pct(green.arr, totalArr)}</td>
                 </tr>
               </Fragment>
             );
