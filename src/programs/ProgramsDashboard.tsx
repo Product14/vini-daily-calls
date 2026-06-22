@@ -891,11 +891,16 @@ export default function ProgramsDashboard() {
         <TabButton active={tab==="report"}   onClick={()=>setTab("report")}>Email Report</TabButton>
       </div>
 
-      {/* Top: overall portfolio RAG split */}
-      <OverallRagBar overall={overall} />
-
-      {/* Per-agent breakdown */}
-      <AgentKpiCards agentByRag={agentByRag} />
+      {/* Portfolio summary. Overview gets the full KPI deep-dive; the working
+          tabs get a slim one-row strip so their content sits near the top. */}
+      {tab === "overview" ? (
+        <>
+          <OverallRagBar overall={overall} />
+          <AgentKpiCards agentByRag={agentByRag} />
+        </>
+      ) : (
+        <RagStatStrip overall={overall} />
+      )}
 
       {tab === "overview" && (
         <OverviewView
@@ -957,14 +962,13 @@ function Header({ fetchedAt, loading, dbStatus, dbError }: { fetchedAt: string |
     "local-only": { text: "DB · local only", color: "#92400e" },
   };
   return (
-    <div style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+    <div style={{ marginBottom: 12, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
       <div>
-        <h1 style={{ fontSize: 22, fontWeight: 800, color: "#111827", margin: 0 }}>
+        <h1 style={{ fontSize: 20, fontWeight: 800, color: "#111827", margin: 0 }}>
           Account Programs · Path to Green
         </h1>
-        <p style={{ fontSize: 13, color: "#6b7280", margin: "4px 0 0", maxWidth: 820 }}>
-          Live accounts not in Green, by RAG × cohort. Trailing 30-day ROI vs MRR. Track diagnoses,
-          next steps, and ownership for every not-green account.
+        <p style={{ fontSize: 12, color: "#6b7280", margin: "3px 0 0", maxWidth: 820 }}>
+          Live accounts not in Green, by RAG × cohort. Trailing 30-day ROI vs MRR.
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, fontSize: 12 }}>
@@ -1076,6 +1080,35 @@ function InfoIcon({ tooltip, fg }: { tooltip: string; fg: string }) {
         </span>
       )}
     </span>
+  );
+}
+
+// Slim single-row portfolio summary shown on the working tabs (Account List,
+// Path to Green, etc.) so the data sits near the top instead of being pushed
+// down by the full KPI cards. The rich OverallRagBar + AgentKpiCards stay on
+// the Overview tab for the deep dive (progressive disclosure).
+function RagStatStrip({ overall }: { overall: OverallStats }) {
+  const Item = ({ label, count, arr, pct, dot, fg }: {
+    label: string; count: number; arr: number; pct?: number; dot?: string; fg?: string;
+  }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+      {dot && <span style={{ width: 8, height: 8, borderRadius: 999, background: dot, flexShrink: 0 }} />}
+      <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, color: fg ?? "#6b7280" }}>{label}</span>
+      <span style={{ fontSize: 15, fontWeight: 800, color: "#111827", lineHeight: 1 }}>{count}</span>
+      {pct != null && <span style={{ fontSize: 11, color: "#9ca3af" }}>{pct.toFixed(0)}%</span>}
+      <span style={{ fontSize: 11, color: "#6b7280" }}>· {fmtMoney(arr)}</span>
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: 8, columnGap: 18, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "9px 14px", marginBottom: 14, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
+      <Item label="Total Live" count={overall.totalCount} arr={overall.totalArr} />
+      <span style={Sx.divider} />
+      <Item label="Red"   count={overall.red.count}   arr={overall.red.arr}   pct={overall.red.pctCount}   dot={RAG_COLORS.red.dot}   fg={RAG_COLORS.red.fg} />
+      <Item label="Amber" count={overall.amber.count} arr={overall.amber.arr} pct={overall.amber.pctCount} dot={RAG_COLORS.amber.dot} fg={RAG_COLORS.amber.fg} />
+      <Item label="Green" count={overall.green.count} arr={overall.green.arr} pct={overall.green.pctCount} dot={RAG_COLORS.green.dot} fg={RAG_COLORS.green.fg} />
+      <span style={Sx.divider} />
+      <Item label="At Risk" count={overall.atRisk.count} arr={overall.atRisk.arr} pct={overall.atRisk.pctCount} dot="#dc2626" fg="#991b1b" />
+    </div>
   );
 }
 
@@ -1329,7 +1362,7 @@ function Filters(props: {
     const n = new Set(set); n.has(v) ? n.delete(v) : n.add(v); setter(n);
   };
   return (
-    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", marginBottom: 14, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "7px 12px", display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center", marginBottom: 12, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
       <ChipGroup<RagStatus> label="RAG" options={["red","amber","green"]} selected={props.ragFilter} onToggle={v=>toggle(props.ragFilter, v, props.setRagFilter)} render={v=>v.toUpperCase()} palette={v=>CHIP_PALETTE_RAG[v]} />
       <div style={Sx.divider} />
       <ChipGroup label="Cohort" options={["Activation","Ramp","Mature","Unknown"] as Cohort[]} selected={props.cohortFilter} onToggle={(v)=>toggle(props.cohortFilter, v, props.setCohortFilter)} />
@@ -1849,7 +1882,7 @@ function NextStepsView({ accounts, state, onOpen, onToggleStar }: {
   };
   return (
     <>
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "7px 12px", marginBottom: 10, display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
         <ChipGroup<TaskStatus> label="Status" options={["Open","In Progress","Blocked","Done"]} selected={statusFilter} onToggle={v=>toggleSet(statusFilter, v, setStatusFilter)} palette={v=>CHIP_PALETTE_STATUS[v]} />
         <div style={Sx.divider} />
         <ChipGroup<TaskFunction> label="Function" options={[...TASK_FUNCTIONS]} selected={funcFilter} onToggle={v=>toggleSet(funcFilter, v, setFuncFilter)} />
@@ -1861,7 +1894,7 @@ function NextStepsView({ accounts, state, onOpen, onToggleStar }: {
         <ChipGroup<DueBucket> label="Due" options={["Overdue","Today","This Week","Next 30d","Later","No date"]} selected={dueFilter} onToggle={v=>toggleSet(dueFilter, v, setDueFilter)} />
       </div>
 
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: "10px 14px", marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "7px 12px", marginBottom: 10, display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
         <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Task Owner</span>
           <select value={ownerFilter} onChange={e=>setOwnerFilter(e.target.value)} style={Sx.select}>
