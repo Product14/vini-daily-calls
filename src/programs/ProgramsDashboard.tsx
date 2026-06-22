@@ -456,6 +456,31 @@ function parseAccountKey(k: string): [string | null, string | null] {
 const EMPTY_STATE: AccountState = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, starred: false, notes: "" };
 type DbStatus = "loading" | "ready" | "saving" | "error" | "local-only";
 
+// RAG split (count + ARR + %) for any set of accounts. Used for the portfolio
+// overview and for the filter-aware summary strip on the Account List.
+function computeRagStats(list: Account[]): OverallStats {
+  const total = list.length;
+  const totalArr = list.reduce((s, a) => s + (a.arr ?? 0), 0);
+  const bucket = (rags: RagStatus[]) => {
+    const xs = list.filter(a => rags.includes(a.rag));
+    const count = xs.length;
+    const arr = xs.reduce((s, a) => s + (a.arr ?? 0), 0);
+    return {
+      count, arr,
+      pctCount: total > 0 ? (count / total) * 100 : 0,
+      pctArr:   totalArr > 0 ? (arr / totalArr) * 100 : 0,
+    };
+  };
+  return {
+    totalCount: total,
+    totalArr,
+    red:    bucket(["red"]),
+    amber:  bucket(["amber"]),
+    green:  bucket(["green"]),
+    atRisk: bucket(["red", "amber"]),
+  };
+}
+
 // ─── Component ─────────────────────────────────────────────────────────────
 export default function ProgramsDashboard() {
   const [sheet, setSheet] = useState<SheetEntry[]>([]);
@@ -825,28 +850,10 @@ export default function ProgramsDashboard() {
 
   // Overall portfolio split: Red / Amber / Green / At-Risk(R+A) — each with
   // count + $ARR + share of total. Drives the top KPI bar on Overview.
-  const overall = useMemo(() => {
-    const total = liveAccounts.length;
-    const totalArr = liveAccounts.reduce((s, a) => s + (a.arr ?? 0), 0);
-    const bucket = (rags: RagStatus[]) => {
-      const xs = liveAccounts.filter(a => rags.includes(a.rag));
-      const count = xs.length;
-      const arr = xs.reduce((s, a) => s + (a.arr ?? 0), 0);
-      return {
-        count, arr,
-        pctCount: total > 0 ? (count / total) * 100 : 0,
-        pctArr:   totalArr > 0 ? (arr / totalArr) * 100 : 0,
-      };
-    };
-    return {
-      totalCount: total,
-      totalArr,
-      red:    bucket(["red"]),
-      amber:  bucket(["amber"]),
-      green:  bucket(["green"]),
-      atRisk: bucket(["red","amber"]),
-    };
-  }, [liveAccounts]);
+  const overall = useMemo(() => computeRagStats(liveAccounts), [liveAccounts]);
+  // Summary strip on the Account List reflects the *filtered* rows so its
+  // numbers always match what's in the table below it.
+  const filteredStats = useMemo(() => computeRagStats(filtered), [filtered]);
 
   const openAccount = openKey ? accounts.find(a => a.key === openKey) ?? null : null;
   const openAccountState = openKey ? (state[openKey] ?? EMPTY_STATE) : EMPTY_STATE;
@@ -891,16 +898,16 @@ export default function ProgramsDashboard() {
         <TabButton active={tab==="report"}   onClick={()=>setTab("report")}>Email Report</TabButton>
       </div>
 
-      {/* Portfolio summary. Overview gets the full KPI deep-dive; the working
-          tabs get a slim one-row strip so their content sits near the top. */}
-      {tab === "overview" ? (
+      {/* Portfolio summary. Overview gets the full KPI deep-dive. The Account
+          List gets a slim strip that reflects the active filters (numbers match
+          the table). Other tabs carry their own context, so no strip there. */}
+      {tab === "overview" && (
         <>
           <OverallRagBar overall={overall} />
           <AgentKpiCards agentByRag={agentByRag} />
         </>
-      ) : (
-        <RagStatStrip overall={overall} />
       )}
+      {tab === "list" && <RagStatStrip overall={filteredStats} />}
 
       {tab === "overview" && (
         <OverviewView
@@ -1101,7 +1108,7 @@ function RagStatStrip({ overall }: { overall: OverallStats }) {
   );
   return (
     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: 8, columnGap: 18, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "9px 14px", marginBottom: 14, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
-      <Item label="Total Live" count={overall.totalCount} arr={overall.totalArr} />
+      <Item label="Showing" count={overall.totalCount} arr={overall.totalArr} />
       <span style={Sx.divider} />
       <Item label="Red"   count={overall.red.count}   arr={overall.red.arr}   pct={overall.red.pctCount}   dot={RAG_COLORS.red.dot}   fg={RAG_COLORS.red.fg} />
       <Item label="Amber" count={overall.amber.count} arr={overall.amber.arr} pct={overall.amber.pctCount} dot={RAG_COLORS.amber.dot} fg={RAG_COLORS.amber.fg} />
@@ -1346,6 +1353,76 @@ function StarToggle({ active, onChange }: { active: boolean; onChange: (v: boole
   );
 }
 
+// Compact dropdown filter — collapses a multi-select into a single button with
+// an inline summary of what's chosen. Keeps the toolbar to one tidy row instead
+// of a wall of always-visible chips. Closes on outside click via an overlay.
+function FilterMenu<T extends string>({ label, options, selected, onChange, render }: {
+  label: string;
+  options: T[];
+  selected: Set<T>;
+  onChange: (next: Set<T>) => void;
+  render?: (v: T) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const r = render ?? ((v: T) => v);
+  const sel = [...selected];
+  const active = sel.length > 0;
+  const summary = sel.length === 0 ? null : sel.length === 1 ? r(sel[0]) : `${r(sel[0])} +${sel.length - 1}`;
+  const toggle = (v: T) => {
+    const n = new Set(selected); n.has(v) ? n.delete(v) : n.add(v); onChange(n);
+  };
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 8,
+          border: `1px solid ${active ? "#111827" : "#e5e7eb"}`,
+          background: active ? "#111827" : "#fff", color: active ? "#fff" : "#374151",
+          fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 150ms ease", whiteSpace: "nowrap",
+        }}
+      >
+        <span>{label}</span>
+        {summary && <span style={{ opacity: 0.85, fontWeight: 500, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{summary}</span>}
+        <span style={{ fontSize: 9, opacity: 0.7 }}>▾</span>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+          <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 50, minWidth: 190, maxHeight: 300, overflowY: "auto", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 8px 24px rgba(15,23,42,0.12)", padding: 6 }}>
+            {options.map(o => {
+              const on = selected.has(o);
+              return (
+                <button
+                  key={o}
+                  type="button"
+                  onClick={() => toggle(o)}
+                  onMouseEnter={e => (e.currentTarget.style.background = "#f3f4f6")}
+                  onMouseLeave={e => (e.currentTarget.style.background = on ? "#f9fafb" : "transparent")}
+                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 8px", borderRadius: 6, border: "none", background: on ? "#f9fafb" : "transparent", cursor: "pointer", textAlign: "left", fontSize: 13, color: "#111827", transition: "background 120ms ease" }}
+                >
+                  <span style={{ width: 16, height: 16, borderRadius: 4, border: `1.5px solid ${on ? "#111827" : "#d1d5db"}`, background: on ? "#111827" : "#fff", color: "#fff", fontSize: 11, lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{on ? "✓" : ""}</span>
+                  {r(o)}
+                </button>
+              );
+            })}
+            {active && (
+              <button
+                type="button"
+                onClick={() => onChange(new Set())}
+                style={{ width: "100%", marginTop: 4, paddingTop: 7, paddingBottom: 3, borderRadius: 6, border: "none", borderTop: "1px solid #f3f4f6", background: "transparent", cursor: "pointer", textAlign: "left", fontSize: 12, fontWeight: 600, color: "#6b7280", paddingLeft: 8 }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Filters(props: {
   ragFilter: Set<RagStatus>; setRagFilter: (s:Set<RagStatus>)=>void;
   cohortFilter: Set<Cohort>; setCohortFilter: (s:Set<Cohort>)=>void;
@@ -1358,59 +1435,34 @@ function Filters(props: {
   sortKey: "priority"|"mrr"|"roi"|"daysLive"|"name"; setSortKey: (k:"priority"|"mrr"|"roi"|"daysLive"|"name")=>void;
   showSort: boolean;
 }) {
-  const toggle = <T,>(set: Set<T>, v: T, setter: (s: Set<T>)=>void) => {
-    const n = new Set(set); n.has(v) ? n.delete(v) : n.add(v); setter(n);
-  };
+  const csmName = (email: string) => props.csmOptions.find(([e]) => e === email)?.[1] ?? email;
+  const csmEmails = props.csmOptions.map(([e]) => e);
   return (
-    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "7px 12px", display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center", marginBottom: 12, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
-      <ChipGroup<RagStatus> label="RAG" options={["red","amber","green"]} selected={props.ragFilter} onToggle={v=>toggle(props.ragFilter, v, props.setRagFilter)} render={v=>v.toUpperCase()} palette={v=>CHIP_PALETTE_RAG[v]} />
-      <div style={Sx.divider} />
-      <ChipGroup label="Cohort" options={["Activation","Ramp","Mature","Unknown"] as Cohort[]} selected={props.cohortFilter} onToggle={(v)=>toggle(props.cohortFilter, v, props.setCohortFilter)} />
-      <div style={Sx.divider} />
-      <ChipGroup label="Agent" options={["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"] as AgentType[]} selected={props.agentFilter} onToggle={(v)=>toggle(props.agentFilter, v, props.setAgentFilter)} render={(v)=>AGENT_LABELS[v]} />
-      {props.csmOptions.length > 0 && (
-        <>
-          <div style={Sx.divider} />
-          <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>CSM</span>
-            <select
-              multiple={false}
-              value={Array.from(props.csmFilter)[0] ?? ""}
-              onChange={e => {
-                const v = e.target.value;
-                if (!v) props.setCsmFilter(new Set());
-                else props.setCsmFilter(new Set([v]));
-              }}
-              style={{ padding: "5px 8px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, background: "#fff", maxWidth: 200 }}
-            >
-              <option value="">All CSMs</option>
-              {props.csmOptions.map(([email, name]) => (
-                <option key={email} value={email}>{name}</option>
-              ))}
-            </select>
-          </div>
-        </>
-      )}
-      <div style={Sx.divider} />
-      <LiveFilter value={props.liveFilter} onChange={props.setLiveFilter} />
-      <StarToggle active={props.starOnly} onChange={props.setStarOnly} />
+    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "8px 12px", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 12, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
       <input
         type="search" placeholder="Search rooftop / enterprise"
         value={props.search} onChange={e=>props.setSearch(e.target.value)}
-        style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, minWidth: 220 }}
+        style={{ flex: "1 1 200px", minWidth: 160, padding: "6px 10px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13 }}
       />
+      <FilterMenu<RagStatus> label="RAG" options={["red","amber","green"]} selected={props.ragFilter} onChange={props.setRagFilter} render={v=>v.toUpperCase()} />
+      <FilterMenu<Cohort> label="Cohort" options={["Activation","Ramp","Mature","Unknown"]} selected={props.cohortFilter} onChange={props.setCohortFilter} />
+      <FilterMenu<AgentType> label="Agent" options={["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"]} selected={props.agentFilter} onChange={props.setAgentFilter} render={v=>AGENT_LABELS[v]} />
+      {props.csmOptions.length > 0 && (
+        <FilterMenu label="CSM" options={csmEmails} selected={props.csmFilter} onChange={props.setCsmFilter} render={csmName} />
+      )}
+      <LiveFilter value={props.liveFilter} onChange={props.setLiveFilter} />
+      <StarToggle active={props.starOnly} onChange={props.setStarOnly} />
       {props.showSort && (
-        <>
-          <div style={Sx.divider} />
-          <label style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Sort</label>
-          <select value={props.sortKey} onChange={e=>props.setSortKey(e.target.value as any)} style={{ padding: "5px 8px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13 }}>
-            <option value="priority">Priority (Red → Amber, Mature first, $ at risk)</option>
+        <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 600 }}>Sort</span>
+          <select value={props.sortKey} onChange={e=>props.setSortKey(e.target.value as any)} style={{ padding: "6px 8px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13, background: "#fff" }}>
+            <option value="priority">Priority</option>
             <option value="mrr">MRR</option>
             <option value="roi">ROI</option>
             <option value="daysLive">Days since live</option>
             <option value="name">Rooftop name</option>
           </select>
-        </>
+        </div>
       )}
     </div>
   );
@@ -1877,70 +1929,45 @@ function NextStepsView({ accounts, state, onOpen, onToggleStar }: {
   }, [filtered, groupKey, sortKey]);
 
   // ── Render ─────────────────────────────────────────────────────────────
-  const toggleSet = <T,>(set: Set<T>, v: T, setter: (s: Set<T>)=>void) => {
-    const n = new Set(set); n.has(v) ? n.delete(v) : n.add(v); setter(n);
-  };
   return (
     <>
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "7px 12px", marginBottom: 10, display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
-        <ChipGroup<TaskStatus> label="Status" options={["Open","In Progress","Blocked","Done"]} selected={statusFilter} onToggle={v=>toggleSet(statusFilter, v, setStatusFilter)} palette={v=>CHIP_PALETTE_STATUS[v]} />
-        <div style={Sx.divider} />
-        <ChipGroup<TaskFunction> label="Function" options={[...TASK_FUNCTIONS]} selected={funcFilter} onToggle={v=>toggleSet(funcFilter, v, setFuncFilter)} />
-        <div style={Sx.divider} />
-        <ChipGroup<RagStatus> label="Account RAG" options={["red","amber","green"]} selected={ragFilter} onToggle={v=>toggleSet(ragFilter, v, setRagFilter)} render={v=>v.toUpperCase()} palette={v=>CHIP_PALETTE_RAG[v]} />
-        <div style={Sx.divider} />
-        <ChipGroup<AgentType> label="Agent" options={["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"]} selected={agentFilter} onToggle={v=>toggleSet(agentFilter, v, setAgentFilter)} render={v=>AGENT_LABELS[v]} />
-        <div style={Sx.divider} />
-        <ChipGroup<DueBucket> label="Due" options={["Overdue","Today","This Week","Next 30d","Later","No date"]} selected={dueFilter} onToggle={v=>toggleSet(dueFilter, v, setDueFilter)} />
-      </div>
-
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "7px 12px", marginBottom: 10, display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
-        <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Task Owner</span>
-          <select value={ownerFilter} onChange={e=>setOwnerFilter(e.target.value)} style={Sx.select}>
-            <option value="">All</option>
-            {taskOwners.map(([email, name]) => <option key={email} value={email}>{name}</option>)}
-          </select>
-        </div>
-        <div style={Sx.divider} />
-        <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Account CSM</span>
-          <select value={csmFilter} onChange={e=>setCsmFilter(e.target.value)} style={Sx.select}>
-            <option value="">All</option>
-            {accountCsms.map(([email, name]) => <option key={email} value={email}>{name}</option>)}
-          </select>
-        </div>
-        <div style={Sx.divider} />
-        <LiveFilter value={liveFilter} onChange={setLiveFilter} />
-        <StarToggle active={starOnly} onChange={setStarOnly} />
-        <div style={Sx.divider} />
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: "8px 12px", marginBottom: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", boxShadow: "0 1px 2px rgba(15,23,42,0.04)" }}>
         <input type="search" placeholder="Search task / rooftop"
                value={search} onChange={e=>setSearch(e.target.value)}
-               style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, minWidth: 220 }} />
-        <div style={{ marginLeft: "auto", display: "inline-flex", gap: 14, alignItems: "center" }}>
-          <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Sort</span>
-            <select value={sortKey} onChange={e=>setSortKey(e.target.value as TaskSortKey)} style={Sx.select}>
-              <option value="priority">Priority (overdue · RAG · ARR)</option>
-              <option value="due">Due date</option>
-              <option value="created">Recently added</option>
-              <option value="arr">Account ARR</option>
-            </select>
-          </div>
-          <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Group by</span>
-            <select value={groupKey} onChange={e=>setGroupKey(e.target.value as TaskGroupKey)} style={Sx.select}>
-              <option value="owner">Task Owner</option>
-              <option value="task">Task</option>
-              <option value="function">Function</option>
-              <option value="agent">Agent</option>
-              <option value="status">Status</option>
-              <option value="rag">Account RAG</option>
-              <option value="csm">Account CSM</option>
-              <option value="rooftop">Rooftop</option>
-              <option value="none">No grouping</option>
-            </select>
-          </div>
+               style={{ flex: "1 1 180px", minWidth: 150, padding: "6px 10px", borderRadius: 8, border: "1px solid #e5e7eb", fontSize: 13 }} />
+        <FilterMenu<TaskStatus> label="Status" options={["Open","In Progress","Blocked","Done"]} selected={statusFilter} onChange={setStatusFilter} />
+        <FilterMenu<TaskFunction> label="Function" options={[...TASK_FUNCTIONS]} selected={funcFilter} onChange={setFuncFilter} />
+        <FilterMenu<RagStatus> label="RAG" options={["red","amber","green"]} selected={ragFilter} onChange={setRagFilter} render={v=>v.toUpperCase()} />
+        <FilterMenu<AgentType> label="Agent" options={["Sales Inbound","Service Inbound","Sales Outbound","Service Outbound"]} selected={agentFilter} onChange={setAgentFilter} render={v=>AGENT_LABELS[v]} />
+        <FilterMenu<DueBucket> label="Due" options={["Overdue","Today","This Week","Next 30d","Later","No date"]} selected={dueFilter} onChange={setDueFilter} />
+        <select value={ownerFilter} onChange={e=>setOwnerFilter(e.target.value)} title="Filter by task owner" style={Sx.select}>
+          <option value="">Owner: all</option>
+          {taskOwners.map(([email, name]) => <option key={email} value={email}>{name}</option>)}
+        </select>
+        <select value={csmFilter} onChange={e=>setCsmFilter(e.target.value)} title="Filter by account CSM" style={Sx.select}>
+          <option value="">CSM: all</option>
+          {accountCsms.map(([email, name]) => <option key={email} value={email}>{name}</option>)}
+        </select>
+        <LiveFilter value={liveFilter} onChange={setLiveFilter} />
+        <StarToggle active={starOnly} onChange={setStarOnly} />
+        <div style={{ marginLeft: "auto", display: "inline-flex", gap: 8, alignItems: "center" }}>
+          <select value={sortKey} onChange={e=>setSortKey(e.target.value as TaskSortKey)} title="Sort" style={Sx.select}>
+            <option value="priority">Sort: Priority</option>
+            <option value="due">Sort: Due date</option>
+            <option value="created">Sort: Recently added</option>
+            <option value="arr">Sort: Account ARR</option>
+          </select>
+          <select value={groupKey} onChange={e=>setGroupKey(e.target.value as TaskGroupKey)} title="Group by" style={Sx.select}>
+            <option value="owner">Group: Task Owner</option>
+            <option value="task">Group: Task</option>
+            <option value="function">Group: Function</option>
+            <option value="agent">Group: Agent</option>
+            <option value="status">Group: Status</option>
+            <option value="rag">Group: Account RAG</option>
+            <option value="csm">Group: Account CSM</option>
+            <option value="rooftop">Group: Rooftop</option>
+            <option value="none">Group: None</option>
+          </select>
         </div>
       </div>
 
