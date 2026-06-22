@@ -44,6 +44,8 @@ type Account = {
   key: string;            // rooftopId::agentType (or name fallback)
   rooftopName: string;
   enterpriseName: string;
+  enterpriseId: string;   // funnel-sheet enterprise id ("" when missing)
+  teamId: string;         // funnel-sheet rooftopId == Metabase team_id ("" when missing)
   agentType: AgentType;
   mrr: number | null;
   arr: number | null;     // sheet's agentCarr — fallback to MRR×12 if missing
@@ -71,13 +73,7 @@ const COST_PER_APPT: Record<AgentType, number> = {
   "Service Inbound": 100,
   "Service Outbound":200,
 };
-const PREMIUM_DEALER_APPT_COST = 750;
-const PREMIUM_DEALERS = new Set<string>(["mercedes-benz of arlington"]);
-const normName = (s: string) => s.trim().toLowerCase();
-function costPerAppt(t: AgentType, rooftop: string, enterprise: string): number {
-  if (PREMIUM_DEALERS.has(normName(rooftop)) || PREMIUM_DEALERS.has(normName(enterprise))) {
-    return PREMIUM_DEALER_APPT_COST;
-  }
+function costPerAppt(t: AgentType): number {
   return COST_PER_APPT[t] ?? 0;
 }
 
@@ -132,6 +128,7 @@ type AccountState = {
   tasks: Task[];
   accountDri: string;            // CSM override (sheet provides the default)
   actualLive: boolean;           // operator-controlled "really shipping today" flag
+  starred: boolean;              // operator focus flag — star to highlight + filter
   notes: string;
 };
 
@@ -252,6 +249,7 @@ const ACCOUNT_STATE_DEFAULTS: AccountState = {
   tasks: [],
   accountDri: "",
   actualLive: false,
+  starred: false,
   notes: "",
 };
 function loadLocalMirror(): Record<string, AccountState> {
@@ -294,12 +292,13 @@ async function loadFromSupabase(): Promise<Record<string, AccountState> | null> 
         tasks: [],
         accountDri: r.account_dri ?? "",
         actualLive: r.actual_live === true,
+        starred: r.starred === true,
         notes: r.notes ?? "",
       };
     }
     for (const t of tasksRes.data ?? []) {
       const k = t.account_key as string;
-      if (!out[k]) out[k] = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, notes: "" };
+      if (!out[k]) out[k] = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, starred: false, notes: "" };
       out[k].tasks.push({
         id: t.id,
         title: t.title ?? "",
@@ -319,6 +318,11 @@ async function loadFromSupabase(): Promise<Record<string, AccountState> | null> 
   }
 }
 
+// Set once if the DB upsert reports `starred` is unknown (pre-migration), so
+// subsequent saves skip it without re-probing. Cleared by a page reload after
+// schema-starred.sql is applied.
+let starredColumnMissing = false;
+
 // Persist one account's full state. Upserts the row in programs_account_state
 // and reconciles its tasks (insert new, update changed by id, delete removed).
 async function persistAccount(accountKey: string, current: AccountState): Promise<{ ok: boolean; error?: string }> {
@@ -326,19 +330,26 @@ async function persistAccount(accountKey: string, current: AccountState): Promis
   if (!sb) return { ok: false, error: "DB not configured" };
   const [rooftopId, agentType] = parseAccountKey(accountKey);
   try {
-    // 1. Upsert account_state
-    const upState = await sb
-      .from("programs_account_state")
-      .upsert({
-        account_key: accountKey,
-        rooftop_id: rooftopId,
-        agent_type: agentType,
-        account_dri: current.accountDri,
-        actual_live: current.actualLive,
-        root_causes: current.rootCauses,
-        notes: current.notes,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "account_key" });
+    // 1. Upsert account_state. `starred` is a newer column (schema-starred.sql);
+    // if the DB hasn't been migrated yet, retry without it so the rest of the
+    // state still saves instead of failing the whole write.
+    const baseRow = {
+      account_key: accountKey,
+      rooftop_id: rooftopId,
+      agent_type: agentType,
+      account_dri: current.accountDri,
+      actual_live: current.actualLive,
+      root_causes: current.rootCauses,
+      notes: current.notes,
+      updated_at: new Date().toISOString(),
+    };
+    const row = starredColumnMissing ? baseRow : { ...baseRow, starred: current.starred };
+    let upState = await sb.from("programs_account_state").upsert(row, { onConflict: "account_key" });
+    if (upState.error && !starredColumnMissing && /starred/i.test(upState.error.message ?? "")) {
+      console.warn("[programs] `starred` column missing — run schema-starred.sql. Saving without it for now.");
+      starredColumnMissing = true;
+      upState = await sb.from("programs_account_state").upsert(baseRow, { onConflict: "account_key" });
+    }
     if (upState.error) throw upState.error;
 
     // 2. Reconcile tasks for this account_key
@@ -442,7 +453,7 @@ function parseAccountKey(k: string): [string | null, string | null] {
   return [null, n ? n[1] : null];
 }
 
-const EMPTY_STATE: AccountState = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, notes: "" };
+const EMPTY_STATE: AccountState = { rootCauses: [], tasks: [], accountDri: "", actualLive: false, starred: false, notes: "" };
 type DbStatus = "loading" | "ready" | "saving" | "error" | "local-only";
 
 // ─── Component ─────────────────────────────────────────────────────────────
@@ -477,6 +488,11 @@ export default function ProgramsDashboard() {
   const [cohortFilter, setCohortFilter] = useState<Set<Cohort>>(new Set());
   const [agentFilter, setAgentFilter] = useState<Set<AgentType>>(new Set());
   const [csmFilter, setCsmFilter] = useState<Set<string>>(new Set());   // emails
+  // Actually-Live filter — "all" shows every rooftop (incl. not-live), "live"
+  // only the actually-live ones, "notlive" only the not-yet-live. Default
+  // "all" so nothing is hidden until the operator narrows.
+  const [liveFilter, setLiveFilter] = useState<"all" | "live" | "notlive">("all");
+  const [starOnly, setStarOnly] = useState(false);   // show only starred rooftops
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<"priority" | "mrr" | "roi" | "daysLive" | "name">("priority");
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -622,8 +638,7 @@ export default function ProgramsDashboard() {
       const teamId = String(((r as Record<string, unknown>)["team_id"]) ?? ((r as Record<string, unknown>)["pld.team_id"]) ?? "").trim();
       const aType = r.agent_type;
       const name = String(r.rooftop_name ?? "").trim();
-      const ent  = String(r.enterprise_name ?? "").trim();
-      const cpa = costPerAppt(aType, name, ent);
+      const cpa = costPerAppt(aType);
       const tKey = teamId ? `tid:${teamId}::${aType}` : "";
       const nKey = `name:${name.toLowerCase()}::${aType}`;
       const apply = (map: Map<string, Agg>, k: string) => {
@@ -684,6 +699,8 @@ export default function ProgramsDashboard() {
         key: tKey || nKey,
         rooftopName: e.rooftopName,
         enterpriseName: e.enterpriseName,
+        enterpriseId: e.enterpriseId ?? "",
+        teamId: e.rooftopId ?? "",
         agentType: aType,
         mrr: e.agentMrr,
         arr,
@@ -716,6 +733,11 @@ export default function ProgramsDashboard() {
       const eff = effectiveCsm(a, state[a.key]);
       return eff.email != null && csmFilter.has(eff.email);
     });
+    if (liveFilter !== "all") rows = rows.filter(a => {
+      const live = state[a.key]?.actualLive === true;
+      return liveFilter === "live" ? live : !live;
+    });
+    if (starOnly) rows = rows.filter(a => state[a.key]?.starred === true);
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       rows = rows.filter(a =>
@@ -738,7 +760,7 @@ export default function ProgramsDashboard() {
       return 0;
     });
     return sorted;
-  }, [accounts, ragFilter, cohortFilter, agentFilter, csmFilter, search, sortKey, state]);
+  }, [accounts, ragFilter, cohortFilter, agentFilter, csmFilter, liveFilter, starOnly, search, sortKey, state]);
 
   // Unique CSM list (email → name) sorted by display name. Used by the filter.
   // Uses effective CSM so dashboard overrides are reflected.
@@ -892,17 +914,19 @@ export default function ProgramsDashboard() {
           agentFilter={agentFilter}   setAgentFilter={setAgentFilter}
           csmFilter={csmFilter}       setCsmFilter={setCsmFilter}
           csmOptions={csmOptions}
+          liveFilter={liveFilter}     setLiveFilter={setLiveFilter}
+          starOnly={starOnly}         setStarOnly={setStarOnly}
           search={search}             setSearch={setSearch}
           sortKey={sortKey}           setSortKey={setSortKey}
           showSort={true}
         />
       )}
 
-      {tab === "list"   && <AccountTable rows={filtered} state={state} rooftopStack={rooftopStack} onOpen={setOpenKey} onToggleActualLive={(k, v) => updateAccountState(k, { actualLive: v })} />}
+      {tab === "list"   && <AccountTable rows={filtered} state={state} rooftopStack={rooftopStack} onOpen={setOpenKey} onToggleActualLive={(k, v) => updateAccountState(k, { actualLive: v })} onToggleStar={(k, v) => updateAccountState(k, { starred: v })} />}
       {tab === "cohort" && (
         <CohortView agentByCohort={agentByCohort} />
       )}
-      {tab === "tasks"  && <NextStepsView accounts={accounts} state={state} onOpen={setOpenKey} />}
+      {tab === "tasks"  && <NextStepsView accounts={accounts} state={state} onOpen={setOpenKey} onToggleStar={(k, v) => updateAccountState(k, { starred: v })} />}
       {tab === "report" && <EmailReportView accounts={liveAccounts} state={state} overall={overall} />}
 
       {openAccount && (() => {
@@ -1237,12 +1261,66 @@ function AgentCohortTable({ agent, data }: { agent: AgentType; data: Record<Coho
   );
 }
 
+// Shared "Actually Live" segmented filter — All / Live / Not live. Used on the
+// Account List and Path to Green tabs so the same lens works on both.
+function LiveFilter({ value, onChange }: {
+  value: "all" | "live" | "notlive"; onChange: (v: "all" | "live" | "notlive") => void;
+}) {
+  const opts: { v: "all" | "live" | "notlive"; label: string }[] = [
+    { v: "all", label: "All" },
+    { v: "live", label: "Live" },
+    { v: "notlive", label: "Not live" },
+  ];
+  return (
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Actually Live</span>
+      <div style={{ display: "inline-flex", border: "1px solid #d1d5db", borderRadius: 8, overflow: "hidden" }}>
+        {opts.map((o, i) => (
+          <button
+            key={o.v}
+            type="button"
+            onClick={() => onChange(o.v)}
+            style={{
+              padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none",
+              borderLeft: i === 0 ? "none" : "1px solid #e5e7eb",
+              background: value === o.v ? "#16a34a" : "#fff",
+              color: value === o.v ? "#fff" : "#374151",
+            }}
+          >{o.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Shared "Starred only" toggle. A filled gold star = active.
+function StarToggle({ active, onChange }: { active: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!active)}
+      title={active ? "Showing starred only — click to show all" : "Show starred rooftops only"}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px",
+        borderRadius: 8, border: `1px solid ${active ? "#f59e0b" : "#d1d5db"}`,
+        background: active ? "#fffbeb" : "#fff", color: active ? "#b45309" : "#374151",
+        fontSize: 12, fontWeight: 600, cursor: "pointer",
+      }}
+    >
+      <span style={{ color: active ? "#f59e0b" : "#9ca3af", fontSize: 14 }}>{active ? "★" : "☆"}</span>
+      Starred
+    </button>
+  );
+}
+
 function Filters(props: {
   ragFilter: Set<RagStatus>; setRagFilter: (s:Set<RagStatus>)=>void;
   cohortFilter: Set<Cohort>; setCohortFilter: (s:Set<Cohort>)=>void;
   agentFilter: Set<AgentType>; setAgentFilter: (s:Set<AgentType>)=>void;
   csmFilter: Set<string>; setCsmFilter: (s:Set<string>)=>void;
   csmOptions: [string, string][];
+  liveFilter: "all" | "live" | "notlive"; setLiveFilter: (v:"all"|"live"|"notlive")=>void;
+  starOnly: boolean; setStarOnly: (v:boolean)=>void;
   search: string; setSearch: (s:string)=>void;
   sortKey: "priority"|"mrr"|"roi"|"daysLive"|"name"; setSortKey: (k:"priority"|"mrr"|"roi"|"daysLive"|"name")=>void;
   showSort: boolean;
@@ -1280,6 +1358,9 @@ function Filters(props: {
           </div>
         </>
       )}
+      <div style={Sx.divider} />
+      <LiveFilter value={props.liveFilter} onChange={props.setLiveFilter} />
+      <StarToggle active={props.starOnly} onChange={props.setStarOnly} />
       <input
         type="search" placeholder="Search rooftop / enterprise"
         value={props.search} onChange={e=>props.setSearch(e.target.value)}
@@ -1391,25 +1472,25 @@ const CHIP_PALETTE_STATUS: Record<TaskStatus, ChipTone> = {
   "Done":        { bg: "#dcfce7", fg: "#166534", border: "#86efac" },
 };
 
-function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive }: {
+function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, onToggleStar }: {
   rows: Account[];
   state: Record<string, AccountState>;
   rooftopStack: Record<string, RooftopStack>;
   onOpen:(k:string)=>void;
   onToggleActualLive: (accountKey: string, value: boolean) => void;
+  onToggleStar: (accountKey: string, value: boolean) => void;
 }) {
   return (
     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, overflow: "hidden" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
         <colgroup>
+          <col style={{ width: 34 }}  />  {/* Star */}
           <col style={{ width: 50 }}  />  {/* Actual Live (checkbox) */}
           <col style={{ width: 210 }} />  {/* Rooftop (enterprise name wraps to 2 lines via line-clamp) */}
           <col style={{ width: 72 }}  />  {/* Agent */}
           <col style={{ width: 78 }}  />  {/* MRR */}
           <col style={{ width: 100 }} />  {/* CSM */}
-          <col style={{ width: 84 }}  />  {/* CRM */}
-          <col style={{ width: 84 }}  />  {/* Service Scheduler */}
-          <col style={{ width: 76 }}  />  {/* DMS */}
+          <col style={{ width: 200 }} />  {/* Tech stack — CRM / Scheduler / DMS stacked */}
           <col style={{ width: 72 }}  />  {/* ROI */}
           <col style={{ width: 92 }}  />  {/* Cohort */}
           <col style={{ width: 68 }}  />  {/* 30d Leads */}
@@ -1418,14 +1499,13 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive }:
         </colgroup>
         <thead style={{ background: "#f9fafb" }}>
           <tr>
+            <Th><span title="Star a rooftop to focus on it — highlights the row and filters via the ★ Starred toggle.">★</span></Th>
             <Th><span title="Actually Live — drives every aggregate widget on Overview / By Cohort / Email Report. Toggle per row.">Live</span></Th>
             <Th>Rooftop</Th>
             <Th>Agent</Th>
             <Th right>MRR</Th>
             <Th>CSM</Th>
-            <Th>CRM</Th>
-            <Th>Scheduler</Th>
-            <Th>DMS</Th>
+            <Th>Tech stack</Th>
             <Th right>ROI</Th>
             <Th>Cohort</Th>
             <Th right>30d Leads</Th>
@@ -1437,7 +1517,23 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive }:
           {rows.map(a => {
             const s = state[a.key] ?? EMPTY_STATE;
             return (
-              <tr key={a.key} onClick={()=>onOpen(a.key)} style={{ ...Sx.tr, verticalAlign: "top" }}>
+              <tr
+                key={a.key}
+                onClick={()=>onOpen(a.key)}
+                style={{
+                  ...Sx.tr, verticalAlign: "top",
+                  background: s.starred ? "#fffdf5" : undefined,
+                  boxShadow: s.starred ? "inset 3px 0 0 #f59e0b" : undefined,
+                }}
+              >
+                <Td>
+                  <button
+                    type="button"
+                    onClick={e => { e.stopPropagation(); onToggleStar(a.key, !s.starred); }}
+                    title={s.starred ? "Starred — click to unstar" : "Star this rooftop to focus on it"}
+                    style={{ border: "none", background: "transparent", cursor: "pointer", padding: "4px 2px", fontSize: 16, lineHeight: 1, color: s.starred ? "#f59e0b" : "#d1d5db" }}
+                  >{s.starred ? "★" : "☆"}</button>
+                </Td>
                 <Td>
                   <label
                     onClick={e => e.stopPropagation()}
@@ -1476,23 +1572,24 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive }:
                 </Td>
                 {(() => {
                   const stack = rooftopStack[rooftopKeyFromAccountKey(a.key)] ?? EMPTY_ROOFTOP_STACK;
-                  return <>
+                  // CRM / Scheduler / DMS stacked in one column to save width.
+                  // Names wrap (no truncation) so full vendor names always show;
+                  // the row height grows to fit.
+                  const line = (label: string, value: string) => (
+                    <div style={{ display: "flex", gap: 6, lineHeight: 1.3 }}>
+                      <span style={{ flexShrink: 0, width: 64, fontSize: 10, color: "#9ca3af", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.3, paddingTop: 1 }}>{label}</span>
+                      <span style={{ color: value ? "#111827" : "#9ca3af", wordBreak: "break-word" }}>{value || "—"}</span>
+                    </div>
+                  );
+                  return (
                     <Td>
-                      {stack.crmName
-                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.crmName}</span>
-                        : <span style={{ color: "#9ca3af" }}>—</span>}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {line("CRM", stack.crmName)}
+                        {line("Sched", stack.serviceSchedulerName)}
+                        {line("DMS", stack.dmsName)}
+                      </div>
                     </Td>
-                    <Td>
-                      {stack.serviceSchedulerName
-                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.serviceSchedulerName}</span>
-                        : <span style={{ color: "#9ca3af" }}>—</span>}
-                    </Td>
-                    <Td>
-                      {stack.dmsName
-                        ? <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>{stack.dmsName}</span>
-                        : <span style={{ color: "#9ca3af" }}>—</span>}
-                    </Td>
-                  </>;
+                  );
                 })()}
                 <Td right><RoiPill roi={a.roi} /></Td>
                 <Td><CohortPill cohort={a.cohort} daysLive={a.daysLive} /></Td>
@@ -1503,7 +1600,7 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive }:
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={13} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
+            <tr><td colSpan={12} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
           )}
         </tbody>
       </table>
@@ -1558,6 +1655,8 @@ type TaskRow = {
   dueBucket: "Overdue" | "Today" | "This Week" | "Next 30d" | "Later" | "No date";
   daysToDue: number | null;          // negative = past
   isOverdue: boolean;
+  starred: boolean;                  // account starred for focus
+  actualLive: boolean;               // account flagged actually live
 };
 type TaskSortKey = "priority" | "due" | "created" | "arr";
 type TaskGroupKey = "none" | "owner" | "function" | "status" | "rag" | "csm" | "rooftop" | "task" | "agent";
@@ -1577,11 +1676,14 @@ function classifyDue(due: string | null): { bucket: DueBucket; daysToDue: number
   return { bucket: "Later", daysToDue: dt };
 }
 
-function NextStepsView({ accounts, state, onOpen }: {
+function NextStepsView({ accounts, state, onOpen, onToggleStar }: {
   accounts: Account[]; state: Record<string, AccountState>; onOpen: (k: string)=>void;
+  onToggleStar: (accountKey: string, value: boolean) => void;
 }) {
   // Filters
   const [statusFilter, setStatusFilter] = useState<Set<TaskStatus>>(new Set(["Open","In Progress","Blocked"]));
+  const [liveFilter,   setLiveFilter]   = useState<"all" | "live" | "notlive">("all");
+  const [starOnly,     setStarOnly]     = useState(false);
   const [funcFilter,   setFuncFilter]   = useState<Set<TaskFunction>>(new Set());
   const [ragFilter,    setRagFilter]    = useState<Set<RagStatus>>(new Set());
   const [agentFilter,  setAgentFilter]  = useState<Set<AgentType>>(new Set());
@@ -1624,6 +1726,8 @@ function NextStepsView({ accounts, state, onOpen }: {
           dueBucket: bucket,
           daysToDue,
           isOverdue: bucket === "Overdue",
+          starred: s.starred === true,
+          actualLive: s.actualLive === true,
         });
       }
     }
@@ -1656,6 +1760,8 @@ function NextStepsView({ accounts, state, onOpen }: {
     if (ragFilter.size)    rows = rows.filter(r => ragFilter.has(r.account.rag));
     if (agentFilter.size)  rows = rows.filter(r => agentFilter.has(r.account.agentType));
     if (dueFilter.size)    rows = rows.filter(r => dueFilter.has(r.dueBucket));
+    if (liveFilter !== "all") rows = rows.filter(r => liveFilter === "live" ? r.actualLive : !r.actualLive);
+    if (starOnly)          rows = rows.filter(r => r.starred);
     if (ownerFilter)       rows = rows.filter(r => r.task.taskDri === ownerFilter);
     if (csmFilter)         rows = rows.filter(r => r.csmEmail === csmFilter);
     if (search.trim()) {
@@ -1687,7 +1793,7 @@ function NextStepsView({ accounts, state, onOpen }: {
       return 0;
     });
     return sorted;
-  }, [allRows, statusFilter, funcFilter, ragFilter, agentFilter, dueFilter, ownerFilter, csmFilter, search, sortKey]);
+  }, [allRows, statusFilter, funcFilter, ragFilter, agentFilter, dueFilter, liveFilter, starOnly, ownerFilter, csmFilter, search, sortKey]);
 
   // Group
   const groupLabel = (r: TaskRow): string => {
@@ -1771,6 +1877,9 @@ function NextStepsView({ accounts, state, onOpen }: {
             {accountCsms.map(([email, name]) => <option key={email} value={email}>{name}</option>)}
           </select>
         </div>
+        <div style={Sx.divider} />
+        <LiveFilter value={liveFilter} onChange={setLiveFilter} />
+        <StarToggle active={starOnly} onChange={setStarOnly} />
         <div style={Sx.divider} />
         <input type="search" placeholder="Search task / rooftop"
                value={search} onChange={e=>setSearch(e.target.value)}
@@ -1901,10 +2010,10 @@ function NextStepsView({ accounts, state, onOpen }: {
                           expanded={isAggregatedExpanded}
                           onToggle={() => toggleGroupExpanded(groupName)}
                         />
-                        {isAggregatedExpanded && rows.map(r => <TaskRowItem key={`${r.account.key}::${r.task.id}`} row={r} onOpen={onOpen} />)}
+                        {isAggregatedExpanded && rows.map(r => <TaskRowItem key={`${r.account.key}::${r.task.id}`} row={r} onOpen={onOpen} onToggleStar={onToggleStar} />)}
                       </Fragment>
                     ) : (
-                      rows.map(r => <TaskRowItem key={`${r.account.key}::${r.task.id}`} row={r} onOpen={onOpen} />)
+                      rows.map(r => <TaskRowItem key={`${r.account.key}::${r.task.id}`} row={r} onOpen={onOpen} onToggleStar={onToggleStar} />)
                     )
                   )}
                 </Fragment>
@@ -2017,15 +2126,16 @@ function StatusPill({ status }: { status: TaskStatus }) {
   );
 }
 
-function TaskRowItem({ row, onOpen }: { row: TaskRow; onOpen:(k:string)=>void }) {
-  const { task, account, isOverdue } = row;
+function TaskRowItem({ row, onOpen, onToggleStar }: { row: TaskRow; onOpen:(k:string)=>void; onToggleStar:(k:string,v:boolean)=>void }) {
+  const { task, account, isOverdue, starred } = row;
   const ownerLabel = task.taskDri ? (displayNameFromEmail(task.taskDri) || task.taskDri) : null;
+  const baseBg = starred ? "#fffdf5" : "transparent";
   return (
     <tr
       onClick={()=>onOpen(account.key)}
-      style={{ cursor: "pointer", borderBottom: "1px solid #f3f4f6" }}
+      style={{ cursor: "pointer", borderBottom: "1px solid #f3f4f6", background: baseBg, boxShadow: starred ? "inset 3px 0 0 #f59e0b" : undefined }}
       onMouseEnter={e => (e.currentTarget.style.background = "#fafafa")}
-      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+      onMouseLeave={e => (e.currentTarget.style.background = baseBg)}
     >
       <Td><StatusPill status={task.status} /></Td>
       <Td>
@@ -2047,8 +2157,16 @@ function TaskRowItem({ row, onOpen }: { row: TaskRow; onOpen:(k:string)=>void })
           : <span style={{ color: "#9ca3af" }}>—</span>}
       </Td>
       <Td>
-        <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }} title={account.rooftopName}>
-          {account.rooftopName}
+        <span style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+          <button
+            type="button"
+            onClick={e => { e.stopPropagation(); onToggleStar(account.key, !starred); }}
+            title={starred ? "Starred — click to unstar" : "Star this rooftop to focus on it"}
+            style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, fontSize: 14, lineHeight: 1, color: starred ? "#f59e0b" : "#d1d5db", flexShrink: 0 }}
+          >{starred ? "★" : "☆"}</button>
+          <span style={{ color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={account.rooftopName}>
+            {account.rooftopName}
+          </span>
         </span>
       </Td>
       <Td>{AGENT_LABELS[account.agentType]}</Td>
@@ -2494,7 +2612,7 @@ function EmailReportView({ accounts, state, overall }: {
 
       {/* ─── Section 2: Per-CSM RAG summary (RAG buckets as columns) ──── */}
       <div style={{ marginTop: 24 }}>
-        <ReportSectionTitle index={2}>CSMs · path to green</ReportSectionTitle>
+        <ReportSectionTitle index={2}>CSMs - % Green</ReportSectionTitle>
       </div>
 
       <table style={{ ...Sx.reportTable, width: "auto", margin: "0 auto" }}>
@@ -2504,6 +2622,7 @@ function EmailReportView({ accounts, state, overall }: {
           <col style={{ width: 80 }} />   {/* Red */}
           <col style={{ width: 80 }} />   {/* Amber */}
           <col style={{ width: 80 }} />   {/* Green */}
+          <col style={{ width: 72 }} />   {/* % Green */}
         </colgroup>
         <thead>
           <tr>
@@ -2512,12 +2631,16 @@ function EmailReportView({ accounts, state, overall }: {
             <Th2 right style={{ background: RAG_COLORS.red.bg,   color: RAG_COLORS.red.fg }}>Red</Th2>
             <Th2 right style={{ background: RAG_COLORS.amber.bg, color: RAG_COLORS.amber.fg }}>Amber</Th2>
             <Th2 right style={{ background: RAG_COLORS.green.bg, color: RAG_COLORS.green.fg }}>Green</Th2>
+            <Th2 right style={{ background: RAG_COLORS.green.bg, color: RAG_COLORS.green.fg }}>% Green</Th2>
           </tr>
         </thead>
         <tbody>
           {section2.length === 0 ? (
-            <tr><td colSpan={5} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No CSMs with open tasks on live accounts.</td></tr>
+            <tr><td colSpan={6} style={{ padding: "10px 8px", color: "#9ca3af", fontSize: 11, textAlign: "center" }}>No CSMs with open tasks on live accounts.</td></tr>
           ) : section2.map(({ csmLabel, csmKey, red, amber, green }) => {
+            const totalCount = red.count + amber.count + green.count;
+            const totalArr   = red.arr   + amber.arr   + green.arr;
+            const pct = (n: number, d: number) => d > 0 ? `${Math.round((n / d) * 100)}%` : "—";
             const ownerCellStyle: CSSProperties = {
               padding: "8px 10px",
               fontWeight: 700,
@@ -2538,6 +2661,11 @@ function EmailReportView({ accounts, state, overall }: {
               color: RAG_COLORS[rag].fg, fontSize: 11, fontWeight: 700,
               background: RAG_COLORS[rag].bg, textAlign: "right",
             });
+            const pctStyle: CSSProperties = {
+              padding: "6px 10px", borderTop: "1px solid #f3f4f6", borderLeft: "1px solid #e5e7eb",
+              color: RAG_COLORS.green.fg, fontSize: 11, fontWeight: 800,
+              background: RAG_COLORS.green.bg, textAlign: "right",
+            };
             return (
               <Fragment key={csmKey || "no-csm"}>
                 <tr>
@@ -2546,12 +2674,14 @@ function EmailReportView({ accounts, state, overall }: {
                   <td style={valStyle("red")}>{red.count}</td>
                   <td style={valStyle("amber")}>{amber.count}</td>
                   <td style={valStyle("green")}>{green.count}</td>
+                  <td style={pctStyle}>{pct(green.count, totalCount)}</td>
                 </tr>
                 <tr>
                   <td style={metricStyle}>$ ARR</td>
                   <td style={valStyle("red")}>{fmtMoney(red.arr)}</td>
                   <td style={valStyle("amber")}>{fmtMoney(amber.arr)}</td>
                   <td style={valStyle("green")}>{fmtMoney(green.arr)}</td>
+                  <td style={pctStyle}>{pct(green.arr, totalArr)}</td>
                 </tr>
               </Fragment>
             );
@@ -2675,11 +2805,21 @@ function AccountDrawer({ account, state, stack, stackOptions, onChange, onStackC
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => onChange({ starred: !state.starred })}
+                title={state.starred ? "Starred — click to unstar" : "Star this rooftop to focus on it"}
+                style={{ border: "none", background: "transparent", cursor: "pointer", padding: 0, fontSize: 22, lineHeight: 1, color: state.starred ? "#f59e0b" : "#d1d5db" }}
+              >{state.starred ? "★" : "☆"}</button>
               <RagPill rag={account.rag} />
               <h2 style={{ fontSize: 18, fontWeight: 800, margin: 0, color: "#111827" }}>{account.rooftopName}</h2>
             </div>
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
               {account.enterpriseName} · {AGENT_LABELS[account.agentType]} · {account.ragNote}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              <CopyId label="Enterprise ID" value={account.enterpriseId} />
+              <CopyId label="Team ID" value={account.teamId} />
             </div>
           </div>
           <button onClick={onClose} style={{ border: "none", background: "transparent", fontSize: 22, cursor: "pointer", color: "#6b7280" }}>×</button>
@@ -2865,6 +3005,42 @@ function Th({ children, right }: { children: ReactNode; right?: boolean }) {
 function Td({ children, right }: { children: ReactNode; right?: boolean }) {
   return <td style={{ padding: "10px 12px", textAlign: right ? "right" : "left", borderBottom: "1px solid #f3f4f6", color: "#374151" }}>{children}</td>;
 }
+// Click-to-copy ID chip. Shows "LABEL value" with a copy icon; on click copies
+// the raw value to the clipboard and flashes a "Copied" state for ~1.2s.
+function CopyId({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  const has = Boolean(value && value.trim());
+  const copy = async () => {
+    if (!has) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch { /* clipboard unavailable — no-op */ }
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      disabled={!has}
+      title={has ? `Copy ${label}: ${value}` : `No ${label}`}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "3px 8px", borderRadius: 6,
+        border: "1px solid #e5e7eb", background: copied ? "#dcfce7" : "#f9fafb",
+        fontSize: 11, color: "#374151", cursor: has ? "pointer" : "default",
+        fontFamily: "inherit",
+      }}
+    >
+      <span style={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: "#6b7280" }}>{label}</span>
+      <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", color: has ? "#111827" : "#9ca3af" }}>
+        {has ? value : "—"}
+      </span>
+      {has && <span style={{ color: copied ? "#16a34a" : "#9ca3af", fontWeight: 600 }}>{copied ? "✓ Copied" : "⧉"}</span>}
+    </button>
+  );
+}
+
 function Stat({ label, value, sub }: { label: string; value: ReactNode; sub?: string }) {
   return (
     <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
