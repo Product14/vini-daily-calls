@@ -2395,6 +2395,24 @@ app.get("/api/cron/roi-email", async (req, res) => {
   }
 });
 
+// Rooftop DISCOVERY cron — pull onboarded+active rooftops from ClickHouse and add
+// new ones to roi_live_departments (held: is_live=true, dry_run=true → no email).
+// Scheduled daily in vercel.json. Same CRON_SECRET auth as the send cron.
+app.get("/api/cron/sync-live", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const { syncLive } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const summary = await syncLive();
+    return res.status(200).json({ ok: true, ...summary });
+  } catch (err) {
+    console.error("GET /api/cron/sync-live error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "sync failed" });
+  }
+});
+
 // ── GET /api/metrics — "Overall" agent-performance bundle (live ClickHouse) ──
 // Powers the Overall view on /agents. Runs the 6 day/week/month aggregations
 // against Prod-ClickHouse and returns { bundle, meta }. Returns 503 when the

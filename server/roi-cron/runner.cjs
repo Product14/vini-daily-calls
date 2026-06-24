@@ -476,7 +476,68 @@ async function rerender() {
 }
 
 // Importable surface for the Vercel serverless cron (api/cron/roi-email.js) + tests.
-module.exports = { runOnce, backfill, rerender, renderHtml, sendMail, apiMetrics, apiActionItems, apiCampaigns };
+// ── Rooftop DISCOVERY (sync-live) ────────────────────────────────────────────
+// Pull the onboarded+active Sales/Service rooftops from the ClickHouse candidates
+// endpoint and ADD any new ones to roi_live_departments as is_live=true, dry_run=true
+// — i.e. visible in the tracker and processed by the hourly send, but SUPPRESSED
+// (dry_run) so NO email goes out until a human flips dry_run off. Additive only:
+// ON CONFLICT DO NOTHING preserves every existing human-set is_live/dry_run flag,
+// and we never auto-deactivate a rooftop (that stays a deliberate human action).
+async function syncLive() {
+  const ts = new Date().toISOString();
+  if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
+  const endpoint = process.env.CLICKHOUSE_CANDIDATES_ENDPOINT;
+  const keyId = process.env.CLICKHOUSE_KEY_ID, keySecret = process.env.CLICKHOUSE_KEY_SECRET;
+  if (!endpoint || !keyId || !keySecret) {
+    throw new Error("Missing CLICKHOUSE_CANDIDATES_ENDPOINT / CLICKHOUSE_KEY_ID / CLICKHOUSE_KEY_SECRET (set them as Vercel env vars)");
+  }
+
+  // saved ClickHouse Query API endpoint: POST + Basic auth, returns rows {e,t,d}
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}` },
+    body: JSON.stringify({ queryVariables: {}, format: "JSONEachRow" }),
+  });
+  if (!res.ok) throw new Error(`ClickHouse candidates ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const text = await res.text();
+  let rows;
+  try { const j = JSON.parse(text); rows = Array.isArray(j) ? j : (j.data ?? [j]); }
+  catch { rows = text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
+
+  // normalize → {team_id, enterprise_id, department}; held as is_live=true + dry_run=true
+  const seen = new Set();
+  const cand = [];
+  for (const r of rows) {
+    const team_id = String(r.t ?? r.team_id ?? "").trim();
+    const enterprise_id = String(r.e ?? r.enterprise_id ?? "").trim();
+    const department = String(r.d ?? r.department ?? "").trim().toLowerCase();
+    if (!team_id || (department !== "sales" && department !== "service")) continue;
+    const k = `${team_id}|${department}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    cand.push({ team_id, enterprise_id, department, is_live: true, dry_run: true });
+  }
+
+  // figure out which (team,dept) are genuinely new (for reporting)
+  const { data: existing, error: exErr } = await sb.from("roi_live_departments").select("team_id,department");
+  if (exErr) throw new Error(`read roi_live_departments failed: ${exErr.message}`);
+  const have = new Set((existing ?? []).map((e) => `${e.team_id}|${e.department}`));
+  const fresh = cand.filter((c) => !have.has(`${c.team_id}|${c.department}`));
+
+  // insert — ignoreDuplicates so existing rows (and their human flags) are untouched
+  for (let i = 0; i < cand.length; i += 500) {
+    const { error } = await sb.from("roi_live_departments")
+      .upsert(cand.slice(i, i + 500), { onConflict: "team_id,department", ignoreDuplicates: true });
+    if (error) throw new Error(`upsert roi_live_departments failed: ${error.message}`);
+  }
+
+  const summary = { candidates: cand.length, new_rooftops: fresh.length, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
+  await sb.from("roi_cron_runs").insert({ source: "sync-live", ok: true, summary }).then(() => {}, () => {});
+  console.log(`[sync-live] candidates=${cand.length} new=${fresh.length}`);
+  return { ranAt: ts, ...summary };
+}
+
+module.exports = { runOnce, backfill, rerender, renderHtml, sendMail, syncLive, apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {
