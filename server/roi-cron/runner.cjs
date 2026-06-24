@@ -476,7 +476,7 @@ async function rerender() {
 }
 
 // Importable surface for the Vercel serverless cron (api/cron/roi-email.js) + tests.
-module.exports = { runOnce, backfill, rerender, renderHtml, apiMetrics, apiActionItems, apiCampaigns };
+module.exports = { runOnce, backfill, rerender, renderHtml, sendMail, apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {
