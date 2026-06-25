@@ -2696,6 +2696,33 @@ app.get("/api/cron/roi-email", async (req, res) => {
   }
 });
 
+// ── Manual ROI digest BACKFILL (record-only, NO emails) ─────────────────────
+// On-demand: re-record roi_digest_runs for a past date range (e.g. to fill a gap
+// after an outage). Runs the SAME fetch+render pipeline as the cron but never sends
+// mail — it only upserts rows. Requires the service_role key (set on Vercel) to
+// write roi_digest_runs. Guarded by CRON_SECRET like the cron routes.
+//   GET /api/cron/roi-backfill?start=2026-06-23&end=2026-06-24
+app.get("/api/cron/roi-backfill", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const { start, end } = req.query;
+  const isDate = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+  if (!isDate(start) || !isDate(end)) {
+    return res.status(400).json({ ok: false, error: "start and end are required as YYYY-MM-DD (e.g. ?start=2026-06-23&end=2026-06-24)" });
+  }
+  if (start > end) return res.status(400).json({ ok: false, error: "start must be <= end" });
+  try {
+    const { backfill } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const summary = await backfill(start, end);
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), start, end, summary });
+  } catch (err) {
+    console.error("GET /api/cron/roi-backfill error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "backfill failed" });
+  }
+});
+
 // ── Transactional email poll (Vercel Cron → this route, ~every 15 min) ──────
 // Sends the per-event emails (post-appointment / post-conversation / action-item / overdue)
 // for rooftops that enabled them in roi_rooftop_config. Dedup via roi_event_emails.
