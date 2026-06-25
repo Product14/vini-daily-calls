@@ -69,11 +69,11 @@
         ]
       ],
       "enrich": {
-        "appointments": 5,
+        "appointments": 7,
         "topVehicles": 5,
         "campaigns": 0
       },
-      "bytes": 25331
+      "bytes": 25868
     },
     {
       "id": "QC02-sales-DAILY-highvol",
@@ -147,7 +147,7 @@
         "topVehicles": 5,
         "campaigns": 3
       },
-      "bytes": 24455
+      "bytes": 24446
     },
     {
       "id": "QC03-sales-DAILY-nofallback",
@@ -165,15 +165,15 @@
       "metrics": [
         [
           "HERO · Warm / qualified leads",
-          18
+          19
         ],
         [
           "Total leads worked",
-          1832
+          1819
         ],
         [
           "Calls handled",
-          3
+          2
         ],
         [
           "Qualified leads",
@@ -193,7 +193,7 @@
         ],
         [
           "Outbound unique reached",
-          31
+          32
         ],
         [
           "Outbound connect rate %",
@@ -201,7 +201,7 @@
         ],
         [
           "Warm transfers",
-          3
+          2
         ],
         [
           "After-hours calls",
@@ -209,7 +209,7 @@
         ],
         [
           "Action items (open)",
-          3
+          2
         ],
         [
           "MTD appointments (2026-06-01→)",
@@ -221,7 +221,7 @@
         "topVehicles": 2,
         "campaigns": 3
       },
-      "bytes": 28612
+      "bytes": 28246
     },
     {
       "id": "QC04-service-DAILY-busy",
@@ -287,15 +287,15 @@
         ],
         [
           "MTD appointments (2026-06-01→)",
-          261
+          260
         ]
       ],
       "enrich": {
-        "appointments": 5,
+        "appointments": 19,
         "topVehicles": 0,
         "campaigns": 0
       },
-      "bytes": 22336
+      "bytes": 22882
     },
     {
       "id": "QC05-sales-WEEKLY",
@@ -317,15 +317,15 @@
         ],
         [
           "Total leads worked",
-          801
+          800
         ],
         [
           "Calls handled",
-          30
+          31
         ],
         [
           "Qualified leads",
-          233
+          226
         ],
         [
           "Appointments (inbound+outbound)",
@@ -353,11 +353,11 @@
         ],
         [
           "After-hours calls",
-          515
+          513
         ],
         [
           "Action items (open)",
-          28
+          29
         ],
         [
           "MTD appointments (2026-06-01→)",
@@ -365,11 +365,11 @@
         ]
       ],
       "enrich": {
-        "appointments": 5,
+        "appointments": 33,
         "topVehicles": 5,
         "campaigns": 0
       },
-      "bytes": 26803
+      "bytes": 27325
     },
     {
       "id": "QC06-service-MONTHLY",
@@ -423,7 +423,7 @@
         ],
         [
           "Warm transfers",
-          1047
+          585
         ],
         [
           "After-hours calls",
@@ -439,11 +439,11 @@
         ]
       ],
       "enrich": {
-        "appointments": 5,
+        "appointments": 0,
         "topVehicles": 0,
         "campaigns": 0
       },
-      "bytes": 33190
+      "bytes": 28676
     },
     {
       "id": "QC07-tx-post-conversation",
@@ -476,7 +476,7 @@
         ],
         [
           "MTD calls (value strip)",
-          40
+          28
         ]
       ],
       "bytes": 4398
