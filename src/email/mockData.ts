@@ -116,7 +116,9 @@ export const EMAIL_TYPES = [
   { key: "action_item_overdue_enabled", label: "Action item overdue" },
 ] as const;
 export type EmailTypeKey = (typeof EMAIL_TYPES)[number]["key"];
-export type RooftopConfig = Record<EmailTypeKey, boolean>;
+/** Which DAILY-digest template a rooftop receives: 'v1' = classic (legacy, default), 'v2' = redesign. */
+export type DailyTemplate = "v1" | "v2";
+export type RooftopConfig = Record<EmailTypeKey, boolean> & { daily_template: DailyTemplate };
 
 /** The 4 transactional (per-event) email types — match roi_event_emails.email_type values. */
 export const TRANSACTIONAL_TYPES = [

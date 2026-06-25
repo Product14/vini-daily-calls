@@ -21,15 +21,15 @@
         ],
         [
           "Total leads worked",
-          271
+          272
         ],
         [
           "Calls handled",
-          8
+          7
         ],
         [
           "Qualified leads",
-          44
+          43
         ],
         [
           "Appointments (inbound+outbound)",
@@ -57,11 +57,11 @@
         ],
         [
           "After-hours calls",
-          90
+          92
         ],
         [
           "Action items (open)",
-          8
+          7
         ],
         [
           "MTD appointments (2026-06-01→)",
@@ -73,7 +73,7 @@
         "topVehicles": 5,
         "campaigns": 0
       },
-      "bytes": 25354
+      "bytes": 25331
     },
     {
       "id": "QC02-sales-DAILY-highvol",
@@ -147,7 +147,7 @@
         "topVehicles": 5,
         "campaigns": 3
       },
-      "bytes": 24456
+      "bytes": 24455
     },
     {
       "id": "QC03-sales-DAILY-nofallback",
@@ -291,11 +291,11 @@
         ]
       ],
       "enrich": {
-        "appointments": 0,
+        "appointments": 5,
         "topVehicles": 0,
         "campaigns": 0
       },
-      "bytes": 17824
+      "bytes": 22336
     },
     {
       "id": "QC05-sales-WEEKLY",
@@ -317,15 +317,15 @@
         ],
         [
           "Total leads worked",
-          795
+          801
         ],
         [
           "Calls handled",
-          31
+          30
         ],
         [
           "Qualified leads",
-          231
+          233
         ],
         [
           "Appointments (inbound+outbound)",
@@ -353,11 +353,11 @@
         ],
         [
           "After-hours calls",
-          513
+          515
         ],
         [
           "Action items (open)",
-          29
+          28
         ],
         [
           "MTD appointments (2026-06-01→)",
@@ -369,7 +369,7 @@
         "topVehicles": 5,
         "campaigns": 0
       },
-      "bytes": 26814
+      "bytes": 26803
     },
     {
       "id": "QC06-service-MONTHLY",
@@ -391,15 +391,15 @@
         ],
         [
           "Total leads worked",
-          1409
+          1410
         ],
         [
           "Calls handled",
-          2200
+          2199
         ],
         [
           "Qualified leads",
-          1487
+          1486
         ],
         [
           "Appointments (inbound+outbound)",
@@ -415,11 +415,11 @@
         ],
         [
           "Outbound unique reached",
-          7
+          8
         ],
         [
           "Outbound connect rate %",
-          78
+          80
         ],
         [
           "Warm transfers",
@@ -431,7 +431,7 @@
         ],
         [
           "Action items (open)",
-          1809
+          1808
         ],
         [
           "MTD appointments (2026-06-01→)",
@@ -443,7 +443,7 @@
         "topVehicles": 0,
         "campaigns": 0
       },
-      "bytes": 33150
+      "bytes": 33190
     },
     {
       "id": "QC07-tx-post-conversation",
@@ -451,7 +451,7 @@
       "type": "post_conversation",
       "blurb": "Fires per actionable call/SMS",
       "agents": [
-        "Sales Outbound"
+        "Sales Inbound"
       ],
       "rooftop": "Corn Husker Nissan",
       "team_id": "37329f9976",
@@ -460,7 +460,7 @@
       "metrics": [
         [
           "Direction",
-          "outbound"
+          "inbound"
         ],
         [
           "Appointment scheduled",
@@ -479,7 +479,7 @@
           40
         ]
       ],
-      "bytes": 4377
+      "bytes": 4398
     },
     {
       "id": "QC08-tx-post-appointment",

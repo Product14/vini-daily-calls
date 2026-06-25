@@ -51,7 +51,8 @@ type RunRow = {
 };
 type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null; cs_poc: string | null; digest_send_hour: number | null; digest_send_minute: number | null;
   daily_enabled: boolean | null; weekly_enabled: boolean | null; monthly_enabled: boolean | null;
-  post_appointment_enabled: boolean | null; post_conversation_enabled: boolean | null; action_item_enabled: boolean | null; action_item_overdue_enabled: boolean | null };
+  post_appointment_enabled: boolean | null; post_conversation_enabled: boolean | null; action_item_enabled: boolean | null; action_item_overdue_enabled: boolean | null;
+  daily_template: string | null };
 // Unfurl a corp email local-part into a display name: "ankur.batra@spyne.ai" →
 // "Ankur Batra". Trailing dedup digits ("vishal.singh1") are stripped. Returns
 // "" for blank/non-email input so callers can fall back.
@@ -141,7 +142,7 @@ export async function loadRooftops(): Promise<LoadResult> {
     supabase.from("roi_digest_runs")
       .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at")
       .order("local_date", { ascending: false }).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled"),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
@@ -247,6 +248,7 @@ export async function loadRooftops(): Promise<LoadResult> {
         post_conversation_enabled: cfg?.post_conversation_enabled === true,
         action_item_enabled: cfg?.action_item_enabled === true,
         action_item_overdue_enabled: cfg?.action_item_overdue_enabled === true,
+        daily_template: cfg?.daily_template === "v2" ? "v2" : "v1",   // default classic
       },
     };
   })

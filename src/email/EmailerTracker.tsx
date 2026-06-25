@@ -811,6 +811,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
 function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | null; onClose: () => void; onSaved: () => void }) {
   const [cfg, setCfg] = useState<RooftopConfig | null>(null);
   const [busy, setBusy] = useState<EmailTypeKey | null>(null);
+  const [tplBusy, setTplBusy] = useState(false);
   const [err, setErr] = useState("");
   useEffect(() => { setCfg(rooftop?.config ?? null); setErr(""); }, [rooftop]);
   if (!rooftop || !cfg) return null;
@@ -825,6 +826,20 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     onSaved();
   };
 
+  // Daily-digest template selector — which email this rooftop's DAILY digest sends:
+  // 'v1' = Classic (the legacy production email), 'v2' = New (redesign). Applies to
+  // both the Sales and Service daily digests; weekly/monthly always use the new one.
+  const prev = cfg.daily_template ?? "v1";
+  const setTemplate = async (next: "v1" | "v2") => {
+    if (next === prev || tplBusy) return;
+    setCfg({ ...cfg, daily_template: next }); // optimistic
+    setTplBusy(true); setErr("");
+    const res = await updateRooftopConfig(rooftop.team_id ?? "", { daily_template: next });
+    setTplBusy(false);
+    if (!res.ok) { setCfg({ ...cfg, daily_template: prev }); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
       <div className="h-full w-[380px] overflow-auto bg-surface-card shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -836,6 +851,30 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
           <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary">✕</button>
         </div>
         <div className="px-5 py-4">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Daily digest template</div>
+          <div className="mb-1 inline-flex w-full rounded-lg border border-border-subtle p-0.5">
+            {([
+              { v: "v1", label: "Classic", sub: "Current email" },
+              { v: "v2", label: "New", sub: "Redesign" },
+            ] as const).map(({ v, label, sub }) => {
+              const active = prev === v;
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  disabled={tplBusy}
+                  aria-pressed={active}
+                  onClick={() => void setTemplate(v)}
+                  className={`flex-1 rounded-md px-3 py-1.5 text-center transition-colors ${active ? "bg-brand-primary text-white" : "text-text-primary hover:bg-surface-subtle"} ${tplBusy ? "opacity-60" : ""}`}
+                >
+                  <div className="text-[13px] font-semibold leading-tight">{label}</div>
+                  <div className={`text-[10px] leading-tight ${active ? "text-white/80" : "text-text-muted"}`}>{sub}</div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mb-4 text-[11px] leading-relaxed text-text-muted">Applies to this rooftop's Sales &amp; Service daily digests. Weekly/monthly always use the new template.</div>
+
           <div className="mb-3 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Emails this rooftop receives</div>
           {EMAIL_TYPES.map(({ key, label }) => (
             <label key={key} className="flex items-center justify-between border-b border-border-subtle py-2.5 cursor-pointer">
