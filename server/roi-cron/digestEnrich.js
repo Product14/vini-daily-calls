@@ -5,7 +5,7 @@
 // — the SAME meetings basis behind every appointment count in the report — so the two
 // always agree. ClickHouse is no longer touched here.
 //
-//   GET {apiBase}/api/meetings?scope=upcoming&team_id&enterprise_id&serviceType
+//   GET {apiBase}/api/meetings?scope=window&team_id&enterprise_id&serviceType&start&end
 //   GET {apiBase}/api/meetings?scope=top-vehicles&team_id&enterprise_id&serviceType
 //
 // Best-effort: any failure (network, auth, empty) degrades to empty arrays and the
@@ -37,12 +37,15 @@ async function fetchJson(url) {
 
 /**
  * @param {string} teamId  dealer_leads team id
- * @param {{dollarRate?:number, dept?:string, enterpriseId?:string, apiBase?:string, token?:string}} opts
+ * @param {{dollarRate?:number, dept?:string, enterpriseId?:string, apiBase?:string, token?:string, start?:string, end?:string}} opts
  *   dollarRate  — $/appointment for the per-row Est. value (config, not data)
  *   dept        — "sales" | "service" → serviceType filter (omit/both => rooftop-wide)
  *   enterpriseId— scopes the meetings call to the right enterprise (REQUIRED for cross-enterprise runs)
  *   apiBase     — Reporting service base URL (defaults to REPORTING_API_BASE)
  *   token       — Spyne API token forwarded as auth_key; else the service uses its own SPYNE_API_TOKEN
+ *   start,end   — the REPORT window (yyyy-mm-dd, end exclusive). When given, appointments are the ones
+ *                 BOOKED in that window (scope=window) so the list tracks the report's date and reconciles
+ *                 with its appointment count. Omitted → scope=upcoming (appointments upcoming as of now).
  * @returns {Promise<{appointments:Array,topVehicles:Array}>}
  */
 export async function enrichRooftop(teamId, opts = {}) {
@@ -55,15 +58,23 @@ export async function enrichRooftop(teamId, opts = {}) {
   if (opts.token) params.set("auth_key", String(opts.token));
   const qs = params.toString();
 
+  // Appointments BOOKED in the report window (scope=window) so the list tracks the report's date and
+  // its count reconciles with the headline; falls back to now-relative upcoming when no window is given.
+  const apptUrl = opts.start && opts.end
+    ? `${base}/api/meetings?scope=window&start=${encodeURIComponent(opts.start)}&end=${encodeURIComponent(opts.end)}&${qs}`
+    : `${base}/api/meetings?scope=upcoming&${qs}`;
+
   // Fetch both in parallel; a failure in one must not drop the other.
   const [apptsRes, vehRes] = await Promise.allSettled([
-    fetchJson(`${base}/api/meetings?scope=upcoming&${qs}`),
+    fetchJson(apptUrl),
     fetchJson(`${base}/api/meetings?scope=top-vehicles&${qs}`),
   ]);
 
   let appointments = [];
   if (apptsRes.status === "fulfilled") {
-    appointments = (apptsRes.value?.meetings || []).slice(0, 5).map((m) => ({
+    // No cap here — the template displays the first 6 and uses the full length for its "view all (N)"
+    // total, so every booked customer is represented in the count.
+    appointments = (apptsRes.value?.meetings || []).map((m) => ({
       sched: fmtSched(m.when, m.tz || opts.tz),
       customer: (m.customer || "").trim() || "Customer",
       phone: m.phone || "",

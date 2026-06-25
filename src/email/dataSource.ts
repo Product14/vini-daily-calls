@@ -173,9 +173,15 @@ export async function loadRooftops(): Promise<LoadResult> {
     arr.push(r); runsByTeam.set(r.team_id, arr);
   }
 
-  // anchor "today" = latest daily run date, else real today
+  // anchor "today" (the right-most / "live" column) = the most recent of {latest daily run, real
+  // yesterday UTC}. Anchoring to the latest run ALONE froze the calendar whenever the cron fell
+  // behind (a 3-day-old run made the UI look like that day was "today"). Daily digests carry
+  // yesterday's local_date, so real-yesterday keeps the live column populated while still advancing
+  // every day; a fresher same-day run (local_date === today) still wins via the max.
+  const isoYesterday = (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); })();
   const dailyDates = runs.filter(r => r.cadence === "daily").map(r => r.local_date).sort();
-  const today = dailyDates.length ? dailyDates[dailyDates.length - 1] : new Date().toISOString().slice(0, 10);
+  const latestRun = dailyDates.length ? dailyDates[dailyDates.length - 1] : "";
+  const today = latestRun > isoYesterday ? latestRun : isoYesterday;
 
   // anchor recomputed above; build cells for ONE department's runs
   function buildCells(deptRuns: RunRow[], cadence: Cadence): SendCell[] {

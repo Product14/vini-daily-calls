@@ -467,6 +467,7 @@ async function runOnce() {
         const { enrichRooftop } = await import("./digestEnrich.js");
         enr = await enrichRooftop(L.team_id, {
           dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz,
+          start: w.apiStart, end: w.apiEnd,
           apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined,
         });
       } catch (e) { console.warn("[roi-cron] enrich skipped:", String(e).slice(0, 120)); }
@@ -729,7 +730,7 @@ async function generateAndSendNow(opts) {
       const camps = await getCampaigns(L.team_id, L.department, w);
       const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
       let enr = { appointments: [], topVehicles: [] };
-      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
+      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
       const dry = forceDry || DRY_RUN || L.dry_run === true;
@@ -787,7 +788,7 @@ async function previewDigestNow(opts) {
   const camps = await getCampaigns(teamId, department, w);
   const dollarRate = Number(department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
   let enr = { appointments: [], topVehicles: [] };
-  try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(teamId, { dollarRate, dept: department, enterpriseId, tz, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
+  try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(teamId, { dollarRate, dept: department, enterpriseId, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
   const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
   const html = renderDigest(tpl, name, department, w.dateLabel, enterpriseId, teamId, w.localDate, tz, metricsFull, camps, cadence);
   return { ok: true, cadence, teamId, department, name, subject, dateLabel: w.dateLabel, hasData: g.ok, reason: g.ok ? null : g.reason, metrics: metricsFull, html };
@@ -842,7 +843,7 @@ async function runCadence(cadence) {
       const camps = await getCampaigns(L.team_id, L.department, w);
       const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
       let enr = { appointments: [], topVehicles: [] };
-      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
+      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
       const dry = DRY_RUN || L.dry_run === true;

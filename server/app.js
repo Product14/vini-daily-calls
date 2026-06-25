@@ -2327,16 +2327,25 @@ app.post("/api/email/roi-event-preview", async (req, res) => {
   try {
     const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
-    // Primary source: production ClickHouse (the reporting API never exposed conversations/
-    // action-items). Fall back to the reporting-API path only when CH isn't configured.
+    // SINGLE SOURCE OF TRUTH: prefer the reporting-vini API path — it's the exact data eventRunner
+    // SENDS, and the /api/conversations + /api/action-items endpoints now carry customer + AI-quality
+    // (enriched Jun 2026), so the preview matches the real email. The direct-ClickHouse preview
+    // (eventPreviewCH) is now only a fallback for events the API can't serve yet (e.g. SMS-only
+    // conversations — /api/conversations is endcallreports/call-only). This keeps the preview honest
+    // (it shows what actually goes out) instead of a richer second source that drifts from the send.
     let html = "";
-    const { hasClickhouseCreds } = await import("./agentMetrics.js");
-    if (hasClickhouseCreds()) {
-      const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
-      html = await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz });
-    } else {
+    try {
       const { previewEvent } = require("./roi-cron/eventRunner.cjs");
       html = await previewEvent({ teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz });
+    } catch (e) {
+      console.warn("[roi-event-preview] API path failed, falling back to ClickHouse:", String(e?.message || e).slice(0, 140));
+    }
+    if (!html) {
+      const { hasClickhouseCreds } = await import("./agentMetrics.js");
+      if (hasClickhouseCreds()) {
+        const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
+        html = await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz });
+      }
     }
     return res.json({ ok: true, empty: !html, html: html || "" });
   } catch (err) {
