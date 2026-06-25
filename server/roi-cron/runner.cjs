@@ -372,8 +372,8 @@ async function runOnce() {
   // silently return an all-zero summary because the Supabase error was swallowed. Surface it.
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template"),
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
@@ -383,6 +383,9 @@ async function runOnce() {
   const live = liveRes.data, cfg = cfgRes.data, rec = recRes.data;
   if (!live || live.length === 0) console.warn("[roi-cron] WARNING: roi_live_departments.is_live=true returned 0 rows — nothing to process (check data / env).");
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
+  // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — attach it to each
+  // live row so downstream (stored row, console links, enrichment) keeps working.
+  for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || "";
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0 };
@@ -517,11 +520,12 @@ function dateRange(start, end) {
 async function backfill(start, end) {
   console.log(`\n── BACKFILL ${start}…${end} (record-only, NO emails) ──`);
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,daily_enabled,daily_template"),
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
+  for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const days = dateRange(start, end);
@@ -556,7 +560,12 @@ async function backfill(start, end) {
           const upd = ex.message_id ? { metrics, subject } : { metrics, rendered_html: html, subject };
           await sb.from("roi_digest_runs").update(upd).eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", day); out.preserved++; continue;
         }
-        const up = (extra) => sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
+        // FAIL LOUD: surface a denied/failed write (e.g. a publishable key that can't write
+        // roi_digest_runs) instead of silently counting a row that never persisted.
+        const up = async (extra) => {
+          const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
+          if (error) throw new Error(`roi_digest_runs write failed (service_role key required?): ${error.message}`);
+        };
         if (!emails.length) { await up({ status: "not_sent", reason: "recipients_missing", metrics, subject }); out.not_sent++; }
         else if (!g.ok) { await up({ status: "not_sent", reason: g.reason, metrics, subject }); out.not_sent++; }
         else {
@@ -678,12 +687,13 @@ async function generateAndSendNow(opts) {
   const forceDry = opts.dryRun === true;
 
   const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,digest_send_hour,daily_template"),
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
 
@@ -754,13 +764,13 @@ async function previewDigestNow(opts) {
   if (!teamId) throw new Error("teamId is required");
 
   const [liveRes, cfgRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department").eq("team_id", teamId).eq("department", department).maybeSingle(),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,daily_template").eq("team_id", teamId).maybeSingle(),
+    sb.from("roi_live_departments").select("team_id,department").eq("team_id", teamId).eq("department", department).maybeSingle(),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_template").eq("team_id", teamId).maybeSingle(),
   ]);
   const cfg = cfgRes.data || {};
   const tz = cfg.timezone || "America/New_York";
   const name = cfg.rooftop_name || teamId;
-  const enterpriseId = liveRes.data?.enterprise_id || "";
+  const enterpriseId = cfg.enterprise_id || ""; // enterprise_id is on roi_rooftop_config, not roi_live_departments
   const w = onDemandWindow(tz, cadence);
   const Dep = department === "service" ? "Service" : "Sales";
   const Cad = cadence === "weekly" ? "Weekly" : cadence === "monthly" ? "Monthly" : "Daily";
@@ -788,12 +798,13 @@ async function runCadence(cadence) {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,${enabledCol}`),
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,${enabledCol}`),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const IGNORE_HOUR = process.env.IGNORE_SEND_HOUR === "true";
