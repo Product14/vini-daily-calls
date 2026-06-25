@@ -9,9 +9,15 @@
 // When the env vars are absent the endpoint returns 503 and the frontend falls
 // back to the bundled snapshot (public/agent-overall-snapshot.json).
 import { createRequire } from "node:module";
+import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 
 const require = createRequire(import.meta.url);
-const QUERIES = require("./agentMetricsQueries.json");
+// Inbound callbacks driven by an outbound touch are re-attributed to the
+// Outbound agent so the Overall view reconciles with the Rooftop view.
+const QUERIES_RAW = require("./agentMetricsQueries.json");
+const QUERIES = Object.fromEntries(
+  Object.entries(QUERIES_RAW).map(([k, sql]) => [k, applyCallbackOutboundAttribution(sql, k)])
+);
 
 export function hasClickhouseCreds() {
   return Boolean(process.env.CLICKHOUSE_HOST && process.env.CLICKHOUSE_PASSWORD);

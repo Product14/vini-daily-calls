@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   NOT_SENT_REASON_LABEL,
   type DeptKind,
@@ -10,7 +10,7 @@ import {
 } from "./mockData";
 import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
-import { sendDigestNow, addRecipientNow, toggleRecipientNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
+import { sendDigestNow, generateAndSendNow, generatePreviewNow, addRecipientNow, toggleRecipientNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
 
 /**
  * Cell-action drawer.
@@ -54,6 +54,10 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
   const [view, setView] = useState<"desktop" | "email">("email");
+  // Generated weekly/monthly preview HTML (render-only) shown in the left pane before a manual send.
+  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  // Clear any generated preview when the drawer's target cell changes.
+  useEffect(() => { setPreviewHtml(null); }, [rooftop?.rooftop_id, cell?.date, cell?.cadence]);
 
   useEffect(() => {
     if (open) {
@@ -85,6 +89,10 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
   const reason = cell.reason ?? "scheduler_skipped";
   const isSent = status === "sent";
   const isSuppressed = status === "suppressed";
+  // Weekly/monthly digests are generated on demand (rolling window) → preview-then-send flow.
+  const isPeriodic = cell.cadence !== "daily";
+  // Department for the generate/send call: the cell's run dept, else the rooftop's first department.
+  const effDept = (dept ?? rooftop.departments?.[0]?.kind) as DeptKind | undefined;
 
   const statusLabel = isSent ? "Sent" : isSuppressed ? "Suppressed" : NOT_SENT_REASON_LABEL[reason];
   const statusChip = isSent
@@ -160,9 +168,11 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                 ? primary?.renderedHtml
                   ? "Email sent · exact HTML"
                   : "Email sent · exact HTML not stored"
-                : "Daily digest · default template preview"}
+                : previewHtml
+                ? `${cell.cadence} digest · generated preview`
+                : `${cell.cadence} digest · default template preview`}
             </div>
-            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={primary?.renderedHtml} isSent={isSent} view={view} />
+            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={previewHtml ?? primary?.renderedHtml} isSent={isSent} view={view} />
           </div>
 
           <aside className="space-y-4">
@@ -191,6 +201,18 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                   <SentToList recipients={primary?.recipients} />
                 </Section>
               </>
+            ) : (isPeriodic || status === "not_subscribed") ? (
+              <Section eyebrow="Generate" title={`Generate & send ${cell.cadence}`}>
+                <PeriodicGenerateSection
+                  rooftop={rooftop}
+                  dept={effDept}
+                  cadence={cell.cadence}
+                  recipients={primary?.recipients}
+                  onPreview={setPreviewHtml}
+                  onSent={() => onReload?.()}
+                  onIgnore={onClose}
+                />
+              </Section>
             ) : isSuppressed ? (
               <>
                 <Section eyebrow="Suppressed" title="Why it was held back">
@@ -212,6 +234,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
                     metrics={metrics}
                     dept={dept}
                     reportDate={cell.date}
+                    cadence={cell.cadence}
                     onSent={() => {
                       onReload?.();
                     }}
@@ -959,7 +982,7 @@ function SentToList({
   recipients,
   pending,
 }: {
-  recipients?: { email: string; name?: string; received?: boolean; bounced?: boolean }[];
+  recipients?: { email: string; name?: string; received?: boolean; bounced?: boolean; opened?: boolean }[];
   pending?: boolean; // true for suppressed (not sent yet) → "Will send"
 }) {
   const list = recipients ?? [];
@@ -975,10 +998,10 @@ function SentToList({
           <span className="min-w-0 truncate text-[12px] text-text-primary">{r.email}</span>
           <span
             className={`shrink-0 text-[11px] font-semibold ${
-              r.bounced ? "text-negative" : r.received ? "text-positive" : pending ? "text-info" : "text-text-muted"
+              r.bounced ? "text-negative" : r.opened ? "text-positive" : r.received ? "text-positive" : pending ? "text-info" : "text-text-muted"
             }`}
           >
-            {r.bounced ? "Bounced" : r.received ? "Received" : pending ? "Will send" : "Sent"}
+            {r.bounced ? "Bounced" : r.opened ? "Opened ✓" : r.received ? "Received" : pending ? "Will send" : "Sent"}
           </span>
         </li>
       ))}
@@ -1057,6 +1080,125 @@ function DryRunSection({ rooftop, onDone }: { rooftop: RooftopRow; onDone: () =>
 }
 
 /* ============================================================
+   Periodic (weekly/monthly) generate → preview → manually send.
+   Two explicit steps: ① render the digest (rolling window) and show it in the
+   left pane WITHOUT sending; ② send the real email on a deliberate click.
+   ============================================================ */
+function PeriodicGenerateSection({
+  rooftop,
+  dept,
+  cadence,
+  recipients,
+  onPreview,
+  onSent,
+  onIgnore,
+}: {
+  rooftop: RooftopRow;
+  dept?: DeptKind;
+  cadence: SendCell["cadence"];
+  recipients?: { email: string }[];
+  onPreview: (html: string | null) => void;
+  onSent: () => void;
+  onIgnore?: () => void;
+}) {
+  const [pState, setPState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [pMsg, setPMsg] = useState("");
+  const [sState, setSState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [sMsg, setSMsg] = useState("");
+  const [previewed, setPreviewed] = useState(false);
+  const inFlight = useRef(false);
+  const autoDone = useRef(false);
+  const windowLabel = cadence === "weekly" ? "last 7 days" : cadence === "monthly" ? "last 30 days" : "yesterday";
+  const emails = (recipients ?? []).map((r) => r.email).filter(Boolean);
+
+  // ① Generate preview — render only, show on the left, no email.
+  const preview = useCallback(async () => {
+    setPState("running"); setPMsg("");
+    const r = await generatePreviewNow({ cadence, teamId: rooftop.team_id, dept });
+    if (r.ok && r.preview) {
+      onPreview(r.preview.html);
+      setPreviewed(true);
+      setPState("done");
+      setPMsg(r.preview.hasData
+        ? `Preview ready · ${r.preview.dateLabel}`
+        : `Preview ready, but no ${cadence} activity (${r.preview.reason ?? "no data"}) — a send would be skipped.`);
+    } else {
+      setPState("error"); setPMsg(r.error ?? "Preview failed");
+    }
+    setTimeout(() => setPState((s) => (s === "error" ? s : "idle")), 4000);
+  }, [cadence, rooftop.team_id, dept, onPreview]);
+
+  // Auto-generate the preview as soon as the drawer opens on this cell — clicking the
+  // empty cell should immediately show the rendered email, then the user decides.
+  useEffect(() => { if (!autoDone.current) { autoDone.current = true; void preview(); } }, [preview]);
+
+  // ② Send — deliberate, confirmed, real email (honours the rooftop's dry-run flag).
+  const send = async () => {
+    if (inFlight.current) return;
+    if (!emails.length) { setSState("error"); setSMsg("No recipients configured for this department."); return; }
+    const ok = window.confirm(
+      `Send the ${cadence} digest now?\n\nReal email to ${emails.length} recipient(s) via mail.spyne.ai. Honours the rooftop's dry-run flag (held if dry-run is on).`,
+    );
+    if (!ok) return;
+    inFlight.current = true; setSState("sending"); setSMsg("");
+    const r = await generateAndSendNow({ cadence, teamId: rooftop.team_id, dept });
+    if (r.ok) {
+      const s = r.summary;
+      setSState("sent");
+      setSMsg(s
+        ? (s.sent > 0 ? `Sent ✓ → ${emails.join(", ")}`
+          : s.suppressed > 0 ? "Held — rooftop is dry-run (no email sent)."
+          : s.no_data > 0 ? "No data for this window — nothing sent."
+          : s.no_recipients > 0 ? "No recipients — nothing sent."
+          : "Done — nothing sent.")
+        : `Sent ✓ → ${emails.join(", ")}`);
+      setTimeout(onSent, 1200);
+    } else {
+      setSState("error"); setSMsg(r.error ?? "Send failed");
+    }
+    inFlight.current = false;
+  };
+
+  const btnBase = "w-full rounded-md px-3 py-2 text-[12px] font-semibold disabled:opacity-60";
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <button
+          type="button"
+          onClick={preview}
+          disabled={pState === "running"}
+          className={`${btnBase} ${pState === "error" ? "bg-negative-soft text-negative" : pState === "done" ? "bg-positive/10 text-positive" : "border border-border-subtle bg-surface-card text-text-primary hover:bg-surface-subtle"}`}
+        >
+          {pState === "running" ? "Generating preview…" : pState === "done" ? "✓ Preview updated — regenerate" : pState === "error" ? "Retry preview" : `① Generate ${cadence} preview`}
+        </button>
+        <p className="text-[10px] text-text-muted">{pMsg || `Builds the ${cadence} digest (${windowLabel}) and shows it on the left. No email is sent.`}</p>
+      </div>
+      <div className="space-y-1.5">
+        <button
+          type="button"
+          onClick={send}
+          disabled={sState === "sending" || !emails.length}
+          title={!emails.length ? "No recipients configured for this department." : !previewed ? "Tip: generate the preview first." : undefined}
+          className={`${btnBase} ${sState === "sent" ? "bg-positive/10 text-positive" : sState === "error" ? "bg-negative-soft text-negative" : "bg-brand-primary text-white hover:bg-brand-primary-hover"}`}
+        >
+          {sState === "sending" ? `Sending ${cadence}…` : sState === "sent" ? "✓ Sent — resend" : sState === "error" ? "Retry send" : `② Send to customer`}
+        </button>
+        <p className="text-[10px] text-text-muted">{sMsg || `Emails the ${cadence} digest to ${emails.join(", ") || "the recipients"} via mail.spyne.ai. Honours dry-run.`}</p>
+      </div>
+      {onIgnore ? (
+        <button
+          type="button"
+          onClick={onIgnore}
+          className={`${btnBase} border border-border-subtle bg-surface-card text-text-secondary hover:bg-surface-subtle`}
+        >
+          Ignore — don’t send
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/* ============================================================
    Send-now LIVE — REALLY sends, on click, via the local send server
    (email-render/server.cjs), which renders the actual component and POSTs to
    mail.spyne.ai with the server-held token. Click = send. No confirm.
@@ -1067,6 +1209,7 @@ function SendNowLiveSection({
   metrics,
   dept,
   reportDate,
+  cadence = "daily",
   onSent,
 }: {
   rooftop: RooftopRow;
@@ -1074,6 +1217,7 @@ function SendNowLiveSection({
   metrics?: DigestMetrics;
   dept?: DeptKind;
   reportDate?: string;
+  cadence?: SendCell["cadence"];
   onSent: () => void;
 }) {
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
@@ -1081,26 +1225,39 @@ function SendNowLiveSection({
   const inFlight = useRef(false); // guarantees ONE send per click (no double-fire)
   const emails = (recipients ?? []).map((r) => r.email).filter(Boolean);
 
-  const noData = !hasSendableData(metrics);
+  // Weekly/monthly are generated server-side in real time (rolling 7/30-day window),
+  // since the cell's stored metrics aren't that cadence's aggregate. Daily uses the
+  // fast path that renders the stored metrics client-side and sends them.
+  const isPeriodic = cadence === "weekly" || cadence === "monthly";
+  const windowLabel = cadence === "weekly" ? "last 7 days" : cadence === "monthly" ? "last 30 days" : "yesterday";
+  const noData = !isPeriodic && !hasSendableData(metrics); // server re-fetches for periodic, so don't block locally
+
   const click = async () => {
     if (inFlight.current) return; // already sending — ignore extra clicks
     if (!emails.length) { setState("error"); setMsg("No recipients configured for this department."); return; }
     if (noData) { setState("error"); setMsg("No data for this day — nothing to send."); return; }
     inFlight.current = true;
     setState("sending"); setMsg("");
-    const r = await sendDigestNow({
-      teamId: rooftop.team_id,
-      enterpriseId: rooftop.enterprise_id,
-      dept,
-      rooftopName: rooftop.name,
-      timezone: rooftop.timezone,
-      localDate: reportDate || "",
-      metrics,
-      recipients: emails,
-    });
+    const r = isPeriodic
+      ? await generateAndSendNow({ cadence, teamId: rooftop.team_id, dept })
+      : await sendDigestNow({
+          teamId: rooftop.team_id,
+          enterpriseId: rooftop.enterprise_id,
+          dept,
+          rooftopName: rooftop.name,
+          timezone: rooftop.timezone,
+          localDate: reportDate || "",
+          metrics,
+          recipients: emails,
+        });
     if (r.ok) {
       setState("sent");
-      setMsg(r.error ? r.error : `Sent ✓ → ${emails.join(", ")}`);
+      if (isPeriodic) {
+        const s = (r as { summary?: { sent: number; suppressed: number; no_data: number; errors: number } }).summary;
+        setMsg(s ? (s.sent > 0 ? `Sent ✓ → ${emails.join(", ")}` : s.suppressed > 0 ? "Held — rooftop is dry-run (no email sent)." : s.no_data > 0 ? "No data for this window — nothing sent." : "Done — nothing sent.") : `Sent ✓ → ${emails.join(", ")}`);
+      } else {
+        setMsg(r.error ? r.error : `Sent ✓ → ${emails.join(", ")}`);
+      }
       setTimeout(onSent, 1200);
     } else {
       setState("error");
@@ -1108,6 +1265,10 @@ function SendNowLiveSection({
     }
     inFlight.current = false; // release — a later deliberate click may resend
   };
+
+  const label = isPeriodic
+    ? (state === "sending" ? `Generating ${cadence}…` : state === "sent" ? "✓ Sent — regenerate" : state === "error" ? "Retry" : `✦ Generate & send ${cadence}`)
+    : (noData ? "No data — can’t send" : state === "sending" ? "Sending…" : state === "sent" ? "✓ Sent — resend" : state === "error" ? "Retry send" : "Send now (real email)");
 
   return (
     <div className="space-y-2">
@@ -1123,13 +1284,17 @@ function SendNowLiveSection({
             ? "bg-positive/10 text-positive"
             : state === "error"
             ? "bg-negative-soft text-negative"
+            : isPeriodic
+            ? "bg-brand-primary text-white hover:bg-brand-primary-hover disabled:opacity-60"
             : "bg-negative text-white hover:opacity-90 disabled:opacity-60"
         }`}
       >
-        {noData ? "No data — can’t send" : state === "sending" ? "Sending…" : state === "sent" ? "✓ Sent — resend" : state === "error" ? "Retry send" : "Send now (real email)"}
+        {label}
       </button>
       <p className="text-[10px] text-text-muted">
-        {msg || `Clicking sends a real email to ${emails.join(", ") || "the recipients"} via mail.spyne.ai (renders the actual digest).`}
+        {msg || (isPeriodic
+          ? `Builds the ${cadence} digest in real time (${windowLabel}) and emails it to ${emails.join(", ") || "the recipients"} via mail.spyne.ai. Honours the rooftop's dry-run flag.`
+          : `Clicking sends a real email to ${emails.join(", ") || "the recipients"} via mail.spyne.ai (renders the actual digest).`)}
       </p>
     </div>
   );

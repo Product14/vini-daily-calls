@@ -18,6 +18,10 @@
  *   node runner.cjs --loop     # run now, then every hour
  */
 const { createClient } = require("@supabase/supabase-js");
+// Single source of truth for the digest HTML — the SAME module the SPA preview
+// (src/email/renderDigest.ts) imports, so the cron-sent bytes never drift from
+// what the tracker shows.
+const { renderDigestHtml } = require("../../src/email/digestTemplate.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -85,15 +89,45 @@ const apiPickDept = (byName, dept) => {
 async function apiMetrics(teamId, dept, start, end) {
   const { ib, ob } = apiPickDept(await apiReport(teamId, start, end), dept);
   const n = (v) => Number(v) || 0;
-  const im = ib.metrics || {}, om = ob.metrics || {}, ics = ib.channelSplit || {}, ocs = ob.channelSplit || {}, ir = ib.report || {};
+  const im = ib.metrics || {}, om = ob.metrics || {}, ics = ib.channelSplit || {}, ocs = ob.channelSplit || {}, ir = ib.report || {}, or = ob.report || {};
+  const sm = ir.summary || {};
   const callIn = n(ics.voice), smsIn = n(ics.sms), callOut = n(ocs.voice), smsOut = n(ocs.sms);
   const obCalls = n(om.calls), obRate = n(om.connectRate), cf = ir.callFlow || {};
+  const calls = n(im.calls), after = n(im.afterHours);
+  // Leads WORKED = inbound + outbound (leadFunnel.contacted is the funnel top; falls back to the
+  // report's leadsAttempted). On an outbound-heavy rooftop the inbound count is tiny, so the hero's
+  // no-appointment fallback must include outbound or it collapses to ~0 (e.g. Corn Husker: 2 inbound
+  // vs 1,830 outbound leads). "Warm" = qualified across both funnels.
+  const ibf = ib.leadFunnel || {}, obf = ob.leadFunnel || {};
+  const ibLeads = n(ibf.contacted) || n(ir.leadsAttempted);
+  const obLeads = n(obf.contacted) || n(or.leadsAttempted);
+  const totalLeadsWorked = ibLeads + obLeads;
+  const warmWorked = n(ibf.qualified) + n(obf.qualified);
   return {
     appointmentsYesterday: n(im.appointments) + n(om.appointments), appointmentsInbound: n(im.appointments),
-    inboundUniqueLeads: n(ir.leadsAttempted),
+    inboundUniqueLeads: ibLeads, totalLeads: totalLeadsWorked,
+    // Legacy inbound-leads value (report.leadsAttempted) — what the classic v1 email + its
+    // guardrail used before the leadFunnel.contacted switch. Kept so a rooftop still on the
+    // 'v1' (classic) daily template renders byte-for-byte the same numbers it does in prod.
+    inboundUniqueLeadsLegacy: n(ir.leadsAttempted),
+    // warm leads kept moving even when nothing booked (drives the no-appointment hero) — both funnels
+    warmLeads: warmWorked || totalLeadsWorked,
     conversationsCall: callIn + callOut, conversationsSms: smsIn + smsOut, conversationsChat: 0, conversationsHandled: callIn + callOut + smsIn + smsOut,
     conversationsCallIn: callIn, conversationsSmsIn: smsIn, conversationsChatIn: 0,
     conversationsCallOut: callOut, conversationsSmsOut: smsOut, conversationsChatOut: 0,
+    // ── redesign fields (Conversational AI 2.0) ──────────────────────────────
+    agentPerson: sm.person || "",
+    callsHandled: calls,                                   // "total calls handled"
+    qualifiedLeads: n(im.qualified), qualifiedPct: n(ir.qualifiedPct),
+    bookingRate: n(ir.abr != null ? ir.abr : sm.bookingRate), // ABR % for the booking-rate tile
+    deltas: ir.deltas || {},                               // ▲▼ vs prior period
+    intent: Array.isArray(ir.intent) ? ir.intent : [],     // query-resolution donut
+    queries: Array.isArray(ir.queries) ? ir.queries : [],  // resolution rate (resolved/total)
+    leadsBySource: Array.isArray(ir.leadsBySource) ? ir.leadsBySource : [], // lead activity
+    leadFunnel: ib.leadFunnel || null,
+    outcomes: Array.isArray(ob.outcomes) ? ob.outcomes : [], // outbound outcomes bars
+    callingDuring: Math.max(0, calls - after), callingAfter: after, // calling hours during/after
+    // ── outbound ──────────────────────────────────────────────────────────────
     outboundUniqueReached: n(om.conversations), outboundTotalCalls: obCalls, outboundConnected: Math.round((obCalls * obRate) / 100),
     outboundConnectRate: obRate, outboundAppointmentsSet: n(om.appointments),
     warmTransfers: n(cf.transferred), transferTotalCalls: n(cf.total), transferCount: n(cf.transferred), transferRate: 0,
@@ -127,10 +161,31 @@ const getActionItems = (teamId, dept, w) => apiActionItems(teamId, dept, w.apiSt
 const getCampaigns = (teamId, dept, w) => apiCampaigns(teamId, dept, w.apiStart, w.apiEnd);
 
 // ── guardrails ──────────────────────────────────────────────────────────────
+// Send whenever there is ANY activity — calls handled, leads, appointments,
+// outbound dials or action items. A low-ABR / zero-appointment day is NOT
+// suppressed: the email still goes out and leads the story with lead activity
+// (warm leads, leads-by-source) instead of appointments. Only a truly empty
+// day (no signal at all) is held back as no_data.
 function guardrail(m) {
-  const signal = m.appointmentsYesterday + m.conversationsHandled + m.inboundUniqueLeads + m.actionItemsTotal;
+  const signal =
+    (m.appointmentsYesterday || 0) +
+    (m.conversationsHandled || 0) +
+    (m.callsHandled || 0) +
+    (m.inboundUniqueLeads || 0) +
+    (m.outboundTotalCalls || 0) +
+    (m.actionItemsTotal || 0);
   if (signal === 0) return { ok: false, reason: "no_data" };
-  if (m.appointmentsYesterday === 0 && m.actionItemsTotal === 0 && m.inboundUniqueLeads === 0) return { ok: false, reason: "not_actionable" };
+  return { ok: true };
+}
+
+// Classic (v1) guardrail — the ORIGINAL production send rule: holds back both empty
+// days (no_data) AND "not_actionable" days (no appts, no leads, no action items).
+// A rooftop on the 'v1' daily template uses THIS so its send-cadence is unchanged.
+// Reads inboundUniqueLeads (callers pass the legacy-shimmed metrics for v1).
+function guardrailV1(m) {
+  const signal = (m.appointmentsYesterday || 0) + (m.conversationsHandled || 0) + (m.inboundUniqueLeads || 0) + (m.actionItemsTotal || 0);
+  if (signal === 0) return { ok: false, reason: "no_data" };
+  if ((m.appointmentsYesterday || 0) === 0 && (m.actionItemsTotal || 0) === 0 && (m.inboundUniqueLeads || 0) === 0) return { ok: false, reason: "not_actionable" };
   return { ok: true };
 }
 
@@ -161,10 +216,47 @@ const INTENT_LABELS = {
 };
 const humanizeIntent = (k) => INTENT_LABELS[k] || String(k || "").toLowerCase().replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 
-// Canonical email template — reproduces public/digest-preview.html exactly (same markup,
-// colors #0369A1/#0891B2/#0D9488, sections). Filled with real data; sections without a data
-// source (avg response time, after-hours, top vehicles) degrade to —/0/omit.
-function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns) {
+// Canonical email template — delegates to the shared, Figma-faithful renderer in
+// src/email/digestTemplate.cjs (the SAME module the SPA preview uses, so the sent
+// bytes never drift). This wrapper just builds the view-model: console deep links,
+// the open-tracking pixel URL, and the enrichment that rides on the metrics object
+// (upcoming appointments, top vehicles, $/appt) populated by processOne().
+function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
+  const L = links(ent, team, dept, localDate, tz);
+  const enc = encodeURIComponent;
+  // First-party open pixel — only emitted when a public base URL is configured
+  // (a relative URL can't resolve inside an inbox). Deterministic from team/dept/
+  // date so a re-render reproduces the same tracker.
+  const base = (process.env.DIGEST_TRACK_BASE || process.env.PUBLIC_APP_URL || "").replace(/\/$/, "");
+  const pixelUrl = base ? `${base}/api/email/track-open?t=${enc(team)}&d=${enc(dept)}&dt=${enc(localDate)}` : "";
+  // Email images need ABSOLUTE URLs — DIGEST_ASSET_BASE (CDN/app URL) else the public base.
+  const assetBase = (process.env.DIGEST_ASSET_BASE || base || "").replace(/\/$/, "");
+  const campaignImages = assetBase ? [`${assetBase}/digest-assets/campaign-honda.jpg`, `${assetBase}/digest-assets/campaign-tata.jpg`] : [];
+  const mm = Object.assign({}, m, { campaigns: campaigns || m.campaigns || [] });
+  return renderDigestHtml(mm, {
+    rooftopName: name,
+    dept: dept === "service" ? "service" : "sales",
+    dateLabel,
+    agentPerson: m.agentPerson || "",
+    links: { appointments: L.appts, conversations: L.conv, actionItems: L.action, console: "https://console.spyne.ai/converse-ai" },
+    appointments: Array.isArray(m.appointments) ? m.appointments : [],
+    topVehicles: Array.isArray(m.topVehicles) ? m.topVehicles : [],
+    dollarRate: Number(m.dollarRate) || 0,
+    // Upsell banner is driven by agent deployment state when it's present on the
+    // stored metrics; absent → the template falls back to the speed-to-lead CTA.
+    deployment: m.deployment || undefined,
+    // daily → undefined ("yesterday" wording); weekly/monthly switch the template's period nouns.
+    period: cadence === "weekly" || cadence === "monthly" ? cadence : undefined,
+    pixelUrl, assetBase, campaignImages,
+  });
+}
+
+// ── CLASSIC daily template (v1) ───────────────────────────────────────────────
+// The ORIGINAL production email — self-contained email-safe HTML (colors #0369A1/
+// #0891B2/#0D9488). Preserved verbatim so a rooftop on the 'v1' daily template keeps
+// getting the exact email it gets today. Selected per-rooftop via roi_rooftop_config
+// .daily_template; v2 is renderHtml() above (the Conversational-AI-2.0 redesign).
+function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns) {
   const L = links(ent, team, dept, localDate, tz);
   const isSvc = dept === "service";
   const camps = (campaigns || []).filter((c) => Number(c.dials) > 0); // drop zero-dial campaigns
@@ -231,6 +323,30 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
 </table></td></tr></table></body></html>`;
 }
 
+// ── Daily-template dispatch ───────────────────────────────────────────────────
+// Pick the template for a given rooftop-config + cadence. Only the DAILY digest is
+// switchable per-rooftop (classic 'v1' vs redesign 'v2'); weekly/monthly are new and
+// only exist in v2. Default 'v1' so every existing rooftop is undisturbed until a
+// human opts it into 'v2' via the tracker.
+function pickTemplate(cfg, cadence) {
+  if (cadence === "weekly" || cadence === "monthly") return "v2";
+  return (cfg && cfg.daily_template === "v2") ? "v2" : "v1";
+}
+// Render the right template. v1 shims inboundUniqueLeads back to its legacy value so
+// the classic email stays byte-faithful to production.
+function renderDigest(tpl, name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
+  if (tpl === "v2") return renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence);
+  const m1 = Object.assign({}, m, { inboundUniqueLeads: (m.inboundUniqueLeadsLegacy != null ? m.inboundUniqueLeadsLegacy : m.inboundUniqueLeads) });
+  return renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m1, campaigns);
+}
+// Apply the matching guardrail. v1 uses the original (stricter) send rule on the
+// legacy-shimmed leads value; v2 uses the permissive "any activity" rule.
+function guardrailFor(tpl, m) {
+  if (tpl === "v2") return guardrail(m);
+  const m1 = Object.assign({}, m, { inboundUniqueLeads: (m.inboundUniqueLeadsLegacy != null ? m.inboundUniqueLeadsLegacy : m.inboundUniqueLeads) });
+  return guardrailV1(m1);
+}
+
 async function sendMail(to, subject, html) {
   const body = JSON.stringify({ to: to.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } });
   let lastErr = "";
@@ -256,8 +372,8 @@ async function runOnce() {
   // silently return an all-zero summary because the Supabase error was swallowed. Surface it.
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,digest_send_hour,daily_enabled"),
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
@@ -267,6 +383,9 @@ async function runOnce() {
   const live = liveRes.data, cfg = cfgRes.data, rec = recRes.data;
   if (!live || live.length === 0) console.warn("[roi-cron] WARNING: roi_live_departments.is_live=true returned 0 rows — nothing to process (check data / env).");
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
+  // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — attach it to each
+  // live row so downstream (stored row, console links, enrichment) keeps working.
+  for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || "";
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0 };
@@ -320,21 +439,41 @@ async function runOnce() {
         outboundUniqueReachedMTD: mtd.outboundUniqueReached,
         outboundConnectRateMTD: mtd.outboundConnectRate,
         outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet,
+        // redesign MTD figures (calling hours + qualified)
+        callingDuringMTD: mtd.callingDuring,
+        callingAfterMTD: mtd.callingAfter,
+        qualifiedLeadsMTD: mtd.qualifiedLeads,
       };
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate };
       const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
       await upsert({ status: "queued", reason: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
       out.queued++;
-      // step 3 — guardrails
-      const g = guardrail(m);
+      // daily-template selection (classic v1 / redesign v2) — per rooftop, default v1
+      const tpl = pickTemplate(c, "daily");
+      // step 3 — guardrails (v1 keeps the original stricter send rule)
+      const g = guardrailFor(tpl, m);
       if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; console.log(`  · ${name} [${L.department}] not_sent → ${g.reason} (appts ${m.appointmentsYesterday} · conv ${m.conversationsHandled} · leads ${m.inboundUniqueLeads} · actions ${m.actionItemsTotal})`); return; }
       // step 4 — send-hour gate
       const sendHour = c?.digest_send_hour ?? 7;
       if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:00 < send ${String(sendHour).padStart(2, "0")}:00)`); return; }
       // active campaigns (3rd embedding) — only now, just before render
       const camps = await getCampaigns(L.team_id, L.department, w);
-      const metricsFull = { ...metrics, campaigns: camps };
-      const html = renderHtml(name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, m, camps);
+      // Enrichment: upcoming appointments (car + $ + schedule) + top vehicles — sourced from the
+      // SAME Reporting service as every other metric (single source of truth), not a separate
+      // ClickHouse query. Optional — degrades to empty (section omitted) when unavailable.
+      const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+      let enr = { appointments: [], topVehicles: [] };
+      try {
+        const { enrichRooftop } = await import("./digestEnrich.js");
+        enr = await enrichRooftop(L.team_id, {
+          dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz,
+          apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined,
+        });
+      } catch (e) { console.warn("[roi-cron] enrich skipped:", String(e).slice(0, 120)); }
+      // canonical stored payload — carries everything the template reads so a later
+      // re-render (and the SPA preview) reproduce the exact email.
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate, daily_template: tpl };
+      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, "daily");
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
       // SEND
@@ -381,11 +520,12 @@ function dateRange(start, end) {
 async function backfill(start, end) {
   console.log(`\n── BACKFILL ${start}…${end} (record-only, NO emails) ──`);
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,daily_enabled"),
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
+  for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const days = dateRange(start, end);
@@ -406,10 +546,13 @@ async function backfill(start, end) {
         const ai = await getActionItems(L.team_id, L.department, w);
         const camps = await getCampaigns(L.team_id, L.department, w);
         const m = { ...dayM, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
-        const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day };
+        const tpl = pickTemplate(c, "daily");
+        const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day, daily_template: tpl };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
-        const g = guardrail(m);
-        const html = renderHtml(name, L.department, w.dateLabel, L.enterprise_id, L.team_id, day, tz, m, camps);
+        const g = guardrailFor(tpl, m);
+        // backfill is historical → no future "upcoming appointments"; render from the
+        // full metrics so follow-ups/campaigns still show.
+        const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, day, tz, metrics, camps, "daily");
         // preserve a row already marked sent — just refresh its data
         const { data: ex } = await sb.from("roi_digest_runs").select("status,message_id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", day).maybeSingle();
         if (ex?.status === "sent") {
@@ -417,7 +560,12 @@ async function backfill(start, end) {
           const upd = ex.message_id ? { metrics, subject } : { metrics, rendered_html: html, subject };
           await sb.from("roi_digest_runs").update(upd).eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", day); out.preserved++; continue;
         }
-        const up = (extra) => sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
+        // FAIL LOUD: surface a denied/failed write (e.g. a publishable key that can't write
+        // roi_digest_runs) instead of silently counting a row that never persisted.
+        const up = async (extra) => {
+          const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
+          if (error) throw new Error(`roi_digest_runs write failed (service_role key required?): ${error.message}`);
+        };
         if (!emails.length) { await up({ status: "not_sent", reason: "recipients_missing", metrics, subject }); out.not_sent++; }
         else if (!g.ok) { await up({ status: "not_sent", reason: g.reason, metrics, subject }); out.not_sent++; }
         else {
@@ -442,8 +590,9 @@ async function backfill(start, end) {
 // carry rendered_html (sent/suppressed) so the stored bytes match the latest template.
 async function rerender() {
   console.log("\n── RERENDER stored rendered_html from stored metrics (Supabase-only · NO emails · NO data change) ──");
-  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name");
+  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name,daily_template");
   const nameOf = new Map((cfg ?? []).map((c) => [c.team_id, c.rooftop_name]));
+  const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   const out = { updated: 0, errors: 0 };
   const PAGE = 400;
   for (let from = 0; ; from += PAGE) {
@@ -462,7 +611,9 @@ async function rerender() {
         const name = nameOf.get(r.team_id) || r.team_id;
         const dateLabel = new Date(`${r.local_date}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
         const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
-        const html = renderHtml(name, r.department, dateLabel, r.enterprise_id, r.team_id, r.local_date, tz, m, camps);
+        // re-render to the rooftop's CURRENT template choice (daily switchable; weekly/monthly always v2)
+        const tpl = pickTemplate(cfgOf.get(r.team_id), r.cadence);
+        const html = renderDigest(tpl, name, r.department, dateLabel, r.enterprise_id, r.team_id, r.local_date, tz, m, camps, r.cadence);
         const { error: ue } = await sb.from("roi_digest_runs").update({ rendered_html: html })
           .eq("team_id", r.team_id).eq("department", r.department).eq("cadence", r.cadence).eq("local_date", r.local_date);
         if (ue) out.errors++; else out.updated++;
@@ -475,7 +626,241 @@ async function rerender() {
   return out;
 }
 
-// Importable surface for the Vercel serverless cron (api/cron/roi-email.js) + tests.
+// ── WEEKLY / MONTHLY cadence generation ─────────────────────────────────────
+// The hourly cron also produces the weekly digest (sent Mondays) and the monthly
+// digest (sent on the 1st), gated by roi_rooftop_config.weekly_enabled/monthly_enabled
+// and the rooftop's send-hour. Reuses the SAME fetch + render pipeline as the daily
+// pass; only the window + cadence + period wording differ. Idempotent: one row per
+// (team, dept, cadence, local_date).
+function localCadenceParts(tz) {
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", weekday: "short", hour12: false }).formatToParts(new Date());
+  const g = (t) => p.find((x) => x.type === t)?.value;
+  return { Y: +g("year"), M: +g("month"), D: +g("day"), H: (+g("hour")) === 24 ? 0 : +g("hour"), dow: g("weekday") };
+}
+const isoD = (d) => d.toISOString().slice(0, 10);
+function cadenceWindow(tz, cadence) {
+  const c = localCadenceParts(tz);
+  if (cadence === "weekly") {
+    const end = new Date(Date.UTC(c.Y, c.M - 1, c.D));           // today (exclusive)
+    const start = new Date(Date.UTC(c.Y, c.M - 1, c.D - 7));     // 7 days back
+    const ystr = new Date(Date.UTC(c.Y, c.M - 1, c.D - 1));      // yesterday → row local_date
+    return { apiStart: isoD(start), apiEnd: isoD(end), apiMonthStart: `${c.Y}-${String(c.M).padStart(2, "0")}-01`,
+      localDate: isoD(ystr), dateLabel: `Week of ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H, sendDue: c.dow === "Mon" };
+  }
+  // monthly — previous calendar month, sent on the 1st
+  const thisM1 = new Date(Date.UTC(c.Y, c.M - 1, 1)), prevM1 = new Date(Date.UTC(c.Y, c.M - 2, 1));
+  return { apiStart: isoD(prevM1), apiEnd: isoD(thisM1), apiMonthStart: isoD(prevM1),
+    localDate: isoD(prevM1), dateLabel: prevM1.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }), localHour: c.H, sendDue: c.D === 1 };
+}
+
+// On-demand window for the manual "generate & send now" path. Unlike the scheduled
+// cron (calendar-anchored monthly), on-demand uses ROLLING windows ending yesterday:
+// daily = yesterday · weekly = last 7 days · monthly = last 30 days. No send-day gate.
+function onDemandWindow(tz, cadence) {
+  if (cadence === "weekly") return cadenceWindow(tz, "weekly");
+  if (cadence === "monthly") {
+    const c = localCadenceParts(tz);
+    const start = new Date(Date.UTC(c.Y, c.M - 1, c.D - 30));    // 30 days back
+    const end = new Date(Date.UTC(c.Y, c.M - 1, c.D));           // today (exclusive)
+    const ystr = new Date(Date.UTC(c.Y, c.M - 1, c.D - 1));      // yesterday → row local_date
+    return { apiStart: isoD(start), apiEnd: isoD(end), apiMonthStart: `${c.Y}-${String(c.M).padStart(2, "0")}-01`,
+      localDate: isoD(ystr), dateLabel: `Last 30 days · ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H };
+  }
+  return localParts(tz); // daily — yesterday window (apiStart/apiEnd/apiMonthStart present)
+}
+
+// ── ON-DEMAND generate + send (manual "create in real time and send") ────────
+// Powers the tracker's per-rooftop and bulk "Generate & send {cadence}" buttons.
+// Reuses the SAME fetch → render → send → mark pipeline as the cron, but:
+//   · bypasses the send-day (Mon/1st) + send-hour gates and the already-sent guard
+//     (this is an explicit user action — regenerate + resend on demand),
+//   · can target ONE rooftop (teamId + department) or ALL live rooftops (no filter),
+//   · still respects dry-run: a send is real only when server DRY_RUN=false AND the
+//     rooftop's dry_run=false (or pass dryRun:true to force a suppressed preview).
+// opts: { cadence:'daily'|'weekly'|'monthly', teamId?, department?, dryRun? }
+async function generateAndSendNow(opts) {
+  opts = opts || {};
+  const cadence = (opts.cadence === "weekly" || opts.cadence === "monthly") ? opts.cadence : "daily";
+  if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
+  const onlyTeam = opts.teamId ? String(opts.teamId) : null;
+  const onlyDept = opts.department === "service" ? "service" : opts.department === "sales" ? "sales" : null;
+  const forceDry = opts.dryRun === true;
+
+  const [liveRes, cfgRes, recRes] = await Promise.all([
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+  ]);
+  if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
+  const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
+  const recOf = new Map();
+  for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
+
+  let targets = (liveRes.data ?? []);
+  if (onlyTeam) targets = targets.filter((L) => L.team_id === onlyTeam);
+  if (onlyDept) targets = targets.filter((L) => L.department === onlyDept);
+
+  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, errors: 0, details: [] };
+
+  const process1 = async (L) => {
+    const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York"; const name = c?.rooftop_name || L.team_id;
+    const w = onDemandWindow(tz, cadence);
+    const Dep = L.department === "service" ? "Service" : "Sales";
+    const Cad = cadence === "weekly" ? "Weekly" : cadence === "monthly" ? "Monthly" : "Daily";
+    const subject = `${Dep} ${Cad} Digest — ${name}`;
+    const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "manual" };
+    const upsert = async (extra) => {
+      const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" }).select("id");
+      if (error) throw new Error(`roi_digest_runs write failed: ${error.message}`);
+    };
+    const note = (status, extra) => out.details.push({ team: L.team_id, dept: L.department, name, status, ...(extra || {}) });
+    try {
+      const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing", subject }); out.no_recipients++; note("no_recipients"); return; }
+      const day = await getMetrics(L.team_id, L.department, w, "day");
+      const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
+      const ai = await getActionItems(L.team_id, L.department, w);
+      const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      const tpl = pickTemplate(c, cadence);
+      const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
+      const g = guardrailFor(tpl, m);
+      if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
+      const camps = await getCampaigns(L.team_id, L.department, w);
+      const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+      let enr = { appointments: [], topVehicles: [] };
+      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
+      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
+      const dry = forceDry || DRY_RUN || L.dry_run === true;
+      if (dry) { await upsert({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
+      const sentAt = new Date().toISOString();
+      const messageId = await sendMail(emails, subject, html);
+      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || `manual-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
+      out.sent++; note("sent", { recipients: emails.length });
+      console.log(`  ✓ SENT (on-demand) ${cadence} ${name} [${L.department}]`);
+    } catch (e) { out.errors++; note("error", { error: String(e).slice(0, 160) }); console.log(`  ✗ on-demand ${cadence} ${name} [${L.department}] error: ${String(e).slice(0, 160)}`); }
+  };
+
+  const POOL = Number(process.env.CRON_POOL || 10); let _i = 0;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(POOL, targets.length || 1)) }, async () => { while (_i < targets.length) { await process1(targets[_i++]); } }));
+  console.log(`  on-demand ${cadence} summary:`, JSON.stringify({ ...out, details: undefined }));
+  return out;
+}
+
+// ── PREVIEW-ONLY (render, return HTML; NO DB write, NO send) ──────────────────
+// Powers the tracker's "Generate preview" step: build the SAME metrics + render
+// the SAME HTML the on-demand send would produce, for ONE rooftop+dept+cadence,
+// and hand it back so the drawer can show it BEFORE the user manually triggers a
+// send. Read-only by construction — it touches none of the send/upsert paths, so
+// it can never email or mutate roi_digest_runs. Mirrors process1's build steps.
+// opts: { cadence:'daily'|'weekly'|'monthly', teamId, department }
+async function previewDigestNow(opts) {
+  opts = opts || {};
+  const cadence = (opts.cadence === "weekly" || opts.cadence === "monthly") ? opts.cadence : "daily";
+  if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
+  const teamId = String(opts.teamId || "");
+  const department = opts.department === "service" ? "service" : "sales";
+  if (!teamId) throw new Error("teamId is required");
+
+  const [liveRes, cfgRes] = await Promise.all([
+    sb.from("roi_live_departments").select("team_id,department").eq("team_id", teamId).eq("department", department).maybeSingle(),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_template").eq("team_id", teamId).maybeSingle(),
+  ]);
+  const cfg = cfgRes.data || {};
+  const tz = cfg.timezone || "America/New_York";
+  const name = cfg.rooftop_name || teamId;
+  const enterpriseId = cfg.enterprise_id || ""; // enterprise_id is on roi_rooftop_config, not roi_live_departments
+  const w = onDemandWindow(tz, cadence);
+  const Dep = department === "service" ? "Service" : "Sales";
+  const Cad = cadence === "weekly" ? "Weekly" : cadence === "monthly" ? "Monthly" : "Daily";
+  const subject = `${Dep} ${Cad} Digest — ${name}`;
+
+  // Same metric assembly as process1 (on-demand send), so the preview is byte-identical to what sends.
+  const day = await getMetrics(teamId, department, w, "day");
+  const mtd = await getMetrics(teamId, department, w, "mtd");
+  const ai = await getActionItems(teamId, department, w);
+  const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+  const tpl = pickTemplate(cfg, cadence);
+  const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
+  const g = guardrailFor(tpl, m);
+  const camps = await getCampaigns(teamId, department, w);
+  const dollarRate = Number(department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+  let enr = { appointments: [], topVehicles: [] };
+  try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(teamId, { dollarRate, dept: department, enterpriseId, tz, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
+  const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
+  const html = renderDigest(tpl, name, department, w.dateLabel, enterpriseId, teamId, w.localDate, tz, metricsFull, camps, cadence);
+  return { ok: true, cadence, teamId, department, name, subject, dateLabel: w.dateLabel, hasData: g.ok, reason: g.ok ? null : g.reason, metrics: metricsFull, html };
+}
+
+async function runCadence(cadence) {
+  if (cadence !== "weekly" && cadence !== "monthly") return { skipped: true };
+  if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
+  const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
+  const [liveRes, cfgRes, recRes] = await Promise.all([
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,${enabledCol}`),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+  ]);
+  if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
+  const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
+  const recOf = new Map();
+  for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
+  const IGNORE_HOUR = process.env.IGNORE_SEND_HOUR === "true";
+  const IGNORE_DAY = process.env.IGNORE_SEND_DAY === "true"; // testing: ignore the Mon/1st gate
+  const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const out = { sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, no_data: 0, before_hour: 0, errors: 0 };
+
+  const process1 = async (L) => {
+    const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York"; const name = c?.rooftop_name || L.team_id;
+    if (!c || c[enabledCol] !== true) return;
+    const w = cadenceWindow(tz, cadence);
+    if (!IGNORE_DAY && !w.sendDue) { out.not_due++; return; }
+    const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
+    const upsert = async (extra) => {
+      const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" }).select("id");
+      if (error) throw new Error(`roi_digest_runs write failed: ${error.message}`);
+    };
+    try {
+      const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
+      if (done) { out.already_sent++; return; }
+      const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; return; }
+      const day = await getMetrics(L.team_id, L.department, w, "day");
+      const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
+      const ai = await getActionItems(L.team_id, L.department, w);
+      const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      const tpl = pickTemplate(c, cadence); // weekly/monthly → always v2
+      const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
+      const subject = `${L.department === "service" ? "Service" : "Sales"} ${cadence === "weekly" ? "Weekly" : "Monthly"} Digest — ${name}`;
+      await upsert({ status: "queued", reason: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
+      const g = guardrailFor(tpl, m);
+      if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; return; }
+      const sendHour = c?.digest_send_hour ?? 7;
+      if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; return; }
+      const camps = await getCampaigns(L.team_id, L.department, w);
+      const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+      let enr = { appointments: [], topVehicles: [] };
+      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
+      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
+      const dry = DRY_RUN || L.dry_run === true;
+      if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; return; }
+      const sentAt = new Date().toISOString();
+      const messageId = await sendMail(emails, subject, html);
+      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || `cron-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
+      out.sent++;
+      console.log(`  ✓ SENT ${cadence} ${name} [${L.department}]`);
+    } catch (e) { out.errors++; console.log(`  ✗ ${cadence} ${name} [${L.department}] error: ${String(e).slice(0, 160)}`); }
+  };
+  const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
+  const POOL = Number(process.env.CRON_POOL || 10); let _i = 0;
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(POOL, targets.length || 1)) }, async () => { while (_i < targets.length) { await process1(targets[_i++]); } }));
+  console.log(`  ${cadence} summary:`, JSON.stringify(out));
+  return out;
+}
+
 // ── Rooftop DISCOVERY (sync-live) ────────────────────────────────────────────
 // Pull the onboarded+active Sales/Service rooftops from the ClickHouse candidates
 // endpoint and ADD any new ones to roi_live_departments as is_live=true, dry_run=true
@@ -537,7 +922,8 @@ async function syncLive() {
   return { ranAt: ts, ...summary };
 }
 
-module.exports = { runOnce, backfill, rerender, renderHtml, sendMail, syncLive, apiMetrics, apiActionItems, apiCampaigns };
+// Importable surface for the Vercel serverless cron + tests.
+module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive, apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {

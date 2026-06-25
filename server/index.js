@@ -22,4 +22,18 @@ try {
   );
 }
 
-app.listen(PORT, () => console.log(`API server running on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`API server running on http://localhost:${PORT}`);
+  // Prewarm the ClickHouse-backed /agents caches in the background. Both routes
+  // run live base_fact scans that take ~50-66s cold, then cache for 20 min. Without
+  // this, the FIRST visitor after a restart sits on a blank /agents (Overall ~50s,
+  // first Rooftop click ~66s) — looks like the page is broken. Firing the same
+  // requests the first user would trigger means the data is ready by the time
+  // anyone opens the page. Best-effort: failures here just fall back to lazy load.
+  const base = `http://localhost:${PORT}`;
+  for (const path of ["/api/metrics", "/api/agents"]) {
+    fetch(`${base}${path}`)
+      .then((r) => console.log(`[prewarm] ${path} -> ${r.status}`))
+      .catch((e) => console.warn(`[prewarm] ${path} failed: ${e?.message ?? e}`));
+  }
+});

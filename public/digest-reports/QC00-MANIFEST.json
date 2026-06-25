@@ -1,0 +1,578 @@
+{
+  "generatedAgainst": "http://localhost:3000",
+  "reports": [
+    {
+      "id": "QC01-sales-DAILY-strong",
+      "kind": "DIGEST",
+      "cadence": "daily",
+      "agents": [
+        "Sales Inbound",
+        "Sales Outbound"
+      ],
+      "blurb": "Strong sales day — appointments hero",
+      "rooftop": "I-40 Autos",
+      "team_id": "b4df3297f5",
+      "dept": "sales",
+      "window": "2026-06-19 → 2026-06-20",
+      "metrics": [
+        [
+          "HERO · Appointments booked",
+          7
+        ],
+        [
+          "Total leads worked",
+          272
+        ],
+        [
+          "Calls handled",
+          7
+        ],
+        [
+          "Qualified leads",
+          43
+        ],
+        [
+          "Appointments (inbound+outbound)",
+          7
+        ],
+        [
+          "  ↳ inbound appts",
+          7
+        ],
+        [
+          "  ↳ outbound appts set",
+          0
+        ],
+        [
+          "Outbound unique reached",
+          0
+        ],
+        [
+          "Outbound connect rate %",
+          0
+        ],
+        [
+          "Warm transfers",
+          0
+        ],
+        [
+          "After-hours calls",
+          92
+        ],
+        [
+          "Action items (open)",
+          7
+        ],
+        [
+          "MTD appointments (2026-06-01→)",
+          86
+        ]
+      ],
+      "enrich": {
+        "appointments": 5,
+        "topVehicles": 5,
+        "campaigns": 0
+      },
+      "bytes": 25331
+    },
+    {
+      "id": "QC02-sales-DAILY-highvol",
+      "kind": "DIGEST",
+      "cadence": "daily",
+      "agents": [
+        "Sales Inbound",
+        "Sales Outbound"
+      ],
+      "blurb": "High call volume, modest bookings — booking-rate story",
+      "rooftop": "WolfChase Honda",
+      "team_id": "405beccbe9",
+      "dept": "sales",
+      "window": "2026-06-20 → 2026-06-21",
+      "metrics": [
+        [
+          "HERO · Appointments booked",
+          1
+        ],
+        [
+          "Total leads worked",
+          8
+        ],
+        [
+          "Calls handled",
+          8
+        ],
+        [
+          "Qualified leads",
+          0
+        ],
+        [
+          "Appointments (inbound+outbound)",
+          1
+        ],
+        [
+          "  ↳ inbound appts",
+          1
+        ],
+        [
+          "  ↳ outbound appts set",
+          0
+        ],
+        [
+          "Outbound unique reached",
+          0
+        ],
+        [
+          "Outbound connect rate %",
+          0
+        ],
+        [
+          "Warm transfers",
+          3
+        ],
+        [
+          "After-hours calls",
+          4
+        ],
+        [
+          "Action items (open)",
+          8
+        ],
+        [
+          "MTD appointments (2026-06-01→)",
+          13
+        ]
+      ],
+      "enrich": {
+        "appointments": 1,
+        "topVehicles": 5,
+        "campaigns": 3
+      },
+      "bytes": 24455
+    },
+    {
+      "id": "QC03-sales-DAILY-nofallback",
+      "kind": "DIGEST",
+      "cadence": "daily",
+      "agents": [
+        "Sales Inbound",
+        "Sales Outbound"
+      ],
+      "blurb": "Zero appts → hero falls back to qualified leads",
+      "rooftop": "Corn Husker Nissan",
+      "team_id": "37329f9976",
+      "dept": "sales",
+      "window": "2026-06-18 → 2026-06-19",
+      "metrics": [
+        [
+          "HERO · Warm / qualified leads",
+          18
+        ],
+        [
+          "Total leads worked",
+          1832
+        ],
+        [
+          "Calls handled",
+          3
+        ],
+        [
+          "Qualified leads",
+          0
+        ],
+        [
+          "Appointments (inbound+outbound)",
+          0
+        ],
+        [
+          "  ↳ inbound appts",
+          0
+        ],
+        [
+          "  ↳ outbound appts set",
+          0
+        ],
+        [
+          "Outbound unique reached",
+          31
+        ],
+        [
+          "Outbound connect rate %",
+          94
+        ],
+        [
+          "Warm transfers",
+          3
+        ],
+        [
+          "After-hours calls",
+          2
+        ],
+        [
+          "Action items (open)",
+          3
+        ],
+        [
+          "MTD appointments (2026-06-01→)",
+          2
+        ]
+      ],
+      "enrich": {
+        "appointments": 0,
+        "topVehicles": 2,
+        "campaigns": 3
+      },
+      "bytes": 28612
+    },
+    {
+      "id": "QC04-service-DAILY-busy",
+      "kind": "DIGEST",
+      "cadence": "daily",
+      "agents": [
+        "Service Inbound",
+        "Service Outbound"
+      ],
+      "blurb": "Busy service day — high calls + appts",
+      "rooftop": "Honda of Downtown LA",
+      "team_id": "9923577d07",
+      "dept": "service",
+      "window": "2026-06-16 → 2026-06-17",
+      "metrics": [
+        [
+          "HERO · Appointments booked",
+          22
+        ],
+        [
+          "Total leads worked",
+          117
+        ],
+        [
+          "Calls handled",
+          143
+        ],
+        [
+          "Qualified leads",
+          91
+        ],
+        [
+          "Appointments (inbound+outbound)",
+          22
+        ],
+        [
+          "  ↳ inbound appts",
+          22
+        ],
+        [
+          "  ↳ outbound appts set",
+          0
+        ],
+        [
+          "Outbound unique reached",
+          0
+        ],
+        [
+          "Outbound connect rate %",
+          0
+        ],
+        [
+          "Warm transfers",
+          93
+        ],
+        [
+          "After-hours calls",
+          17
+        ],
+        [
+          "Action items (open)",
+          119
+        ],
+        [
+          "MTD appointments (2026-06-01→)",
+          261
+        ]
+      ],
+      "enrich": {
+        "appointments": 5,
+        "topVehicles": 0,
+        "campaigns": 0
+      },
+      "bytes": 22336
+    },
+    {
+      "id": "QC05-sales-WEEKLY",
+      "kind": "DIGEST",
+      "cadence": "weekly",
+      "agents": [
+        "Sales Inbound",
+        "Sales Outbound"
+      ],
+      "blurb": "Weekly sales rollup (7-day window)",
+      "rooftop": "I-40 Autos",
+      "team_id": "b4df3297f5",
+      "dept": "sales",
+      "window": "2026-06-16 → 2026-06-23",
+      "metrics": [
+        [
+          "HERO · Appointments booked",
+          34
+        ],
+        [
+          "Total leads worked",
+          801
+        ],
+        [
+          "Calls handled",
+          30
+        ],
+        [
+          "Qualified leads",
+          233
+        ],
+        [
+          "Appointments (inbound+outbound)",
+          34
+        ],
+        [
+          "  ↳ inbound appts",
+          34
+        ],
+        [
+          "  ↳ outbound appts set",
+          0
+        ],
+        [
+          "Outbound unique reached",
+          0
+        ],
+        [
+          "Outbound connect rate %",
+          0
+        ],
+        [
+          "Warm transfers",
+          0
+        ],
+        [
+          "After-hours calls",
+          515
+        ],
+        [
+          "Action items (open)",
+          28
+        ],
+        [
+          "MTD appointments (2026-06-01→)",
+          100
+        ]
+      ],
+      "enrich": {
+        "appointments": 5,
+        "topVehicles": 5,
+        "campaigns": 0
+      },
+      "bytes": 26803
+    },
+    {
+      "id": "QC06-service-MONTHLY",
+      "kind": "DIGEST",
+      "cadence": "monthly",
+      "agents": [
+        "Service Inbound",
+        "Service Outbound"
+      ],
+      "blurb": "Monthly service rollup (MTD, large numbers)",
+      "rooftop": "Honda of Downtown LA",
+      "team_id": "9923577d07",
+      "dept": "service",
+      "window": "2026-06-01 → 2026-06-23",
+      "metrics": [
+        [
+          "HERO · Appointments booked",
+          293
+        ],
+        [
+          "Total leads worked",
+          1410
+        ],
+        [
+          "Calls handled",
+          2199
+        ],
+        [
+          "Qualified leads",
+          1486
+        ],
+        [
+          "Appointments (inbound+outbound)",
+          293
+        ],
+        [
+          "  ↳ inbound appts",
+          291
+        ],
+        [
+          "  ↳ outbound appts set",
+          2
+        ],
+        [
+          "Outbound unique reached",
+          8
+        ],
+        [
+          "Outbound connect rate %",
+          80
+        ],
+        [
+          "Warm transfers",
+          1047
+        ],
+        [
+          "After-hours calls",
+          181
+        ],
+        [
+          "Action items (open)",
+          1808
+        ],
+        [
+          "MTD appointments (2026-06-01→)",
+          293
+        ]
+      ],
+      "enrich": {
+        "appointments": 5,
+        "topVehicles": 0,
+        "campaigns": 0
+      },
+      "bytes": 33190
+    },
+    {
+      "id": "QC07-tx-post-conversation",
+      "kind": "TRANSACTIONAL",
+      "type": "post_conversation",
+      "blurb": "Fires per actionable call/SMS",
+      "agents": [
+        "Sales Inbound"
+      ],
+      "rooftop": "Corn Husker Nissan",
+      "team_id": "37329f9976",
+      "dept": "sales",
+      "window": "event (trailing 30d pool)",
+      "metrics": [
+        [
+          "Direction",
+          "inbound"
+        ],
+        [
+          "Appointment scheduled",
+          "false"
+        ],
+        [
+          "Query resolved",
+          "false"
+        ],
+        [
+          "Has action item",
+          "true"
+        ],
+        [
+          "MTD calls (value strip)",
+          40
+        ]
+      ],
+      "bytes": 4398
+    },
+    {
+      "id": "QC08-tx-post-appointment",
+      "kind": "TRANSACTIONAL",
+      "type": "post_appointment",
+      "blurb": "Fires when an appointment is booked",
+      "agents": [
+        "Service Inbound"
+      ],
+      "rooftop": "Honda of Downtown LA",
+      "team_id": "9923577d07",
+      "dept": "service",
+      "window": "event (upcoming appt)",
+      "metrics": [
+        [
+          "Customer",
+          "Jazz Walker"
+        ],
+        [
+          "Vehicle",
+          "—"
+        ],
+        [
+          "Scheduled",
+          "Fri, Jun 26 · 7:00 AM"
+        ],
+        [
+          "MTD appointments (value strip)",
+          293
+        ]
+      ],
+      "real": true,
+      "bytes": 3959
+    },
+    {
+      "id": "QC09-tx-action-item",
+      "kind": "TRANSACTIONAL",
+      "type": "action_item",
+      "blurb": "Fires when a new action item is created",
+      "agents": [
+        "Service Inbound"
+      ],
+      "rooftop": "Honda of Downtown LA",
+      "team_id": "9923577d07",
+      "dept": "service",
+      "window": "event (open scope)",
+      "metrics": [
+        [
+          "New item intent",
+          "SERVICE_SCHEDULE_APPOINTMENT"
+        ],
+        [
+          "New item priority",
+          "HIGH"
+        ],
+        [
+          "Pending items shown",
+          6
+        ],
+        [
+          "Open backlog — value strip (API-capped at 200)",
+          200
+        ]
+      ],
+      "bytes": 7116
+    },
+    {
+      "id": "QC10-tx-action-item-overdue",
+      "kind": "TRANSACTIONAL",
+      "type": "action_item_overdue",
+      "blurb": "SLA breach — assignee + BDC manager",
+      "agents": [
+        "Service Inbound"
+      ],
+      "rooftop": "Honda of Downtown LA",
+      "team_id": "9923577d07",
+      "dept": "service",
+      "window": "event (overdue scope)",
+      "metrics": [
+        [
+          "Overdue items shown in email",
+          6
+        ],
+        [
+          "Oldest overdue intent",
+          "SERVICE_SCHEDULE_APPOINTMENT"
+        ],
+        [
+          "Overdue backlog (API-capped at 200)",
+          200
+        ]
+      ],
+      "bytes": 5622
+    }
+  ]
+}

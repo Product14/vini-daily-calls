@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { toPng } from "html-to-image";
 import { getProgramsClient, PROGRAMS_DB_CONFIGURED } from "./supabaseClient";
-import { OWNER_NAMES, teamForOwner } from "./owners";
+import { OWNER_NAMES, teamForOwner, canonicalOwnerName } from "./owners";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
@@ -2307,10 +2307,17 @@ function EmailReportView({ accounts, state, overall }: {
       const hasOpenTask = (s.tasks ?? []).some(t => t.status !== "Done");
       if (!hasOpenTask) continue;
       const { email, name } = effectiveCsm(account, s);
-      const csmKey = (email ?? "").trim().toLowerCase();   // "" = no CSM
+      // Group by PERSON, not email. CSM names are unique, so the same CSM whose
+      // email is blank or spelled differently across accounts (e.g. a name-only
+      // override vs the sheet's address) still rolls up into ONE row instead of
+      // splitting. Prefer the canonical owner-registry name (folds email/alias
+      // forms together), falling back to the unfurled display name.
+      const canonical =
+        canonicalOwnerName(email) || canonicalOwnerName(name) || name.trim();
+      const csmKey = canonical.toLowerCase();   // "" = no CSM
       let csm = csms.get(csmKey);
       if (!csm) {
-        csm = { csmLabel: name.trim() || "No CSM Mapped", accounts: new Set<string>() };
+        csm = { csmLabel: canonical || "No CSM Mapped", accounts: new Set<string>() };
         csms.set(csmKey, csm);
       }
       csm.accounts.add(accountKey);

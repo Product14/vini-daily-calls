@@ -1,5 +1,11 @@
 #!/usr/bin/env node
-/* ROI Email — complete local cron (one process, runs the whole flow).
+/* ⚠️ LEGACY / SUPERSEDED — not wired into the app.
+ * The canonical cron is server/roi-cron/runner.cjs, which now renders via the
+ * shared template src/email/digestTemplate.cjs (Conversational AI 2.0 redesign).
+ * This copy still emits the OLD layout; update it from the canonical runner if
+ * you ever revive the standalone notification-service.
+ *
+ * ROI Email — complete local cron (one process, runs the whole flow).
  *
  * Flow (per the spec):
  *   Step 0&1  finalized set = roi_live_departments.is_live + roi_recipients (who receives)

@@ -251,6 +251,7 @@ export type OverallData = {
   error: string | null;
   live: boolean;
   refresh: () => void;
+  reload: () => void;
 };
 
 export function useOverallData(): OverallData {
@@ -296,7 +297,9 @@ export function useOverallData(): OverallData {
 
   useEffect(() => { load(); }, [load]);
 
-  return { bundle, meta, loading, error, live, refresh: () => load(true) };
+  // refresh() forces a live ClickHouse pull (manual button); reload() re-reads
+  // the precomputed cache without recomputing (used by the auto-sync interval).
+  return { bundle, meta, loading, error, live, refresh: () => load(true), reload: () => load(false) };
 }
 
 // ─── Per-agent ARR + go-live roster (Vini funnel master sheet) ──────────────────

@@ -24,6 +24,14 @@ create table if not exists roi_rooftop_config (
     daily_enabled      boolean not null default true,
     weekly_enabled     boolean not null default false,
     monthly_enabled    boolean not null default false,
+    -- transactional email types (see migration 0004) — off until a rooftop opts in
+    post_appointment_enabled    boolean not null default false,
+    post_conversation_enabled   boolean not null default false,
+    action_item_enabled         boolean not null default false,
+    action_item_overdue_enabled boolean not null default false,
+    post_conversation_mode       text    not null default 'actionable' check (post_conversation_mode in ('actionable','all')),
+    post_conversation_outbound_requires_reply boolean not null default true,
+    action_item_sla_minutes      integer not null default 20,
     updated_at         timestamptz not null default now()
 );
 
@@ -65,7 +73,8 @@ create table if not exists roi_digest_runs (
     rendered_html   text,    -- the HTML that was / would have been sent (req 5)
     subject         text,
     mail_template   text,
-    recipients      jsonb,   -- [{email,name,received,bounced}] per-recipient state
+    recipients      jsonb,   -- [{email,name,received,bounced,opened,opened_at}] per-recipient state
+    opened_at       timestamptz,            -- first open (open-rate tracking pixel; see /api/email/track-open)
     bcc_confirmed   boolean  default false,  -- Step 3: independently confirmed via BCC track address
     bcc_confirmed_at timestamptz,            -- when the BCC delivery event arrived
     send_path       text default 'template' check (send_path in ('template','raw_html')),

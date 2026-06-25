@@ -10,11 +10,19 @@
 //   (verified 2026-06-08: Authorization: Bearer <token> returns 200 OK; Cookie auth is NOT used.)
 //
 // SEND DECISION (per row), in precedence order:
-//   1. ?dry=true            → ALWAYS suppress (hard safety; the tracker uses this).
-//   2. ?force=true          → real send, ignoring the rooftop's dry_run flag
+//   1. ?spyneOnly=true      → real send, but recipients are filtered to ONLY
+//                             @spyne.ai addresses (every external/customer address
+//                             is dropped). This is the tracker's "preview to Spyne"
+//                             action — internal testers get the real email, no
+//                             customer ever does. Overrides the dry_run flag. The
+//                             run is recorded status='suppressed'/reason='spyne_preview'
+//                             (NOT 'sent') because the DEALER was not sent, so it
+//                             never inflates the tracker's sent count.
+//   2. ?dry=true            → ALWAYS suppress (hard safety).
+//   3. ?force=true          → real send, ignoring the rooftop's dry_run flag
 //                             (manual "Send now" from the UI for ONE rooftop).
-//   3. dry_run flag = false  → real send (the normal scheduled path).
-//   4. otherwise            → suppress (reason='dry_run').
+//   4. dry_run flag = false  → real send (the normal scheduled path).
+//   5. otherwise            → suppress (reason='dry_run').
 // ?team=<id> scopes to one rooftop.
 //
 // MAIL TOKEN resolution (for real sends), sent as `Authorization: Bearer <token>`:
@@ -33,6 +41,8 @@ Deno.serve(async (req) => {
   const team = u.searchParams.get("team");
   const dryParam = u.searchParams.get("dry") === "true";
   const force = u.searchParams.get("force") === "true";
+  const spyneOnly = u.searchParams.get("spyneOnly") === "true";
+  const isSpyne = (e: unknown) => /@spyne\.ai\s*$/i.test(String(e ?? "").trim());
   const mailToken = req.headers.get("x-mail-token") || Deno.env.get("MAIL_TOKEN") || Deno.env.get("MAIL_COOKIE") || "";
   const sb = supa();
 
@@ -44,20 +54,24 @@ Deno.serve(async (req) => {
   // default to dry (true) if no row — fail safe
   const dryOf = new Map((liveRows ?? []).map((l) => [`${l.team_id}|${l.department}`, l.dry_run !== false]));
 
-  const out = { sent: 0, suppressed: 0, errors: 0, skipped: 0, pending_render: 0, auth_failed: false };
+  const out = { sent: 0, suppressed: 0, preview: 0, errors: 0, skipped: 0, pending_render: 0, auth_failed: false };
 
   for (const r of rows ?? []) {
     const flagDry = dryOf.get(`${r.team_id}|${r.department}`) ?? true;
-    // hard safety first, then force, then the per-rooftop flag
-    const realSend = !dryParam && (force || !flagDry);
-    const recips = (r.recipients ?? []).map((x: any) => x.email).filter(Boolean);
+    // spyneOnly forces a real send (recipients filtered below); otherwise the dry
+    // hard-safety wins, then force, then the per-rooftop flag.
+    const realSend = spyneOnly || (!dryParam && (force || !flagDry));
+    let recips = (r.recipients ?? []).map((x: any) => x.email).filter(Boolean);
+    // Preview mode: keep ONLY internal @spyne.ai recipients so no customer is emailed.
+    if (spyneOnly) recips = recips.filter(isSpyne);
 
     if (!realSend) {
       await sb.from("roi_digest_runs").update({ status: "suppressed", reason: "dry_run" }).eq("id", r.id);
       out.suppressed++; continue;
     }
     if (!recips.length) {
-      await sb.from("roi_digest_runs").update({ status: "not_sent", reason: "recipients_missing" }).eq("id", r.id);
+      // For a preview run, "no @spyne.ai recipient" is the expected skip reason.
+      await sb.from("roi_digest_runs").update({ status: "not_sent", reason: spyneOnly ? "no_spyne_recipient" : "recipients_missing" }).eq("id", r.id);
       out.skipped++; continue;
     }
     if (!r.rendered_html) {
@@ -76,7 +90,7 @@ Deno.serve(async (req) => {
       const res = await fetch(MAIL_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${mailToken}` },
-        body: JSON.stringify({ to: recips.join(","), subject: r.subject ?? "Daily Digest", template: TEMPLATE, templateData: { HTMLdata: r.rendered_html } }),
+        body: JSON.stringify({ to: recips.join(","), subject: spyneOnly ? `[PREVIEW] ${r.subject ?? "Daily Digest"}` : (r.subject ?? "Daily Digest"), template: TEMPLATE, templateData: { HTMLdata: r.rendered_html } }),
       });
       if (res.status === 401 || res.status === 403) {
         out.auth_failed = true;
@@ -86,12 +100,22 @@ Deno.serve(async (req) => {
       }
       if (!res.ok) throw new Error(`mail ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const j = await res.json().catch(() => ({}));
+      // Preview: mark received=true ONLY for the @spyne.ai addresses we actually
+      // sent to, so the tracker never claims a customer received the email.
+      const sentSet = new Set(recips.map((e: string) => String(e).trim().toLowerCase()));
+      // A preview reached internal recipients only — the DEALER was NOT sent, so
+      // it must NOT count as 'sent'. Record it 'suppressed/spyne_preview' (the
+      // internal delivery is still captured in recipients[].received + reason_detail).
       await sb.from("roi_digest_runs").update({
-        status: "sent", sent_at: new Date().toISOString(),
-        message_id: (j as any).messageId ?? (j as any).id ?? null, send_path: "raw_html",
-        recipients: (r.recipients ?? []).map((x: any) => ({ ...x, received: true })),
+        status: spyneOnly ? "suppressed" : "sent",
+        sent_at: new Date().toISOString(),
+        message_id: (j as any).messageId ?? (j as any).id ?? null,
+        send_path: spyneOnly ? "spyne_preview" : "raw_html",
+        reason: spyneOnly ? "spyne_preview" : null,
+        reason_detail: spyneOnly ? `preview emailed to ${recips.length} @spyne.ai recipient(s); dealer not sent` : null,
+        recipients: (r.recipients ?? []).map((x: any) => ({ ...x, received: spyneOnly ? sentSet.has(String(x.email).trim().toLowerCase()) : true })),
       }).eq("id", r.id);
-      out.sent++;
+      if (spyneOnly) out.preview++; else out.sent++;
     } catch (e) {
       await sb.from("roi_digest_runs").update({ status: "not_sent", reason: "mail_error", reason_detail: String(e).slice(0, 500) }).eq("id", r.id);
       out.errors++;
