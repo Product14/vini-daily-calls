@@ -2240,25 +2240,18 @@ app.post("/api/email/roi-send-now", async (req, res) => {
     if (!recipients.length) return res.status(400).json({ error: "no recipients" });
     if (!html) return res.status(400).json({ error: "no html" });
 
-    // 1) send via the internal mail proxy. Use the SAME env as the cron (MAIL_PROXY_URL) so manual
-    // send works wherever the cron does; fall back to the legacy names and a sane default.
-    const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || process.env.INTERNAL_EMAIL_API_URL || "https://mail.spyne.ai/api/v1/send-template-email";
-    const template = process.env.MAIL_TEMPLATE || process.env.EMAIL_PROXY_TEMPLATE || "email-control-tower-report";
-    const mailRes = await fetch(mailUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}),
-        ...(process.env.EMAIL_PROXY_COOKIE ? { Cookie: process.env.EMAIL_PROXY_COOKIE } : {}),
-      },
-      body: JSON.stringify({ to: recipients.join(","), subject: subject || "Daily Digest", template, templateData: { HTMLdata: html } }),
-    });
-    if (!mailRes.ok) {
-      const t = await mailRes.text().catch(() => "");
-      return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` });
+    // 1) send via the EXACT SAME mail path as the daily cron. The cron (runOnce) and
+    // Send Now both go through runner.sendMail — one mail URL, one token, one template
+    // (MAIL_TEMPLATE || default), one retry policy. Previously this route had its own
+    // divergent fetch with an extra EMAIL_PROXY_TEMPLATE fallback; a stale/bad value in
+    // that env made Send Now fail with "invalid template" while the cron kept working.
+    const { sendMail } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
+    let messageId;
+    try {
+      messageId = await sendMail(recipients, subject || "Daily Digest", html);
+    } catch (mailErr) {
+      return res.status(502).json({ error: mailErr?.message ?? "mail send failed" });
     }
-    const mj = await mailRes.json().catch(() => ({}));
-    const messageId = mj.messageId ?? mj.id ?? null;
 
     // 2) mark the run sent in ROI Supabase (service key — bypasses RLS)
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
@@ -2737,6 +2730,24 @@ app.get("/api/cron/csm-sync", async (req, res) => {
   } catch (err) {
     console.error("GET /api/cron/csm-sync error:", err?.message ?? err);
     return res.status(500).json({ ok: false, error: err?.message ?? "csm-sync failed" });
+  }
+});
+
+// Rooftop DISCOVERY cron — pull onboarded+active rooftops from ClickHouse and add
+// new ones to roi_live_departments (held: is_live=true, dry_run=true → no email).
+// Scheduled daily in vercel.json. Same CRON_SECRET auth as the send cron.
+app.get("/api/cron/sync-live", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const { syncLive } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const summary = await syncLive();
+    return res.status(200).json({ ok: true, ...summary });
+  } catch (err) {
+    console.error("GET /api/cron/sync-live error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "sync failed" });
   }
 });
 

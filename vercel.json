@@ -17,6 +17,7 @@
     { "path": "/api/cron/roi-email",   "schedule": "0 * * * *"   },
     { "path": "/api/cron/roi-events",  "schedule": "*/15 * * * *" },
     { "path": "/api/cron/agents-refresh", "schedule": "*/30 * * * *" },
-    { "path": "/api/cron/csm-sync",       "schedule": "0 6 * * *"    }
+    { "path": "/api/cron/csm-sync",       "schedule": "0 6 * * *"    },
+    { "path": "/api/cron/sync-live",   "schedule": "0 5 * * *"   }
   ]
 }
