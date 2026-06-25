@@ -472,7 +472,7 @@ export function EmailerTracker() {
               <Th sticky left={0} minW={200}>Rooftop</Th>
               <Th minW={140}>CSM</Th>
               <Th minW={92}>Dept</Th>
-              <Th minW={96}>Dry-run</Th>
+              <Th minW={104}>Status</Th>
               {view === "digests"
                 ? Array.from({ length: colCount }).map((_, i) => (
                     <Th key={i} minW={104}>
@@ -989,9 +989,20 @@ function MissingRooftopButton() {
 }
 
 function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
-  const [on, setOn] = useState<boolean>(rooftop.dryRun !== false); // on = dry-run held
+  const [on, setOn] = useState<boolean>(rooftop.dryRun !== false); // on = dry-run held (Live | Paused | Not started)
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+
+  // "Has this rooftop ever sent a real digest?" — distinguishes Paused from Not started while held.
+  // A currently-live rooftop counts as having gone live; only an explicit "not_started" baseline is never-sent.
+  const everSent = rooftop.liveStatus !== "not_started";
+  // Current status derives from the live `on` flag (held?) + that baseline, so the badge updates on toggle.
+  const status: NonNullable<RooftopRow["liveStatus"]> = !on ? "live" : everSent ? "paused" : "not_started";
+  const STATUS = {
+    live:        { label: "Live",        dot: "bg-positive", cls: "bg-positive/10 text-positive",  tip: "Live — the scheduled cron sends real emails. Click to hold." },
+    paused:      { label: "Paused",      dot: "bg-warning",  cls: "bg-warning-soft text-warning",   tip: "Paused — was live, emails are held. Click to resume sending." },
+    not_started: { label: "Not started", dot: "bg-text-muted", cls: "bg-surface-subtle text-text-muted", tip: "Not started — never sent a real digest. Click to go live." },
+  }[status];
 
   const persist = async (nextDry: boolean): Promise<boolean> => {
     setBusy(true);
@@ -1006,8 +1017,8 @@ function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
 
   const onClick = () => {
     if (busy || !rooftop.team_id || !rooftop.department) return;
-    if (on) setConfirm(true);     // dry → LIVE: show disclaimer first
-    else void persist(true);      // live → dry (hold): safe, no prompt
+    if (on) setConfirm(true);     // Paused/Not started → LIVE: show disclaimer first
+    else void persist(true);      // Live → hold (pause): safe, no prompt
   };
 
   // who will start receiving once live = enabled recipients for this dept
@@ -1023,11 +1034,11 @@ function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
         type="button"
         onClick={onClick}
         disabled={busy}
-        title={on ? "Dry-run ON — emails held. Click to go Live." : "Live — sends allowed. Click to hold (dry-run)."}
-        className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${on ? "bg-warning-soft text-warning" : "bg-positive/10 text-positive"} ${busy ? "opacity-50" : ""}`}
+        title={STATUS.tip}
+        className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS.cls} ${busy ? "opacity-50" : ""}`}
       >
-        <span className={`h-1.5 w-1.5 rounded-full ${on ? "bg-warning" : "bg-positive"}`} />
-        {on ? "Dry-run" : "Live"}
+        <span className={`h-1.5 w-1.5 rounded-full ${STATUS.dot}`} />
+        {STATUS.label}
       </button>
       {confirm ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" onClick={() => setConfirm(false)}>

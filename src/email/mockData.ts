@@ -86,6 +86,11 @@ export type RooftopRow = {
   department?: DeptKind;
   /** Per-department dry-run flag (roi_live_departments.dry_run). */
   dryRun?: boolean;
+  /** Lifecycle status derived from dry_run + send history (see dataSource):
+   *   "live"        — dry_run=false; the scheduled cron sends real emails.
+   *   "paused"      — dry_run on, but a real digest HAS been sent before (was live, now held).
+   *   "not_started" — dry_run on and NO real digest has ever been sent (never gone live). */
+  liveStatus?: "live" | "paused" | "not_started";
   /** Dealer timezone (roi_rooftop_config.timezone) — used to build link windows. */
   timezone?: string;
   /** Local send hour (0–23) / minute (roi_rooftop_config.digest_send_hour/minute). */

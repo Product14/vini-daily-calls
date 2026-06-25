@@ -222,6 +222,10 @@ export async function loadRooftops(): Promise<LoadResult> {
     const recips: Recipient[] = recipsAll.filter(r => r.enabled);
 
     const departments: Department[] = [{ kind: dept, live: true, agents, recipients: recips, allRecipients: recipsAll }];
+    // Lifecycle status (by send history): a real email is one with a "sent" run in ANY cadence.
+    const everSent = deptRuns.some(r => r.status === "sent");
+    const isDry = live.dry_run !== false; // dry-run held when unset or true
+    const liveStatus: RooftopRow["liveStatus"] = !isDry ? "live" : everSent ? "paused" : "not_started";
     const daily = buildCells(deptRuns, "daily");
     const current_block = daily[0] && daily[0].status === "not_sent" ? daily[0].reason ?? null : null;
 
@@ -232,6 +236,7 @@ export async function loadRooftops(): Promise<LoadResult> {
       team_id: teamId,
       department: dept,
       dryRun: live.dry_run !== false, // default true (dry-run on) when unset
+      liveStatus,
       timezone: cfg?.timezone ?? undefined,
       sendHour: cfg?.digest_send_hour ?? undefined,
       sendMinute: cfg?.digest_send_minute ?? undefined,
