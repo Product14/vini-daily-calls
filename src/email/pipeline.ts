@@ -64,7 +64,7 @@ export type PipelineResult = {
   /** mail token/cookie was missing or rejected (401/403) → prompt for a token on the FE */
   authFailed?: boolean;
   /** convenience: per-cron4 counts pulled out of the nested body */
-  counts?: { queued?: number; sent?: number; suppressed?: number; errors?: number; skipped?: number };
+  counts?: { queued?: number; sent?: number; suppressed?: number; preview?: number; errors?: number; skipped?: number };
 };
 
 /* ── Mail token (cookie) supplied from the FE, kept only for this browser session ──
@@ -87,12 +87,14 @@ type RunOpts = {
   skipSync?: boolean; // default true — don't re-pull ClickHouse on a UI click
   bypass?: boolean; // default true — ignore the dealer-local send-hour gate for manual runs
   /**
-   * "dry"     → force suppress on every row (no email; the per-rooftop dry-run button).
+   * "dry"     → force suppress on every row (no email).
    * "respect" → honour each rooftop's dry_run flag: SEND to live (dry_run=false),
    *             suppress the rest. This is the global manual CTA.
    * "live"    → force send for the targeted rooftop, overriding its dry_run flag.
+   * "preview" → real send, but recipients filtered to ONLY @spyne.ai addresses
+   *             (every customer address dropped). The header "preview" button.
    */
-  mode?: "dry" | "respect" | "live";
+  mode?: "dry" | "respect" | "live" | "preview";
   /** mail cookie/token for a real send; falls back to the stored session token. */
   token?: string;
 };
@@ -103,6 +105,7 @@ function extractCounts(body: unknown): PipelineResult["counts"] {
     queued: b?.cron3?.body?.queued,
     sent: b?.cron4?.body?.sent,
     suppressed: b?.cron4?.body?.suppressed,
+    preview: b?.cron4?.body?.preview,
     errors: b?.cron4?.body?.errors,
     skipped: b?.cron4?.body?.skipped,
   };
@@ -125,10 +128,19 @@ export async function runPipeline(opts: RunOpts = {}): Promise<PipelineResult> {
   if (!isPipelineConfigured) return { ok: true, simulated: true };
 
   const mode = opts.mode ?? "dry";
-  const mayEmail = mode === "live" || mode === "respect";
+  const mayEmail = mode === "live" || mode === "respect" || mode === "preview";
   const p = new URLSearchParams();
   if (mode === "live") p.set("force", "true"); // override flag for this one rooftop
   else if (mode === "dry") p.set("dry", "true"); // ← hard safety: cron4 suppresses all
+  else if (mode === "preview") {
+    // Real send, but cron4 keeps ONLY @spyne.ai recipients. We ALSO set dry=true as
+    // a deploy-safety fallback: a NEW cron4 gives spyneOnly precedence (filtered
+    // preview), while an OLD cron4 that doesn't understand spyneOnly sees dry=true
+    // and suppresses everything — so an un-upgraded function can never email a
+    // customer through this button.
+    p.set("spyneOnly", "true");
+    p.set("dry", "true");
+  }
   // mode "respect": set NEITHER → cron4 sends iff dry_run=false
   if (opts.teamId) p.set("team", opts.teamId);
   if (opts.skipSync ?? true) p.set("skipSync", "true");
@@ -167,6 +179,15 @@ export async function runPipeline(opts: RunOpts = {}): Promise<PipelineResult> {
 /** Forced dry-run (no email). Kept for existing callers. */
 export function runDryPipeline(opts: Omit<RunOpts, "mode" | "token"> = {}): Promise<PipelineResult> {
   return runPipeline({ ...opts, mode: "dry" });
+}
+
+/**
+ * Preview send: real email via mail.spyne.ai, but cron4 filters every rooftop's
+ * recipient list down to ONLY @spyne.ai addresses — customers are never emailed.
+ * Needs a mail token (server MAIL_COOKIE or FE-supplied), like a live send.
+ */
+export function runPreviewPipeline(opts: Omit<RunOpts, "mode"> = {}): Promise<PipelineResult> {
+  return runPipeline({ ...opts, mode: "preview" });
 }
 
 /** Honour flags: send to live rooftops (dry_run=false), suppress dry ones. Global CTA. */

@@ -3,7 +3,7 @@
 // the run sent in Supabase. After this resolves ok, reload the tracker — the cell
 // flips to "sent" (from the DB) with the stored HTML + recipients viewable.
 import { renderDigestEmail } from "./renderDigest";
-import type { DeptKind, DigestMetrics } from "./mockData";
+import type { Cadence, DeptKind, DigestMetrics } from "./mockData";
 
 export type SendDigestOpts = {
   teamId?: string;
@@ -60,6 +60,99 @@ export const addCsmNow = (opts: { teamId?: string; name: string; email: string }
 /** Report a missing rooftop → emails product@spyne.ai + subhav.malhotra@spyne.ai. */
 export const reportMissingRooftopNow = (opts: { teamId?: string; teamName?: string; departments?: string[]; csm?: string; csmEmail?: string; note?: string }) =>
   postJson("/api/missing-rooftop", opts);
+
+export type GenerateSendSummary = {
+  cadence: Cadence;
+  scope: "rooftop" | "all";
+  sent: number;
+  suppressed: number;
+  no_recipients: number;
+  no_data: number;
+  errors: number;
+};
+
+/**
+ * On-demand "Generate & send {cadence}": the server fetches fresh metrics for the
+ * rolling window (weekly = last 7 days, monthly = last 30), renders the digest, and
+ * sends to the rooftop's real recipients — bypassing the cron's send-day/send-hour
+ * gates. Scope to one rooftop with teamId+dept, or omit both to run all live rooftops.
+ * Pass dryRun:true to render + store a suppressed preview without emailing.
+ */
+export type DigestPreview = {
+  ok: boolean;
+  cadence: Cadence;
+  subject: string;
+  dateLabel: string;
+  hasData: boolean;
+  reason?: string | null;
+  html: string;
+  metrics: DigestMetrics;
+};
+
+/**
+ * Render-only preview for "Generate & send {cadence}": the server builds the SAME
+ * metrics + HTML the send would produce (rolling window) and returns it WITHOUT
+ * writing to the DB or emailing. The drawer shows it so the user previews the
+ * weekly/monthly digest before manually triggering the actual send.
+ */
+export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind }): Promise<{ ok: boolean; error?: string; preview?: DigestPreview }> {
+  try {
+    const res = await fetch("/api/email/roi-generate-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cadence: opts.cadence, teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales" }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) {
+      return { ok: false, error: (body as { error?: string }).error || `Preview failed (HTTP ${res.status})` };
+    }
+    return { ok: true, preview: body as DigestPreview };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind; dryRun?: boolean }): Promise<{ ok: boolean; error?: string; summary?: GenerateSendSummary }> {
+  try {
+    const res = await fetch("/api/email/roi-generate-send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cadence: opts.cadence,
+        teamId: opts.teamId,
+        department: opts.teamId ? (opts.dept === "service" ? "service" : "sales") : undefined,
+        dryRun: opts.dryRun === true,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) {
+      return { ok: false, error: (body as { error?: string }).error || `Send failed (HTTP ${res.status})` };
+    }
+    return { ok: true, summary: body as GenerateSendSummary };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
+ * Render a transactional email live (from ClickHouse) and send it to the rooftop's
+ * recipients — the per-cell "Send to customer" for a type with no stored event yet.
+ */
+export async function generateSendEventNow(opts: { teamId?: string; enterpriseId?: string; department?: DeptKind; emailType: string; eventKey?: string; rooftopName?: string; tz?: string }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
+  try {
+    const res = await fetch("/api/email/roi-event-generate-send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        teamId: opts.teamId, enterpriseId: opts.enterpriseId,
+        department: opts.department === "service" ? "service" : "sales",
+        emailType: opts.emailType, eventKey: opts.eventKey, rooftopName: opts.rooftopName, tz: opts.tz,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Send failed (HTTP ${res.status})` };
+    return { ok: true, to: (body as { to?: string[] }).to };
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
 
 export async function sendDigestNow(opts: SendDigestOpts): Promise<{ ok: boolean; error?: string }> {
   const recipients = (opts.recipients ?? []).map((s) => String(s || "").trim()).filter((e) => /\S+@\S+\.\S+/.test(e));

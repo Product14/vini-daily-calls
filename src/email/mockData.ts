@@ -26,7 +26,8 @@ export type NotSentReason =
   | "smtp_timeout"
   | "scheduler_skipped"
   | "silent_day"
-  | "bounced";
+  | "bounced"
+  | "spyne_preview";
 
 export type Cadence = "daily" | "weekly" | "monthly";
 
@@ -61,8 +62,10 @@ export type CellRun = {
   metrics?: DigestMetrics;
   /** Exact HTML stored at send time (real sends only; null for metrics-only backfill). */
   renderedHtml?: string;
+  /** First time the email was opened (tracking pixel). */
+  openedAt?: string;
   /** Who the email was actually sent to (run.recipients). */
-  recipients?: { email: string; name?: string; received?: boolean; bounced?: boolean }[];
+  recipients?: { email: string; name?: string; received?: boolean; bounced?: boolean; opened?: boolean; openedAt?: string }[];
 };
 
 export type SendCell = {
@@ -98,7 +101,31 @@ export type RooftopRow = {
   daily: SendCell[];
   weekly: SendCell[];
   monthly: SendCell[];
+  /** Per-rooftop email-type enable/disable (roi_rooftop_config). Shared across the rooftop's dept rows. */
+  config?: RooftopConfig;
 };
+
+/** The 7 configurable email types, in display order. */
+export const EMAIL_TYPES = [
+  { key: "daily_enabled", label: "Daily digest" },
+  { key: "weekly_enabled", label: "Weekly digest" },
+  { key: "monthly_enabled", label: "Monthly digest" },
+  { key: "post_appointment_enabled", label: "Post-appointment" },
+  { key: "post_conversation_enabled", label: "Post-conversation" },
+  { key: "action_item_enabled", label: "Action item" },
+  { key: "action_item_overdue_enabled", label: "Action item overdue" },
+] as const;
+export type EmailTypeKey = (typeof EMAIL_TYPES)[number]["key"];
+export type RooftopConfig = Record<EmailTypeKey, boolean>;
+
+/** The 4 transactional (per-event) email types — match roi_event_emails.email_type values. */
+export const TRANSACTIONAL_TYPES = [
+  { key: "post_appointment", label: "Post-appointment" },
+  { key: "post_conversation", label: "Post-conversation" },
+  { key: "action_item", label: "Action item" },
+  { key: "action_item_overdue", label: "Action item overdue" },
+] as const;
+export type TransactionalKey = (typeof TRANSACTIONAL_TYPES)[number]["key"];
 
 const TODAY = "2026-06-04";
 
@@ -341,6 +368,7 @@ export const NOT_SENT_REASON_LABEL: Record<NotSentReason, string> = {
   scheduler_skipped: "Scheduler skipped",
   silent_day: "Silent day · no activity",
   bounced: "Inbox bounced",
+  spyne_preview: "Preview · Spyne only (dealer not sent)",
 };
 
 export const NOT_SENT_REASON_CTA: Record<NotSentReason, { label: string; tone: "warn" | "danger" }> = {
@@ -351,6 +379,7 @@ export const NOT_SENT_REASON_CTA: Record<NotSentReason, { label: string; tone: "
   scheduler_skipped: { label: "→ Send now", tone: "danger" },
   silent_day: { label: "—", tone: "warn" },
   bounced: { label: "+ Update email", tone: "danger" },
+  spyne_preview: { label: "→ Send now", tone: "warn" },
 };
 
 export const TRACKER_META = {
@@ -370,7 +399,7 @@ export type Summary = {
   liveAgentsTotal: number;
   rooftopsWithAgents: number;
   liveDepartments: { sales: number; service: number; total: number };
-  emailStatus: { sent: number; notSent: number; sentRatePct: number };
+  emailStatus: { sent: number; notSent: number; sentRatePct: number; opened: number; openRatePct: number };
 };
 
 export function computeSummary(rooftops: RooftopRow[], cadence: Cadence): Summary {
@@ -397,22 +426,29 @@ export function computeSummary(rooftops: RooftopRow[], cadence: Cadence): Summar
   // Email status · most-recent date in the chosen cadence
   let sent = 0;
   let notSent = 0;
+  let opened = 0; // sent cells whose run was opened (tracking pixel)
   for (const r of rooftops) {
     const cells = cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly;
     const latest = cells[0];
     if (!latest) continue;
-    if (latest.status === "sent" || latest.status === "suppressed") sent += 1;
-    else if (latest.status === "not_sent") notSent += 1;
+    if (latest.status === "sent" || latest.status === "suppressed") {
+      sent += 1;
+      const wasOpened = (latest.runs ?? []).some(
+        (run) => run.openedAt || (run.recipients ?? []).some((rec) => rec.opened)
+      );
+      if (wasOpened) opened += 1;
+    } else if (latest.status === "not_sent") notSent += 1;
   }
   const denom = sent + notSent;
   const sentRatePct = denom > 0 ? Math.round((sent / denom) * 100) : 0;
+  const openRatePct = sent > 0 ? Math.round((opened / sent) * 100) : 0;
 
   return {
     liveAgents,
     liveAgentsTotal: Object.values(liveAgents).reduce((s, x) => s + x, 0),
     rooftopsWithAgents,
     liveDepartments,
-    emailStatus: { sent, notSent, sentRatePct },
+    emailStatus: { sent, notSent, sentRatePct, opened, openRatePct },
   };
 }
 

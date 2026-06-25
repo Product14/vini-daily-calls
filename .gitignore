@@ -5,3 +5,6 @@ server/vins.db
 *.env
 !.env.example
 .vercel
+
+# local scratch / debug artifacts
+scratch-*

@@ -11,9 +11,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runClickhouse, hasClickhouseCreds } from "./agentMetrics.js";
+import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const BASE_FACT = readFileSync(join(here, "agentBaseFact.sql"), "utf8");
+const BASE_FACT = applyCallbackOutboundAttribution(
+  readFileSync(join(here, "agentBaseFact.sql"), "utf8"),
+  "agentBaseFact.sql"
+);
 
 // Trailing window the rooftop view covers (daily rows + totals). 120 days spans
 // the dashboard's widest preset (Last 90D) with headroom; "All" then means

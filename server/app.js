@@ -15,6 +15,11 @@ import { mapMetabaseRows } from "./viniRooftopMap.js";
 import { sendProgramsReportEmail } from "./programsEmail.js";
 import { runAgentMetrics, hasClickhouseCreds } from "./agentMetrics.js";
 import { runAgentRooftops } from "./agentRooftop.js";
+import { readAgentCache, writeAgentCache, hasCacheDb } from "./agentCache.js";
+
+// Cache keys for the precomputed agent-dashboard bundles (see agentCache.js).
+const AGENT_CACHE_KEY_ROOFTOP = "rooftop";
+const AGENT_CACHE_KEY_OVERALL = "overall";
 
 // Some local resolvers (mac dev boxes, restrictive networks) break dns.lookup() while
 // dns.resolve4() still works. Node's global fetch uses dns.lookup. Wrap https.request
@@ -1364,58 +1369,84 @@ function mergeAgentRows(rows, keyFields) {
   return Array.from(m.values());
 }
 
-let agentsCache = { daily: null, totals: null, fetchedAt: 0 };
+let agentsCache = { daily: null, totals: null, fetchedAt: 0, source: null };
 let agentsInflight = null; // single-flight: concurrent callers share one query set
 const AGENTS_TTL_MS = 20 * 60 * 1000; // 20 minutes (matches the dashboards' auto-sync cadence)
 
+// Run the rooftop aggregation once and return the bundle. The expensive part
+// (~66s of ClickHouse base_fact scans) lives here; callers persist the result so
+// page loads never pay for it. Same source the Overall view uses → the two
+// views reconcile. GROUP BY yields one row per key (no dedup needed).
+async function computeRooftopBundle() {
+  let dailyRows, totalsRows, source;
+  if (hasClickhouseCreds()) {
+    const { daily, totals } = await runAgentRooftops();
+    dailyRows  = (Array.isArray(daily)  ? daily  : []).filter(r => !isExcludedAgentRooftop(r));
+    totalsRows = (Array.isArray(totals) ? totals : []).filter(r => !isExcludedAgentRooftop(r));
+    source = "clickhouse-q12227";
+    console.log(`[api/agents] ClickHouse Q12227 — daily ${dailyRows.length}, totals ${totalsRows.length} rows`);
+  } else {
+    // Fallback (only when CLICKHOUSE_* is unset): legacy Metabase agents_v2
+    // cards. Drop internal/test rooftops, then de-dup the multiple rows
+    // Metabase emits per (team × agent [× day]).
+    const [daily, totals] = await Promise.all([
+      fetchFromMetabase(AGENTS_DAILY_URL, "AGENTS_DAILY", 1, 60000),
+      fetchFromMetabase(AGENTS_TOTALS_URL, "AGENTS_TOTALS", 1, 60000),
+    ]);
+    const filteredDaily  = (Array.isArray(daily)  ? daily  : []).filter(r => !isExcludedAgentRooftop(r));
+    const filteredTotals = (Array.isArray(totals) ? totals : []).filter(r => !isExcludedAgentRooftop(r));
+    dailyRows  = mergeAgentRows(filteredDaily,  ["team_id", "agent_type", "day"]);
+    totalsRows = mergeAgentRows(filteredTotals, ["team_id", "agent_type"]);
+    source = "metabase-agents_v2";
+    console.log(`[api/agents] Metabase fallback — daily ${dailyRows.length}, totals ${totalsRows.length} rows`);
+  }
+  return { source, daily: dailyRows, totals: totalsRows };
+}
+
+function serializeAgents(c) {
+  return {
+    fetchedAt: new Date(c.fetchedAt).toISOString(),
+    source: c.source,
+    dailyRowCount: c.daily.length,
+    totalsRowCount: c.totals.length,
+    daily: c.daily,
+    totals: c.totals,
+  };
+}
+
+// Compute + persist to the cron-backed cache; refresh the in-process copy too.
+async function refreshRooftopCache() {
+  const bundle = await computeRooftopBundle();
+  agentsCache = { ...bundle, fetchedAt: Date.now() };
+  await writeAgentCache(AGENT_CACHE_KEY_ROOFTOP, bundle);
+  return bundle;
+}
+
+// Serving order: (1) warm in-process cache, (2) the precomputed Postgres cache
+// the cron keeps fresh (instant, no ClickHouse), (3) live compute on a cold
+// first-ever load or ?refresh=1. The page never blocks on ClickHouse once the
+// cron has run at least once.
 app.get("/api/agents", async (req, res) => {
   try {
     const force = req.query.refresh === "1";
-    const fresh = !force && agentsCache.daily && agentsCache.totals
-                  && (Date.now() - agentsCache.fetchedAt) < AGENTS_TTL_MS;
-    if (!fresh) {
-      // Reuse an in-flight run instead of launching another (avoids stacking
-      // memory-heavy ClickHouse scans when several clients refresh at once).
-      if (!agentsInflight) {
-        agentsInflight = (async () => {
-          let dailyRows, totalsRows, source;
-          if (hasClickhouseCreds()) {
-            // Primary path: Q12227 base_fact aggregated at rooftop grain on
-            // ClickHouse — the SAME source the Overall view uses, so the two
-            // reconcile. GROUP BY yields one row per key (no dedup needed).
-            const { daily, totals } = await runAgentRooftops();
-            dailyRows  = (Array.isArray(daily)  ? daily  : []).filter(r => !isExcludedAgentRooftop(r));
-            totalsRows = (Array.isArray(totals) ? totals : []).filter(r => !isExcludedAgentRooftop(r));
-            source = "clickhouse-q12227";
-            console.log(`[api/agents] ClickHouse Q12227 — daily ${dailyRows.length}, totals ${totalsRows.length} rows`);
-          } else {
-            // Fallback (only when CLICKHOUSE_* is unset): legacy Metabase
-            // agents_v2 cards. Drop internal/test rooftops, then de-dup the
-            // multiple rows Metabase emits per (team × agent [× day]).
-            const [daily, totals] = await Promise.all([
-              fetchFromMetabase(AGENTS_DAILY_URL, "AGENTS_DAILY", 1, 60000),
-              fetchFromMetabase(AGENTS_TOTALS_URL, "AGENTS_TOTALS", 1, 60000),
-            ]);
-            const filteredDaily  = (Array.isArray(daily)  ? daily  : []).filter(r => !isExcludedAgentRooftop(r));
-            const filteredTotals = (Array.isArray(totals) ? totals : []).filter(r => !isExcludedAgentRooftop(r));
-            dailyRows  = mergeAgentRows(filteredDaily,  ["team_id", "agent_type", "day"]);
-            totalsRows = mergeAgentRows(filteredTotals, ["team_id", "agent_type"]);
-            source = "metabase-agents_v2";
-            console.log(`[api/agents] Metabase fallback — daily ${dailyRows.length}, totals ${totalsRows.length} rows`);
-          }
-          agentsCache = { daily: dailyRows, totals: totalsRows, fetchedAt: Date.now(), source };
-        })().finally(() => { agentsInflight = null; });
-      }
-      await agentsInflight;
+    if (!force && agentsCache.daily && agentsCache.totals
+        && (Date.now() - agentsCache.fetchedAt) < AGENTS_TTL_MS) {
+      return res.json(serializeAgents(agentsCache));
     }
-    return res.json({
-      fetchedAt: new Date(agentsCache.fetchedAt).toISOString(),
-      source: agentsCache.source,
-      dailyRowCount: agentsCache.daily.length,
-      totalsRowCount: agentsCache.totals.length,
-      daily: agentsCache.daily,
-      totals: agentsCache.totals,
-    });
+    if (!force) {
+      const cached = await readAgentCache(AGENT_CACHE_KEY_ROOFTOP);
+      if (cached?.payload?.daily && cached?.payload?.totals) {
+        agentsCache = { ...cached.payload, fetchedAt: new Date(cached.computedAt).getTime() };
+        return res.json(serializeAgents(agentsCache));
+      }
+    }
+    // Reuse an in-flight run instead of launching another (avoids stacking
+    // memory-heavy ClickHouse scans when several clients refresh at once).
+    if (!agentsInflight) {
+      agentsInflight = refreshRooftopCache().finally(() => { agentsInflight = null; });
+    }
+    await agentsInflight;
+    return res.json(serializeAgents(agentsCache));
   } catch (err) {
     console.error("GET /api/agents error:", err?.message);
     return res.status(500).json({ error: err?.message ?? "Failed to load agents data" });
@@ -2252,6 +2283,272 @@ app.post("/api/email/roi-send-now", async (req, res) => {
   }
 });
 
+// ─── ROI Email Tracker · on-demand "Generate & send {cadence}" ──────────────
+// Builds a digest in real time for the selected cadence (daily / weekly = last 7
+// days / monthly = last 30 days), renders via the SAME pipeline as the cron, and
+// sends to the rooftop's real recipients — bypassing the cron's send-day/send-hour
+// gates. Scope to ONE rooftop with { teamId, department }, or omit both to run all
+// live rooftops. Honours dry-run (server DRY_RUN + each rooftop's dry_run); pass
+// { dryRun: true } to force a suppressed preview (renders + stores, no email).
+// Body: { cadence, teamId?, department?, dryRun? }
+app.post("/api/email/roi-generate-send", async (req, res) => {
+  try {
+    const { cadence, teamId, department, dryRun } = req.body ?? {};
+    const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
+    const dept = department === "service" ? "service" : department === "sales" ? "sales" : undefined;
+    if (teamId && !dept) return res.status(400).json({ error: "department (sales|service) is required when teamId is set" });
+    const { generateAndSendNow } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
+    const summary = await generateAndSendNow({ cadence: cad, teamId: teamId || undefined, department: dept, dryRun: dryRun === true });
+    return res.json({ ok: true, ...summary });
+  } catch (err) {
+    console.error("POST /api/email/roi-generate-send error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "generate/send failed" });
+  }
+});
+
+// ── POST /api/email/roi-generate-preview — render a digest, return its HTML ───
+// Render-ONLY (no DB write, no email): builds the same metrics + HTML the on-demand
+// send would produce for ONE rooftop, so the tracker can preview a weekly/monthly
+// digest before the user manually triggers the send. Body: { cadence, teamId, department }
+app.post("/api/email/roi-generate-preview", async (req, res) => {
+  try {
+    const { cadence, teamId, department } = req.body ?? {};
+    const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
+    const dept = department === "service" ? "service" : "sales";
+    if (!teamId) return res.status(400).json({ error: "teamId is required" });
+    const { previewDigestNow } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
+    const out = await previewDigestNow({ cadence: cad, teamId, department: dept });
+    return res.json(out);
+  } catch (err) {
+    console.error("POST /api/email/roi-generate-preview error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "preview failed" });
+  }
+});
+
+// ── Live PREVIEW of ONE transactional email with the CURRENT template ────────
+// Re-renders an event for a customer on demand (no DB write, no send) from the reporting
+// feeds, so the tracker's "Latest design" toggle shows the up-to-date email per customer
+// even when the stored copy is older or no event was sent yet.
+// Body: { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz }
+app.post("/api/email/roi-event-preview", async (req, res) => {
+  try {
+    const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
+    if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
+    // Primary source: production ClickHouse (the reporting API never exposed conversations/
+    // action-items). Fall back to the reporting-API path only when CH isn't configured.
+    let html = "";
+    const { hasClickhouseCreds } = await import("./agentMetrics.js");
+    if (hasClickhouseCreds()) {
+      const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
+      html = await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz });
+    } else {
+      const { previewEvent } = require("./roi-cron/eventRunner.cjs");
+      html = await previewEvent({ teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz });
+    }
+    return res.json({ ok: true, empty: !html, html: html || "" });
+  } catch (err) {
+    console.error("POST /api/email/roi-event-preview error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "preview failed" });
+  }
+});
+
+// ── GET /api/email/roi-event-list — all real events for a rooftop+type from CH ──
+// Backfill + live: lists every event in the window (history included) so the
+// transactional drill-down shows all data, not just generated rows. Read-only.
+// Query: ?teamId&department&emailType&sinceDays?&limit?
+app.get("/api/email/roi-event-list", async (req, res) => {
+  try {
+    const { teamId, department, emailType, direction, sinceDays, limit } = req.query;
+    if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
+    if (!hasClickhouseCreds()) return res.json({ ok: true, events: [], note: "ClickHouse not configured" });
+    const { listEventsCH } = await import("./roi-cron/eventPreviewCH.js");
+    const events = await listEventsCH({ teamId, department, emailType, direction, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200 });
+    return res.json({ ok: true, events });
+  } catch (err) {
+    console.error("GET /api/email/roi-event-list error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "list failed" });
+  }
+});
+
+// ── GET /api/email/roi-event-counts — per (team×dept×type) totals from CH ────
+// Powers the transactional grid totals from REAL events (history + live). Three
+// heavy grouped scans → cached in-process for 5 min. ?refresh=1 bypasses.
+let eventCountsCache = { rows: null, fetchedAt: 0 };
+let eventCountsInflight = null;
+const EVENT_COUNTS_TTL_MS = 5 * 60 * 1000;
+app.get("/api/email/roi-event-counts", async (req, res) => {
+  try {
+    if (!hasClickhouseCreds()) return res.json({ ok: true, counts: [], note: "ClickHouse not configured" });
+    const force = req.query.refresh === "1";
+    const fresh = !force && eventCountsCache.rows && (Date.now() - eventCountsCache.fetchedAt) < EVENT_COUNTS_TTL_MS;
+    if (!fresh) {
+      if (!eventCountsInflight) {
+        const sinceDays = Number(req.query.sinceDays) || 120;
+        eventCountsInflight = import("./roi-cron/eventPreviewCH.js")
+          .then((m) => m.countEventsCH({ sinceDays }))
+          .then((rows) => { eventCountsCache = { rows, fetchedAt: Date.now() }; })
+          .finally(() => { eventCountsInflight = null; });
+      }
+      await eventCountsInflight;
+    }
+    return res.json({ ok: true, counts: eventCountsCache.rows || [], fetchedAt: new Date(eventCountsCache.fetchedAt).toISOString() });
+  } catch (err) {
+    console.error("GET /api/email/roi-event-counts error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "counts failed" });
+  }
+});
+
+// ── Manual send of ONE transactional email (roi_event_emails) ────────────────
+// Sends the stored rendered_html of a single per-event email to its recipients
+// (override `to`, else the row's recipients, else the rooftop's configured ones),
+// then marks the row sent. Used by the tracker's per-email "Send now" button.
+app.post("/api/email/roi-event-send-now", async (req, res) => {
+  try {
+    const { id, to } = req.body ?? {};
+    if (!id) return res.status(400).json({ error: "id required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+
+    const { data: row, error: rowErr } = await sb.from("roi_event_emails")
+      .select("id,team_id,department,email_type,subject,rendered_html,recipients").eq("id", id).maybeSingle();
+    if (rowErr || !row) return res.status(404).json({ error: "event email not found" });
+    if (!row.rendered_html) return res.status(400).json({ error: "no rendered copy to send" });
+
+    // recipients: explicit override → the row's recipients → the rooftop's enabled recipients for this dept
+    let recipients = (Array.isArray(to) ? to : to ? [to] : []).map((s) => String(s || "").trim()).filter(Boolean);
+    if (!recipients.length) recipients = (row.recipients ?? []).map((r) => String(r?.email || "").trim()).filter(Boolean);
+    if (!recipients.length) {
+      const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled").eq("team_id", row.team_id);
+      recipients = (recs ?? []).filter((r) => (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+    }
+    if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
+
+    const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
+    const template = process.env.MAIL_TEMPLATE || "email-control-tower-report";
+    const mailRes = await fetch(mailUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}) },
+      body: JSON.stringify({ to: recipients.join(","), subject: row.subject || "Vini", template, templateData: { HTMLdata: row.rendered_html } }),
+    });
+    if (!mailRes.ok) {
+      const t = await mailRes.text().catch(() => "");
+      return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` });
+    }
+    const mj = await mailRes.json().catch(() => ({}));
+    const messageId = mj.messageId ?? mj.id ?? null;
+    await sb.from("roi_event_emails").update({
+      status: "sent", reason: null, sent_at: new Date().toISOString(), message_id: messageId,
+      recipients: recipients.map((email) => ({ email, received: true })),
+    }).eq("id", id);
+    return res.json({ ok: true, messageId, to: recipients });
+  } catch (err) {
+    console.error("POST /api/email/roi-event-send-now error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "send failed" });
+  }
+});
+
+// ── Render a transactional email LIVE and send it to the rooftop's recipients ─
+// Powers the tracker's per-cell "Send to customer" for a type that has no stored event
+// yet: renders the latest-design email from ClickHouse (previewEventCH), emails it to the
+// dept's enabled recipients, and records a roi_event_emails row so it shows in the list.
+// Body: { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz }
+const EVENT_SUBJECTS = {
+  post_appointment: "New appointment", post_conversation: "Conversation summary",
+  action_item: "Action items", action_item_overdue: "Overdue action items",
+};
+app.post("/api/email/roi-event-generate-send", async (req, res) => {
+  try {
+    const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
+    if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
+    const dept = department === "service" ? "service" : "sales";
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+
+    // 1) render the email from live ClickHouse data (same path as the preview)
+    const { hasClickhouseCreds } = await import("./agentMetrics.js");
+    if (!hasClickhouseCreds()) return res.status(500).json({ error: "ClickHouse not configured on this server" });
+    const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
+    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz });
+    if (!html) return res.status(404).json({ error: "No live data found to render this email for the rooftop." });
+
+    // 2) recipients — the dept's enabled addresses
+    const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled").eq("team_id", teamId);
+    const recipients = (recs ?? []).filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+    if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
+
+    // 3) send via the mail proxy
+    const subject = `${EVENT_SUBJECTS[emailType] || "Vini"} — ${rooftopName || teamId}`;
+    const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
+    const template = process.env.MAIL_TEMPLATE || "email-control-tower-report";
+    const mailRes = await fetch(mailUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}) },
+      body: JSON.stringify({ to: recipients.join(","), subject, template, templateData: { HTMLdata: html } }),
+    });
+    if (!mailRes.ok) { const t = await mailRes.text().catch(() => ""); return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` }); }
+    const mj = await mailRes.json().catch(() => ({}));
+    const messageId = mj.messageId ?? mj.id ?? null;
+
+    // 4) record it so the cell flips from "—" to a count and the email is viewable
+    await sb.from("roi_event_emails").insert({
+      team_id: teamId, enterprise_id: enterpriseId || null, department: dept, email_type: emailType,
+      event_key: `manual-${emailType}-${messageId || Date.now()}`, status: "sent", subject,
+      rendered_html: html, message_id: messageId, sent_at: new Date().toISOString(),
+      recipients: recipients.map((email) => ({ email, received: true })),
+    });
+    return res.json({ ok: true, messageId, to: recipients });
+  } catch (err) {
+    console.error("POST /api/email/roi-event-generate-send error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "send failed" });
+  }
+});
+
+// ── Open-rate tracking pixel ─────────────────────────────────────────────────
+// The digest embeds <img src=".../api/email/track-open?t=<team>&d=<dept>&dt=<date>&r=<email>">.
+// On first load we stamp roi_digest_runs.opened_at and flip recipients[].opened for
+// the matching address. ALWAYS returns a 1×1 transparent GIF (never blocks the image
+// or leaks errors to the inbox); the DB write is best-effort.
+const TRACK_PIXEL = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+app.get("/api/email/track-open", async (req, res) => {
+  const sendPixel = () => {
+    res.set("Content-Type", "image/gif");
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, private");
+    res.set("Pragma", "no-cache");
+    res.set("Content-Length", String(TRACK_PIXEL.length));
+    res.status(200).end(TRACK_PIXEL);
+  };
+  try {
+    const teamId = String(req.query.t || "").trim();
+    const department = String(req.query.d || "").trim() === "service" ? "service" : "sales";
+    const localDate = String(req.query.dt || "").trim();
+    const who = String(req.query.r || "").trim().toLowerCase();
+    sendPixel(); // respond immediately; record asynchronously below
+    if (!teamId || !localDate) return;
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return;
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data: row } = await sb.from("roi_digest_runs")
+      .select("recipients,opened_at").eq("team_id", teamId).eq("department", department)
+      .eq("cadence", "daily").eq("local_date", localDate).maybeSingle();
+    if (!row) return;
+    const now = new Date().toISOString();
+    const recipients = (Array.isArray(row.recipients) ? row.recipients : []).map((rec) => {
+      const match = !who || String(rec.email || "").toLowerCase() === who;
+      return match ? { ...rec, opened: true, opened_at: rec.opened_at || now } : rec;
+    });
+    await sb.from("roi_digest_runs").update({ opened_at: row.opened_at || now, recipients })
+      .eq("team_id", teamId).eq("department", department).eq("cadence", "daily").eq("local_date", localDate);
+  } catch (err) {
+    console.error("GET /api/email/track-open error:", err?.message ?? err);
+    if (!res.headersSent) sendPixel();
+  }
+});
+
 // ── Add a recipient to a rooftop+department (tracker "Add recipient") ────────
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
 app.post("/api/recipients", async (req, res) => {
@@ -2393,12 +2690,53 @@ app.get("/api/cron/roi-email", async (req, res) => {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
-    const { runOnce } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const { runOnce, runCadence } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
     const summary = await runOnce();
-    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
+    // Weekly/monthly digests run in the same hourly pass; each is internally gated to
+    // its send-day (Mon / 1st) + send-hour, so off-day passes are cheap no-ops.
+    const weekly = await runCadence("weekly").catch((e) => ({ error: String(e).slice(0, 120) }));
+    const monthly = await runCadence("monthly").catch((e) => ({ error: String(e).slice(0, 120) }));
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary, weekly, monthly });
   } catch (err) {
     console.error("GET /api/cron/roi-email error:", err?.message ?? err);
     return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
+  }
+});
+
+// ── Transactional email poll (Vercel Cron → this route, ~every 15 min) ──────
+// Sends the per-event emails (post-appointment / post-conversation / action-item / overdue)
+// for rooftops that enabled them in roi_rooftop_config. Dedup via roi_event_emails.
+app.get("/api/cron/roi-events", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const { runOnce } = require("./roi-cron/eventRunner.cjs");
+    const summary = await runOnce();
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
+  } catch (err) {
+    console.error("GET /api/cron/roi-events error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "events cron failed" });
+  }
+});
+
+// ── GET /api/cron/csm-sync — refresh the CSM (cs_poc) mapping ────────────────
+// Pulls Metabase Q12071's cs_poc_email per team_id and upserts it into
+// roi_rooftop_config.cs_poc — the authoritative CSM the Email Tracker reads.
+// Idempotent; safe on a schedule. Vercel sends Authorization: Bearer <secret>.
+app.get("/api/cron/csm-sync", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const { syncCsPoc } = require("./roi-cron/syncCsPoc.cjs"); // lazy: env present at request time
+    const summary = await syncCsPoc();
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), ...summary });
+  } catch (err) {
+    console.error("GET /api/cron/csm-sync error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "csm-sync failed" });
   }
 });
 
@@ -2414,30 +2752,85 @@ let metricsCache = { payload: null, fetchedAt: 0 };
 let metricsInflight = null; // single-flight: concurrent callers share one query set
 const METRICS_TTL_MS = 20 * 60 * 1000;
 
+// Compute + persist the Overall bundle to the cron-backed cache.
+async function refreshMetricsCache() {
+  const payload = await runAgentMetrics();
+  metricsCache = { payload, fetchedAt: Date.now() };
+  await writeAgentCache(AGENT_CACHE_KEY_OVERALL, payload);
+  return payload;
+}
+
+// Same serving order as /api/agents: warm in-process → precomputed Postgres
+// cache (instant) → live ClickHouse only on a cold first load or ?refresh=1.
 app.get("/api/metrics", async (req, res) => {
-  if (!hasClickhouseCreds()) {
-    res.status(503).json({ error: "ClickHouse env vars not set (need CLICKHOUSE_HOST/PORT/USER/PASSWORD) — using bundled snapshot." });
-    return;
-  }
   try {
     const force = req.query.refresh === "1";
-    const fresh = !force && metricsCache.payload && (Date.now() - metricsCache.fetchedAt) < METRICS_TTL_MS;
-    if (!fresh) {
-      // Reuse an in-flight run instead of launching another (avoids stacking
-      // memory-heavy ClickHouse scans when several clients refresh at once).
-      if (!metricsInflight) {
-        metricsInflight = runAgentMetrics()
-          .then((payload) => { metricsCache = { payload, fetchedAt: Date.now() }; })
-          .finally(() => { metricsInflight = null; });
-      }
-      await metricsInflight;
+    if (!force && metricsCache.payload && (Date.now() - metricsCache.fetchedAt) < METRICS_TTL_MS) {
+      res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=1200");
+      return res.status(200).json(metricsCache.payload);
     }
+    if (!force) {
+      const cached = await readAgentCache(AGENT_CACHE_KEY_OVERALL);
+      if (cached?.payload?.bundle) {
+        metricsCache = { payload: cached.payload, fetchedAt: new Date(cached.computedAt).getTime() };
+        res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=1200");
+        return res.status(200).json(metricsCache.payload);
+      }
+    }
+    // No cached bundle yet — a live compute needs ClickHouse creds. Without them
+    // the frontend falls back to its bundled snapshot (public/agent-overall-snapshot.json).
+    if (!hasClickhouseCreds()) {
+      return res.status(503).json({ error: "ClickHouse env vars not set (need CLICKHOUSE_HOST/PORT/USER/PASSWORD) — using bundled snapshot." });
+    }
+    // Reuse an in-flight run instead of launching another (avoids stacking
+    // memory-heavy ClickHouse scans when several clients refresh at once).
+    if (!metricsInflight) {
+      metricsInflight = refreshMetricsCache().finally(() => { metricsInflight = null; });
+    }
+    await metricsInflight;
     res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=1200");
     res.status(200).json(metricsCache.payload);
   } catch (err) {
     console.error("GET /api/metrics error:", err?.message ?? err);
     res.status(500).json({ error: String(err?.message ?? err) });
   }
+});
+
+// ── GET /api/cron/agents-refresh — precompute both dashboards into the cache ──
+// Vercel Cron hits this on a schedule (see vercel.json) so the heavy ClickHouse
+// scans run OFF the request path. Both /api/agents and /api/metrics then serve a
+// sub-100ms Postgres lookup. Vercel sends `Authorization: Bearer <CRON_SECRET>`.
+app.get("/api/cron/agents-refresh", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const ranAt = new Date().toISOString();
+  if (!hasCacheDb()) {
+    console.warn("[cron/agents-refresh] no cache DB configured (POSTGRES_URL) — precompute skipped");
+  }
+  // Both refreshes share the global ClickHouse concurrency cap internally, so
+  // launching them together just interleaves their queries. allSettled so one
+  // failing tab still persists the other.
+  const [rooftop, overall] = await Promise.allSettled([
+    refreshRooftopCache(),
+    hasClickhouseCreds()
+      ? refreshMetricsCache()
+      : Promise.reject(new Error("ClickHouse creds not set")),
+  ]);
+  const summary = {
+    ranAt,
+    cacheDb: hasCacheDb(),
+    rooftop: rooftop.status === "fulfilled"
+      ? { ok: true, daily: rooftop.value.daily.length, totals: rooftop.value.totals.length, source: rooftop.value.source }
+      : { ok: false, error: String(rooftop.reason?.message ?? rooftop.reason) },
+    overall: overall.status === "fulfilled"
+      ? { ok: true, meta: overall.value.meta }
+      : { ok: false, error: String(overall.reason?.message ?? overall.reason) },
+  };
+  const ok = rooftop.status === "fulfilled" || overall.status === "fulfilled";
+  if (!ok) console.error("[cron/agents-refresh] both refreshes failed", summary);
+  return res.status(ok ? 200 : 500).json({ ok, ...summary });
 });
 
 export default app;

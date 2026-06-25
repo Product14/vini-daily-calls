@@ -85,7 +85,7 @@ const lbl: CSSProperties = { textTransform: "uppercase", letterSpacing: ".06em",
 const group: CSSProperties = { display: "flex", alignItems: "center" };
 
 export function OverallView() {
-  const { bundle, meta, loading, error, live, refresh } = useOverallData();
+  const { bundle, meta, loading, error, live, refresh, reload } = useOverallData();
   const sheetSummary = useAgentSheetSummary();
   const [view, setView] = useState<ViewKind>("snapshot");
   const [grain, setGrain] = useState<Grain>("week");
@@ -103,11 +103,12 @@ export function OverallView() {
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Auto-sync every 20 min so an always-on screen never goes stale. Visible-tab
-  // only and silent (refresh keeps the current data on screen until the fresh
-  // pull lands). A ref keeps the interval (set up once) calling the latest
-  // refresh closure. Source is Q12227 via the live ClickHouse query.
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+  // only and silent (keeps the current data on screen until the fresh read
+  // lands). Uses reload() — re-reads the cron-precomputed cache rather than
+  // forcing a live ~50s ClickHouse scan on every interval tick. A ref keeps the
+  // interval (set up once) calling the latest closure.
+  const refreshRef = useRef(reload);
+  refreshRef.current = reload;
   useEffect(() => {
     const id = setInterval(() => {
       if (document.visibilityState === "visible") refreshRef.current();

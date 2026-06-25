@@ -521,12 +521,13 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   }, [mainView]);
 
   // Auto-sync the rooftop data every 20 min while it's the active view and the
-  // tab is visible — force=true bypasses the server's 20-min cache for a fresh
-  // ClickHouse (Q12227) pull. Keeps an always-on screen current.
+  // tab is visible — force=false re-reads the precomputed cache (kept fresh by
+  // the agents-refresh cron), so an always-on screen stays current WITHOUT ever
+  // triggering a live ~66s ClickHouse scan on the request path.
   useEffect(() => {
     if (mainView !== "rooftop") return;
     const id = setInterval(() => {
-      if (document.visibilityState === "visible") load(true);
+      if (document.visibilityState === "visible") load(false);
     }, 20 * 60 * 1000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps

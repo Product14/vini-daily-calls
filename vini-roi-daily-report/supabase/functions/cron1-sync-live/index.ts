@@ -33,6 +33,7 @@ Deno.serve(async (req) => {
   const team = u.searchParams.get("team");
   const dry = u.searchParams.get("dry") === "true";
   const force = u.searchParams.get("force") === "true"; // real send, override dry_run flag (manual "Send now")
+  const spyneOnly = u.searchParams.get("spyneOnly") === "true"; // real send, but ONLY to @spyne.ai recipients (preview)
   const bypass = u.searchParams.get("bypass") === "true"; // ignore send-hour gate (manual tests)
   const skipSync = u.searchParams.get("skipSync") === "true";
   const mailToken = req.headers.get("x-mail-token") ?? ""; // FE-supplied mail cookie/token, forwarded to cron4
@@ -70,7 +71,7 @@ Deno.serve(async (req) => {
   result.cron3 = await call("cron3-render", scope);
   result.cron4 = await call(
     "cron4-send",
-    { ...scope, ...(dry ? { dry: "true" } : {}), ...(force ? { force: "true" } : {}) },
+    { ...scope, ...(dry ? { dry: "true" } : {}), ...(force ? { force: "true" } : {}), ...(spyneOnly ? { spyneOnly: "true" } : {}) },
     mailToken ? { "x-mail-token": mailToken } : {}, // forward FE token to cron4 (header, not URL)
   );
 
