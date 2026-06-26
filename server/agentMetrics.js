@@ -56,7 +56,12 @@ async function runClickhouseRaw(sql) {
   const user = process.env.CLICKHOUSE_USER || "default";
   const pass = process.env.CLICKHOUSE_PASSWORD;
   const auth = "Basic " + Buffer.from(`${user}:${pass}`).toString("base64");
-  const r = await fetch(`https://${host}:${port}/`, {
+  // Memory safety: let heavy GROUP BY/ORDER BY spill to disk instead of blowing the per-query
+  // memory limit (the /api/metrics bundle was intermittently 500ing with "memory limit exceeded:
+  // would use 58 GiB" on a cache-miss live compute). Settings ride on the HTTP URL so the SQL is
+  // untouched. 4 GiB thresholds → spill kicks in well before the limit.
+  const settings = "max_bytes_before_external_group_by=4000000000&max_bytes_before_external_sort=4000000000";
+  const r = await fetch(`https://${host}:${port}/?${settings}`, {
     method: "POST",
     headers: { Authorization: auth, "Content-Type": "text/plain" },
     body: sql + "\nFORMAT JSONEachRow",

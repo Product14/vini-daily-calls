@@ -73,11 +73,17 @@ function fmtSched(iso, tz) {
 // trusted service secret (preferred) or the Spyne token so these server-to-server calls authorize;
 // without this the conversations/action-items/reports/meetings calls return 401.
 const REPORTING_AUTH = process.env.CRON_SECRET || SPYNE_TOKEN || "";
+// Set when any feed response comes back degraded (e.g. reporting-vini missing CLICKHOUSE_* → empty
+// feed). Surfaced loudly at the end of runOnce so a misconfig can't silently disable all transactional
+// email for days. Reset at the start of each pass.
+let _feedDegraded = false;
 async function apiJson(path) {
   const headers = REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {};
   const res = await fetch(`${REPORTING_API_BASE}${path}`, { headers, signal: AbortSignal.timeout(12000) });
   if (!res.ok) throw new Error(`reporting-api ${res.status} ${path}`);
-  return res.json();
+  const j = await res.json();
+  if (j && (j.degraded || j.note === "clickhouse not configured")) _feedDegraded = true;
+  return j;
 }
 function links(team, ent, dept) {
   const q = `?enterprise_id=${encodeURIComponent(ent || "")}&team_id=${encodeURIComponent(team)}&serviceType=${dept}`;
@@ -127,6 +133,7 @@ const finish = (id, patch) => sb.from("roi_event_emails").update(patch).eq("id",
 
 async function runOnce() {
   console.log(`\n── ROI EVENT pass @ ${new Date().toISOString()} · DRY_RUN=${DRY_RUN} · window=${POLL_MINUTES}m ──`);
+  _feedDegraded = false;
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
@@ -259,6 +266,10 @@ async function runOnce() {
         out.sent++;
       } catch (e) { out.errors++; if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
     }
+  }
+  if (_feedDegraded) {
+    out.feed_degraded = true;
+    console.error("  ⚠️  reporting-vini feed DEGRADED (clickhouse not configured) — transactional emails are DISABLED until CLICKHOUSE_HOST/CLICKHOUSE_PASSWORD are set on the reporting-vini deployment. No events were sent this pass.");
   }
   console.log("  events summary:", JSON.stringify(out));
   return out;
