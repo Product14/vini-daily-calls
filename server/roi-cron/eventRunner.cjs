@@ -105,8 +105,9 @@ async function runOnce() {
   console.log(`\n── ROI EVENT pass @ ${new Date().toISOString()} · DRY_RUN=${DRY_RUN} · window=${POLL_MINUTES}m ──`);
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,enterprise_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes"),
+    // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
+    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -123,16 +124,16 @@ async function runOnce() {
     const tz = c.timezone || "America/New_York"; // dealer-local zone for windows + displayed times
     const dept = L.department; // 'sales' | 'service'
     const emails = (recOf.get(L.team_id) ?? []).filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
-    const base = { team_id: L.team_id, enterprise_id: L.enterprise_id, department: dept };
+    const base = { team_id: L.team_id, enterprise_id: c.enterprise_id, department: dept };
     const dry = DRY_RUN || L.dry_run === true;
-    const L_ = links(L.team_id, L.enterprise_id, dept);
+    const L_ = links(L.team_id, c.enterprise_id, dept);
 
     // Build the list of (type, eventKey, render, subject) jobs for the enabled types.
     const jobs = [];
     try {
       if (c.post_appointment_enabled) {
         const day = localDateISO(tz); // dealer-local "today", not UTC
-        const j = await apiJson(`/api/meetings?scope=window&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(L.enterprise_id || "")}&serviceType=${dept}&start=${day}&end=${day}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
+        const j = await apiJson(`/api/meetings?scope=window&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&start=${day}&end=${day}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
         const mtd = await apptMTD(L.team_id, dept);
         for (const m of (j.meetings || []).slice(0, 50)) {
           if (!m.id) continue;
