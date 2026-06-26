@@ -21,6 +21,9 @@
  */
 const { createClient } = require("@supabase/supabase-js");
 const T = require("../../src/email/transactionalTemplates.cjs");
+// Anti-churn value gate (shared with the digest runner) — never email a no-value
+// transactional unless overridden (DANGER).
+const emailValue = require("./emailValue.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -32,6 +35,15 @@ const REPORTING_API_BASE = (process.env.REPORTING_API_BASE || "https://reporting
 const SPYNE_TOKEN = process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
 const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 20); // look-back window per pass
 const CONSOLE_BASE = "https://console.spyne.ai/converse-ai";
+
+// Open-tracking pixel → the track-open Edge Function (keyed by the event-email row id).
+// Override the host with DIGEST_TRACK_BASE if it ever moves.
+const TRACK_OPEN_URL = (process.env.DIGEST_TRACK_BASE || "https://qludnojfibguobgeeujw.supabase.co/functions/v1/track-open").replace(/\/$/, "");
+function withPixel(html, id) {
+  if (!html || !id) return html;
+  const img = `<img src="${TRACK_OPEN_URL}?id=${encodeURIComponent(id)}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;opacity:0;" />`;
+  return html.includes("</body>") ? html.replace("</body>", `${img}</body>`) : html + img;
+}
 
 const IS_CLI = require.main === module;
 if (IS_CLI && (!SB_URL || !SB_KEY)) { console.error("Set ROI_SUPABASE_URL + ROI_SUPABASE_SERVICE_KEY"); process.exit(1); }
@@ -57,8 +69,13 @@ function fmtSched(iso, tz) {
     return `${dp} · ${tp}`;
   } catch { return ""; }
 }
+// The reporting-vini read API now requires a credential (it returns per-customer PII). Forward the
+// trusted service secret (preferred) or the Spyne token so these server-to-server calls authorize;
+// without this the conversations/action-items/reports/meetings calls return 401.
+const REPORTING_AUTH = process.env.CRON_SECRET || SPYNE_TOKEN || "";
 async function apiJson(path) {
-  const res = await fetch(`${REPORTING_API_BASE}${path}`, { signal: AbortSignal.timeout(12000) });
+  const headers = REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {};
+  const res = await fetch(`${REPORTING_API_BASE}${path}`, { headers, signal: AbortSignal.timeout(12000) });
   if (!res.ok) throw new Error(`reporting-api ${res.status} ${path}`);
   return res.json();
 }
@@ -79,7 +96,14 @@ async function apptMTD(team, dept) {
   } catch { return 0; }
 }
 
-async function sendMail(to, subject, html) {
+async function sendMail(to, subject, html, opts) {
+  // Anti-churn gate: refuse a no-value email (marker stamped by the renderer)
+  // unless { force: true } (DANGER override). Strip the marker off the wire.
+  const force = opts && opts.force === true;
+  if (emailValue.isNoValue(html)) {
+    if (!force) { const e = new Error("This email shows no value — blocked to avoid churn. Override with the password to send."); e.code = "BLOCKED_NO_VALUE"; throw e; }
+    html = emailValue.stripMarker(html);
+  }
   const body = JSON.stringify({ to: to.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } });
   for (let attempt = 1; attempt <= 3; attempt++) {
     const res = await fetch(MAIL_URL, { method: "POST", headers: { "Content-Type": "application/json", ...(MAIL_TOKEN ? { Authorization: `Bearer ${MAIL_TOKEN}` } : {}) }, body });
@@ -209,7 +233,7 @@ async function runOnce() {
             aiScore: seed.aiScore, grade: seed.grade, sentiment: seed.sentiment, sentimentScore: seed.sentimentScore,
             lastSummary: seed.lastSummary || seed.conversationSummary,
           };
-          const oldest = items.map((x) => x.dueAt).filter(Boolean).sort()[0];
+          const oldest = items.map((x) => x.dueAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
           jobs.push({ type: "action_item_overdue", key: `lead:${k}:overdue:${dayKey}`,
             subject: `Overdue — ${lead.customer || name}`,
             html: T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }) });
@@ -222,13 +246,16 @@ async function runOnce() {
       try {
         id = await claim({ ...base, email_type: job.type }, job.key);
         if (!id) { out.skipped_dupe++; continue; } // already handled in a prior pass
+        // Inject the open-tracking pixel now that we have the row id, so the stored
+        // HTML and the sent bytes both carry it (id keys the open back to this row).
+        const html = withPixel(job.html, id);
         // Always store the generated HTML — even when we can't send (no recipient) — so the tracker
         // always has a copy to view and you can send it manually later.
-        if (!emails.length) { await finish(id, { status: "not_sent", reason: "recipients_missing", subject: job.subject, rendered_html: job.html }); out.no_recipients++; continue; }
-        if (dry) { await finish(id, { status: "suppressed", reason: "dry_run", subject: job.subject, rendered_html: job.html, recipients: emails.map((e) => ({ email: e })) }); out.suppressed++; continue; }
+        if (!emails.length) { await finish(id, { status: "not_sent", reason: "recipients_missing", subject: job.subject, rendered_html: html }); out.no_recipients++; continue; }
+        if (dry) { await finish(id, { status: "suppressed", reason: "dry_run", subject: job.subject, rendered_html: html, recipients: emails.map((e) => ({ email: e })) }); out.suppressed++; continue; }
         const sentAt = new Date().toISOString();
-        const messageId = await sendMail(emails, job.subject, job.html);
-        await finish(id, { status: "sent", subject: job.subject, rendered_html: job.html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
+        const messageId = await sendMail(emails, job.subject, html);
+        await finish(id, { status: "sent", subject: job.subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
         out.sent++;
       } catch (e) { out.errors++; if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
     }
@@ -291,7 +318,7 @@ async function previewEvent(opts) {
     lastSummary: seed.lastSummary || seed.conversationSummary,
   };
   if (emailType === "action_item_overdue") {
-    const oldest = use.map((x) => x.dueAt).filter(Boolean).sort()[0];
+    const oldest = use.map((x) => x.dueAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
     return T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items: use, oldestDueAt: oldest, totalOverdue: use.length, links: L_ });
   }
   return T.renderActionItem({ rooftopName: name, dept, tz, lead, items: use, totalOpen: use.length, justArrived: 0, mtdOpen: j.total, links: L_ });

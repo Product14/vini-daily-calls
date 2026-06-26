@@ -223,23 +223,20 @@ function renderDigestHtml(metrics, opts) {
   var asset = function (p) { return assetBase + p; };
 
   // ── figures ────────────────────────────────────────────────────────────────
-  var appts = num(m.appointmentsYesterday);
+  // (bookingRate / hasAppts / est-pipeline figures dropped — booking-rate card + commentary +
+  //  est-pipeline line were removed in the Jun-2026 review.)
   var leads = num(m.totalLeads != null ? m.totalLeads : m.inboundUniqueLeads);
   var qualified = num(m.qualifiedLeads != null ? m.qualifiedLeads : m.qualifiedLeadsYesterday);
   var callsHandled = num(m.callsHandled != null ? m.callsHandled : m.conversationsCall);
   var convHandled = num(m.conversationsHandled) || callsHandled;
-  var bookingRate = num(m.bookingRate != null ? m.bookingRate : m.abr);
   var dollarRate = num(opts.dollarRate != null ? opts.dollarRate : m.dollarRate);
-  var apptMTD = num(m.appointmentsYesterdayMTD), leadsMTD = num(m.inboundUniqueLeadsMTD), bookingRateMTD = num(m.bookingRateMTD);
-  var estPipelineMTD = num(m.estPipeline) || (dollarRate > 0 ? apptMTD * dollarRate : 0);
-  var hasAppts = appts > 0;
+  var apptMTD = num(m.appointmentsYesterdayMTD), leadsMTD = num(m.inboundUniqueLeadsMTD);
 
   // Period-aware wording: daily → "yesterday", weekly → "this week", monthly → "this month".
   var period = opts.period === "weekly" || opts.period === "monthly" ? opts.period : "daily";
   var pn = period === "weekly" ? "this week" : period === "monthly" ? "this month" : "yesterday";
   var nextReport = period === "weekly" ? "next Monday · 7:00 AM" : period === "monthly" ? "1st of next month · 7:00 AM" : "tomorrow · 7:00 AM";
   var primary = primaryMetric(m, leads, pn);
-  var commentary = buildCommentary(m, primary.mode, pn);
 
   // ── HERO (scenic photo bg + white inner panel) ──────────────────────────────
   var heroBg = "background:" + BRAND + ";background:" + BRAND + " url('" + asset("/digest-assets/hero.jpg") + "') center/cover no-repeat;";
@@ -250,26 +247,25 @@ function renderDigestHtml(metrics, opts) {
     '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
     '<td valign="middle"><span style="font-size:52px;line-height:1;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(primary.n) + "</span>" +
     '<span style="font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';">&nbsp;&nbsp;' + esc(primary.label) + "</span></td>" +
-    '<td align="right" valign="middle">' + btnPrimary("View leads", L.appointments || consoleUrl) + "</td>" +
+    '<td align="right" valign="middle">' + btnPrimary("View appointments", L.appointments || consoleUrl) + "</td>" +
     "</tr></table>" +
-    '<div style="font-size:14px;line-height:1.6;color:' + BODY + ';margin-top:16px;">' + esc(commentary) + "</div>" +
-    // MTD pop-out — the month-to-date appointment count, made prominent (review: MTD under every appointment number).
-    ((apptMTD > 0 || estPipelineMTD > 0) ? '<div style="margin-top:16px;border-top:1px solid ' + LINE + ';padding-top:14px;">' +
-      (apptMTD > 0 ? '<span style="font-size:22px;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(apptMTD) + '</span> <span style="font-size:12px;font-weight:700;color:' + MUTE + ';">appointments booked this month</span>' : "") +
-      (estPipelineMTD > 0 ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:6px;">Est. pipeline influenced &nbsp;<span style="font-weight:800;color:' + INK + ';">' + money(estPipelineMTD) + "</span></div>" : "") +
+    // MTD pop-out — month-to-date appointment count (commentary "Strong day…" line and the
+    // "Est. pipeline influenced" line both removed per Jun-2026 review).
+    (apptMTD > 0 ? '<div style="margin-top:16px;border-top:1px solid ' + LINE + ';padding-top:14px;">' +
+      '<span style="font-size:22px;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(apptMTD) + '</span> <span style="font-size:12px;font-weight:700;color:' + MUTE + ';">appointments booked this month</span>' +
       "</div>" : "") +
     "</td></tr></table></td></tr></table></td></tr>";
 
   // ── KPI CARDS (Figma glance tier) ───────────────────────────────────────────
   // Secondary metrics: Total leads · Calls handled · Qualified · Booking rate.
   // Spec edge: no appointments → drop the booking-rate (ABR) card, show 3.
+  // Three cards: Engaged leads · Calls handled · Qualified. (Booking-rate card removed per Jun-2026 review.)
   var cards =
-    kpiCard("Total leads", fmtInt(leads), "engaged", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : "") +
+    kpiCard("Engaged leads", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : "") +
     kpiCard("Calls handled", fmtInt(callsHandled), "", d.totalCalls, "") +
     kpiCard("Qualified leads", fmtInt(qualified), "", d.leadsQualified, "");
-  if (hasAppts) cards += kpiCard("Booking rate", bookingRate + "%", "", d.abr, bookingRateMTD ? bookingRateMTD + "% MTD" : "");
-  // kpiCard hardcodes width 25% (4-up); widen to 33% when the ABR card is dropped
-  else cards = cards.replace(/width="25%"/g, 'width="33%"');
+  // kpiCard hardcodes width 25% (4-up); 3 cards → widen each to 33%
+  cards = cards.replace(/width="25%"/g, 'width="33%"');
   var kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
 
   // ── UPSELL banner — WEEKLY/MONTHLY ONLY. The daily report is "just the day's work":
@@ -323,16 +319,16 @@ function renderDigestHtml(metrics, opts) {
     var aiTotal = sorted.reduce(function (s, it) { return s + num(it.count); }, 0) || 1;
     var overdue = num(m.actionItemsOverdue);
     var aiRows = sorted.slice(0, 6).map(function (it) {
-      var pct = Math.round((num(it.count) / aiTotal) * 100);
+      // Numeric count only — percent share removed per Jun-2026 review.
       return '<tr><td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:600;color:' + INK + ';">' + esc(humanize(it.intent)) + "</td>" +
-        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:800;color:' + INK + ';white-space:nowrap;">' + fmtInt(it.count) + ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + pct + "%</span></td></tr>";
+        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:800;color:' + INK + ';white-space:nowrap;">' + fmtInt(it.count) + "</td></tr>";
     }).join("");
     fuSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Action items", L.actionItems || consoleUrl) +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' +
       '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Intent</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Count</td></tr>' +
       aiRows + "</table>" +
       '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(aiTotal) + "</span> open" + (overdue > 0 ? ' &nbsp;·&nbsp; <span style="font-weight:800;color:' + NEG + ';">' + fmtInt(overdue) + " overdue</span>" : "") + (closedYesterday > 0 ? ' &nbsp;·&nbsp; ' + fmtInt(closedYesterday) + " closed " + pn : "") +
-      ' &nbsp;·&nbsp; <a href="' + esc(L.actionItems || consoleUrl) + '" target="_blank" rel="noopener noreferrer" style="color:' + BRAND + ';font-weight:700;text-decoration:none;">Take action &#8594;</a></div></td></tr>';
+      "</div></td></tr>"; // "Take action →" link removed per Jun-2026 review
   } else if (closedYesterday > 0) {
     fuSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Action items") +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #BBF7D0;border-radius:12px;background:#F0FDF4;"><tr><td style="padding:18px 20px;">' +
@@ -381,24 +377,31 @@ function renderDigestHtml(metrics, opts) {
     ? { n: inAppts, label: plural(inAppts, "Appointment booked", "Appointments booked") }
     : (num(m.warmLeads) > 0 ? { n: num(m.warmLeads), label: plural(num(m.warmLeads), "Lead warmed " + pn, "Leads warmed " + pn) } : { n: qualified, label: plural(qualified, "Qualified lead", "Qualified leads") });
   var hasInAppts = inAppts > 0;
+  // Two-column layout (Jun-2026 review): LEFT = the appointment-booked numbers; RIGHT = channel
+  // engaged + during/after hours (moved over from the full-width strip). The "VINI" agent device
+  // card was removed; booking-rate mini metric dropped along with the KPI card.
+  var inChannel = (callIn + smsIn + chatIn) > 0 ? eyebrow("Channel engaged") + channelBar(callIn, smsIn, chatIn) : "";
+  var hourCard = function (label, val, mtd) {
+    return '<div style="border:1px solid ' + LINE + ';border-radius:12px;padding:14px 16px;"><div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + label + '</div><div style="font-size:22px;font-weight:800;color:' + INK + ';margin-top:6px;">' + fmtInt(val) + (mtd ? ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + fmtInt(mtd) + " MTD</span>" : "") + "</div></div>";
+  };
+  var inHours = (during + after) > 0 ? '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:' + (inChannel ? "18px" : "0") + ';"><tr>' +
+    '<td width="50%" valign="top" style="padding-right:6px;">' + hourCard("During hours", during, duringMTD) + "</td>" +
+    '<td width="50%" valign="top" style="padding-left:6px;">' + hourCard("After hours", after, afterMTD) + "</td>" +
+    "</tr></table>" : "";
   var inboundSection =
     '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Inbound " + Dept.toLowerCase() + " performance") +
     '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
-    '<td valign="top">' +
+    // LEFT — appointment-booked numbers
+    '<td class="col" width="50%" valign="top" style="padding-right:16px;">' +
     '<div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(inboundBig.label) + (hasInAppts ? " " + pn : "") + "</div>" +
     '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(inboundBig.n) + "</span> &nbsp;" + (hasInAppts ? deltaChip(d.appointments) : "") + "</div>" +
     '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
-    miniMetric("Conversations", fmtInt(inboundConv), d.totalCalls, "34%") +
-    miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "33%") +
-    (hasAppts ? miniMetric("Booking rate", bookingRate + "%", d.abr, "33%") : miniMetric("Leads engaged", fmtInt(leads), d.leadsAttempted, "33%")) +
+    miniMetric("Conversations", fmtInt(inboundConv), d.totalCalls, "50%") +
+    miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "50%") +
     "</tr></table></td>" +
-    deviceCard(person, dept === "service" ? "AI Service Agent" : "AI Sales Agent", "LIVE", "0s") +
+    // RIGHT — channel engaged + during/after hours
+    '<td class="col" width="50%" valign="top">' + (inChannel || inHours ? inChannel + inHours : "&nbsp;") + "</td>" +
     "</tr></table>" +
-    ((callIn + smsIn + chatIn) > 0 ? '<div style="margin-top:24px;">' + eyebrow("Channel engaged") + channelBar(callIn, smsIn, chatIn) + "</div>" : "") +
-    ((during + after) > 0 ? '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
-      '<td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid ' + LINE + ';border-radius:12px;padding:16px 18px;"><div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">During hours</div><div style="font-size:24px;font-weight:800;color:' + INK + ';margin-top:6px;">' + fmtInt(during) + (duringMTD ? ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + fmtInt(duringMTD) + " MTD</span>" : "") + "</div></div></td>" +
-      '<td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid ' + LINE + ';border-radius:12px;padding:16px 18px;"><div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">After hours</div><div style="font-size:24px;font-weight:800;color:' + INK + ';margin-top:6px;">' + fmtInt(after) + (afterMTD ? ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + fmtInt(afterMTD) + " MTD</span>" : "") + "</div></div></td>" +
-      "</tr></table>" : "") +
     resCallout +
     "</td></tr>";
 
@@ -429,7 +432,7 @@ function renderDigestHtml(metrics, opts) {
     var handlePct = transferTotal > 0 ? Math.round(((transferTotal - transfers) / transferTotal) * 100) : 0;
     var handleMsg = handlePct > 0
       ? person + " resolved <b>" + handlePct + "% of conversations</b> without a human hand-off" + (transfers > 0 ? ", routing only <b>" + fmtInt(transfers) + "</b> warm transfer" + (transfers === 1 ? "" : "s") + " to your team." : ".")
-      : "Outbound reached <b>" + fmtInt(num(m.outboundUniqueReached)) + "</b> unique leads at a <b>" + num(m.outboundConnectRate) + "%</b> connect rate.";
+      : "Outbound reached <b>" + fmtInt(num(m.outboundUniqueReached)) + "</b> unique leads at a <b>" + Math.round(num(m.outboundConnectRate)) + "%</b> connect rate.";
     var handleCallout = calloutBox("✦", "AI handle rate", handleMsg, "lavender");
 
     outboundSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Outbound " + Dept.toLowerCase() + " performance") +
@@ -438,10 +441,10 @@ function renderDigestHtml(metrics, opts) {
       '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(obBig.n) + "</span> &nbsp;" + deltaChip(d.appointments) + "</div>" +
       '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
       miniMetric("Unique reached", fmtInt(m.outboundUniqueReached), d.totalCalls, "34%") +
-      miniMetric("Connect rate", num(m.outboundConnectRate) + "%", null, "33%") +
+      miniMetric("Connect rate", Math.round(num(m.outboundConnectRate)) + "%", null, "33%") +
       miniMetric(obAppts > 0 ? "Appointments" : "Leads warmed", obAppts > 0 ? fmtInt(obAppts) : fmtInt(obWarm), null, "33%") +
       "</tr></table></td>" +
-      deviceCard(person, dept === "service" ? "AI Service Agent" : "AI Sales Agent", "LIVE", "0s") +
+      // VINI agent device card removed per Jun-2026 review.
       "</tr></table>" +
       ((callOut + smsOut + chatOut) > 0 ? '<div style="margin-top:24px;">' + eyebrow("Channel engaged") + channelBar(callOut, smsOut, chatOut) + "</div>" : "") +
       outcomesHtml + handleCallout + "</td></tr>";
@@ -474,7 +477,7 @@ function renderDigestHtml(metrics, opts) {
   var pixel = opts.pixelUrl ? '<img src="' + esc(opts.pixelUrl) + '" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;opacity:0;" />' : "";
 
   // ── document ────────────────────────────────────────────────────────────────
-  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+  var __html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
     "<style>body{margin:0;}@media only screen and (max-width:600px){.wrap{width:100%!important;border-radius:0!important;}.col{display:block!important;width:100%!important;}.device{padding-left:0!important;padding-top:14px!important;}.upsell-cta{margin-top:16px;}.pad{padding-left:18px!important;padding-right:18px!important;}}</style></head>" +
     '<body style="margin:0;background:' + PAGE + ";font-family:" + FONT + ";color:" + INK + ';">' +
     '<table width="100%" cellpadding="0" cellspacing="0" style="background:' + PAGE + ';padding:28px 0;"><tr><td align="center">' +
@@ -496,6 +499,20 @@ function renderDigestHtml(metrics, opts) {
     // footer
     '<tr><td class="pad" style="padding:24px 28px 28px;" align="center"><div style="font-size:11px;color:' + FAINT + ';line-height:1.7;">Reporting period: ' + esc(opts.dateLabel) + ' &nbsp;·&nbsp; Next report: ' + esc(nextReport) + '<br/>© Spyne · Vini · 2026</div></td></tr>' +
     "</table>" + pixel + "</td></tr></table></body></html>";
+
+  // Anti-churn no-value marker (kept in sync with server/roi-cron/emailValue.cjs;
+  // stripped before the email is sent). A digest with zero real activity has no
+  // value to the customer, so stamp it here and EVERY send path refuses to send it
+  // unless an override password is supplied.
+  var __sig =
+    num(m.appointmentsYesterday) +
+    num(m.conversationsHandled) +
+    num(m.callsHandled != null ? m.callsHandled : m.conversationsCall) +
+    num(m.totalLeads != null ? m.totalLeads : m.inboundUniqueLeads) +
+    num(m.outboundTotalCalls) +
+    num(m.actionItemsTotal);
+  if (!(__sig > 0)) __html += "<!--vini:no-value-->";
+  return __html;
 }
 
 module.exports = { renderDigestHtml: renderDigestHtml, buildCommentary: buildCommentary, pickUpsell: pickUpsell, deviceCard: deviceCard };

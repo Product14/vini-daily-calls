@@ -2227,6 +2227,20 @@ app.post("/api/programs/send-report", async (req, res) => {
   }
 });
 
+// ─── Open-tracking pixel helpers (manual send paths) ────────────────────────
+// Mirror the cron renderers: inject the same 1×1 pixel pointing at the track-open
+// Edge Function so manually-sent mail is tracked too. Digest pixel keys by
+// team/dept/cadence/date; event pixel keys by the roi_event_emails row id.
+const TRACK_OPEN_BASE = (process.env.DIGEST_TRACK_BASE || "https://qludnojfibguobgeeujw.supabase.co/functions/v1/track-open").replace(/\/$/, "");
+const pixelTag = (qs) => `<img src="${TRACK_OPEN_BASE}?${qs}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;opacity:0;" />`;
+const injectPixel = (html, tag) => {
+  if (!html || !tag || html.includes(TRACK_OPEN_BASE)) return html; // skip if absent or already tracked
+  return html.includes("</body>") ? html.replace("</body>", `${tag}</body>`) : html + tag;
+};
+const digestPixel = (team, dept, cadence, dt) =>
+  pixelTag(`t=${encodeURIComponent(team)}&d=${encodeURIComponent(dept)}&c=${encodeURIComponent(cadence || "daily")}&dt=${encodeURIComponent(dt)}`);
+const eventPixel = (id) => pixelTag(`id=${encodeURIComponent(id)}`);
+
 // ─── ROI Email Tracker · real "send now" ────────────────────────────────────
 // Forwards the rendered digest HTML to the mail proxy AND marks the run sent in
 // the ROI Supabase (status=sent, recipients received, rendered_html stored) so
@@ -2234,11 +2248,17 @@ app.post("/api/programs/send-report", async (req, res) => {
 // Body: { teamId, department, localDate, to:[emails], subject, html }
 app.post("/api/email/roi-send-now", async (req, res) => {
   try {
-    const { teamId, department, localDate, to, subject, html } = req.body ?? {};
+    const { teamId, department, localDate, to, subject, html, override } = req.body ?? {};
     const recipients = (Array.isArray(to) ? to : [to]).map((s) => String(s || "").trim()).filter(Boolean);
     if (!teamId || !department || !localDate) return res.status(400).json({ error: "teamId, department, localDate required" });
     if (!recipients.length) return res.status(400).json({ error: "no recipients" });
     if (!html) return res.status(400).json({ error: "no html" });
+    // Anti-churn gate: a no-value digest is blocked unless the DANGER override is typed.
+    const force = require("./roi-cron/emailValue.cjs").overrideOk(override);
+
+    // Inject the open-tracking pixel (keyed by team/dept/daily/date) so a manual
+    // send is tracked exactly like the cron. No-op if the html already carries it.
+    const trackedHtml = injectPixel(html, digestPixel(teamId, department === "service" ? "service" : "sales", "daily", localDate));
 
     // 1) send via the EXACT SAME mail path as the daily cron. The cron (runOnce) and
     // Send Now both go through runner.sendMail — one mail URL, one token, one template
@@ -2248,8 +2268,11 @@ app.post("/api/email/roi-send-now", async (req, res) => {
     const { sendMail } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
     let messageId;
     try {
-      messageId = await sendMail(recipients, subject || "Daily Digest", html);
+      messageId = await sendMail(recipients, subject || "Daily Digest", trackedHtml, { force });
     } catch (mailErr) {
+      if (mailErr && mailErr.code === "BLOCKED_NO_VALUE") {
+        return res.json({ ok: false, blocked: true, reason: "no_value", error: mailErr.message });
+      }
       return res.status(502).json({ error: mailErr?.message ?? "mail send failed" });
     }
 
@@ -2261,7 +2284,7 @@ app.post("/api/email/roi-send-now", async (req, res) => {
       const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
       const { error } = await sb.from("roi_digest_runs").update({
         status: "sent", reason: null, sent_at: new Date().toISOString(), send_path: "raw_html",
-        rendered_html: html, message_id: messageId,
+        rendered_html: trackedHtml, message_id: messageId,
         recipients: recipients.map((email) => ({ email, received: true })),
       }).eq("team_id", teamId).eq("department", department).eq("cadence", "daily").eq("local_date", localDate);
       dbUpdated = !error;
@@ -2286,12 +2309,18 @@ app.post("/api/email/roi-send-now", async (req, res) => {
 // Body: { cadence, teamId?, department?, dryRun? }
 app.post("/api/email/roi-generate-send", async (req, res) => {
   try {
-    const { cadence, teamId, department, dryRun } = req.body ?? {};
+    const { cadence, teamId, department, dryRun, override } = req.body ?? {};
     const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
     const dept = department === "service" ? "service" : department === "sales" ? "sales" : undefined;
     if (teamId && !dept) return res.status(400).json({ error: "department (sales|service) is required when teamId is set" });
+    const force = require("./roi-cron/emailValue.cjs").overrideOk(override);
     const { generateAndSendNow } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
-    const summary = await generateAndSendNow({ cadence: cad, teamId: teamId || undefined, department: dept, dryRun: dryRun === true });
+    const summary = await generateAndSendNow({ cadence: cad, teamId: teamId || undefined, department: dept, dryRun: dryRun === true, force });
+    // Single-rooftop run that sent nothing because the digest had no value → tell the
+    // UI it's blocked so it can offer the DANGER override (skip when already forced).
+    if (teamId && !force && summary && summary.sent === 0 && (summary.no_data || 0) > 0) {
+      return res.json({ ok: false, blocked: true, reason: "no_value", error: "This digest shows no value — blocked to avoid churn.", ...summary });
+    }
     return res.json({ ok: true, ...summary });
   } catch (err) {
     console.error("POST /api/email/roi-generate-send error:", err?.message ?? err);
@@ -2360,11 +2389,11 @@ app.post("/api/email/roi-event-preview", async (req, res) => {
 // Query: ?teamId&department&emailType&sinceDays?&limit?
 app.get("/api/email/roi-event-list", async (req, res) => {
   try {
-    const { teamId, department, emailType, direction, sinceDays, limit } = req.query;
+    const { teamId, department, emailType, direction, sinceDays, limit, offset } = req.query;
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
     if (!hasClickhouseCreds()) return res.json({ ok: true, events: [], note: "ClickHouse not configured" });
     const { listEventsCH } = await import("./roi-cron/eventPreviewCH.js");
-    const events = await listEventsCH({ teamId, department, emailType, direction, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200 });
+    const events = await listEventsCH({ teamId, department, emailType, direction, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200, offset: Number(offset) || 0 });
     return res.json({ ok: true, events });
   } catch (err) {
     console.error("GET /api/email/roi-event-list error:", err?.message ?? err);
@@ -2400,14 +2429,36 @@ app.get("/api/email/roi-event-counts", async (req, res) => {
   }
 });
 
+// Shared mail-proxy POST with the SAME retry policy as the cron (eventRunner.sendMail):
+// retry transient 5xx/429 up to 3×, fail fast on other 4xx. Manual sends previously did a single
+// fetch, so a transient gateway blip failed a send the cron would have completed.
+async function postMailWithRetry(mailUrl, payload) {
+  const token = process.env.MAIL_TOKEN;
+  const init = {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(payload),
+  };
+  let last;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    last = await fetch(mailUrl, init);
+    if (last.ok) return last;
+    if (last.status < 500 && last.status !== 429) return last; // non-transient → don't retry
+    if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 1500));
+  }
+  return last;
+}
+
 // ── Manual send of ONE transactional email (roi_event_emails) ────────────────
 // Sends the stored rendered_html of a single per-event email to its recipients
 // (override `to`, else the row's recipients, else the rooftop's configured ones),
 // then marks the row sent. Used by the tracker's per-email "Send now" button.
 app.post("/api/email/roi-event-send-now", async (req, res) => {
   try {
-    const { id, to } = req.body ?? {};
+    const { id, to, override } = req.body ?? {};
     if (!id) return res.status(400).json({ error: "id required" });
+    const EV = require("./roi-cron/emailValue.cjs");
+    const force = EV.overrideOk(override);
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
@@ -2427,13 +2478,16 @@ app.post("/api/email/roi-event-send-now", async (req, res) => {
     }
     if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
 
+    // Anti-churn gate: refuse a no-value email unless the DANGER override is typed.
+    let wireHtml = row.rendered_html;
+    if (EV.isNoValue(wireHtml)) {
+      if (!force) return res.json({ ok: false, blocked: true, reason: "no_value", error: "This email shows no value — blocked to avoid churn." });
+      wireHtml = EV.stripMarker(wireHtml);
+    }
+
     const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
     const template = process.env.MAIL_TEMPLATE || "email-control-tower-report";
-    const mailRes = await fetch(mailUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}) },
-      body: JSON.stringify({ to: recipients.join(","), subject: row.subject || "Vini", template, templateData: { HTMLdata: row.rendered_html } }),
-    });
+    const mailRes = await postMailWithRetry(mailUrl, { to: recipients.join(","), subject: row.subject || "Vini", template, templateData: { HTMLdata: wireHtml } });
     if (!mailRes.ok) {
       const t = await mailRes.text().catch(() => "");
       return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` });
@@ -2462,9 +2516,11 @@ const EVENT_SUBJECTS = {
 };
 app.post("/api/email/roi-event-generate-send", async (req, res) => {
   try {
-    const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
+    const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz, override } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
     const dept = department === "service" ? "service" : "sales";
+    const EV = require("./roi-cron/emailValue.cjs");
+    const force = EV.overrideOk(override);
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
@@ -2474,7 +2530,9 @@ app.post("/api/email/roi-event-generate-send", async (req, res) => {
     const { hasClickhouseCreds } = await import("./agentMetrics.js");
     if (!hasClickhouseCreds()) return res.status(500).json({ error: "ClickHouse not configured on this server" });
     const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
-    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz });
+    // strict:true — on the SEND path, if eventKey doesn't resolve to that exact item, refuse rather than
+    // substitute the rooftop's most-recent customer (which would email a dealer another customer's PII).
+    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz, strict: !!eventKey });
     if (!html) return res.status(404).json({ error: "No live data found to render this email for the rooftop." });
 
     // 2) recipients — the dept's enabled addresses
@@ -2482,26 +2540,54 @@ app.post("/api/email/roi-event-generate-send", async (req, res) => {
     const recipients = (recs ?? []).filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
     if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
 
-    // 3) send via the mail proxy
+    // 3) idempotency: a deterministic event_key + a recent-duplicate guard so a double-click or client
+    // retry doesn't email the dealer twice (the old `manual-${type}-${Date.now()}` key never deduped).
     const subject = `${EVENT_SUBJECTS[emailType] || "Vini"} — ${rooftopName || teamId}`;
+    const evKey = `manual-${emailType}-${eventKey || "latest"}`;
+    const dupSince = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { data: dup } = await sb.from("roi_event_emails")
+      .select("id,status").eq("team_id", teamId).eq("email_type", emailType).eq("event_key", evKey)
+      .gte("created_at", dupSince).in("status", ["queued", "sent"]).limit(1).maybeSingle();
+    if (dup) return res.json({ ok: true, deduped: true, id: dup.id, message: "this event was just sent — not re-sending" });
+
+    // insert the row to get its id, so the open-tracking pixel can key to it.
+    const { data: inserted, error: insErr } = await sb.from("roi_event_emails").insert({
+      team_id: teamId, enterprise_id: enterpriseId || null, department: dept, email_type: emailType,
+      event_key: evKey, status: "queued", subject,
+      recipients: recipients.map((email) => ({ email })),
+    }).select("id").single();
+    if (insErr || !inserted?.id) return res.status(500).json({ error: insErr?.message || "could not create event row" });
+    const id = inserted.id;
+    const trackedHtml = injectPixel(html, eventPixel(id));
+
+    // Anti-churn gate: a no-value email is blocked unless the DANGER override is typed.
+    // (A truly empty transactional is already refused above via the `!html` 404.)
+    let wireHtml = trackedHtml;
+    if (EV.isNoValue(wireHtml)) {
+      if (!force) {
+        await sb.from("roi_event_emails").update({ status: "not_sent", reason: "no_value", rendered_html: trackedHtml }).eq("id", id);
+        return res.json({ ok: false, blocked: true, reason: "no_value", error: "This email shows no value — blocked to avoid churn." });
+      }
+      wireHtml = EV.stripMarker(wireHtml);
+    }
+
+    // 4) send via the mail proxy
     const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
     const template = process.env.MAIL_TEMPLATE || "email-control-tower-report";
-    const mailRes = await fetch(mailUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(process.env.MAIL_TOKEN ? { Authorization: `Bearer ${process.env.MAIL_TOKEN}` } : {}) },
-      body: JSON.stringify({ to: recipients.join(","), subject, template, templateData: { HTMLdata: html } }),
-    });
-    if (!mailRes.ok) { const t = await mailRes.text().catch(() => ""); return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` }); }
+    const mailRes = await postMailWithRetry(mailUrl, { to: recipients.join(","), subject, template, templateData: { HTMLdata: wireHtml } });
+    if (!mailRes.ok) {
+      const t = await mailRes.text().catch(() => "");
+      await sb.from("roi_event_emails").update({ status: "error", reason: `mail proxy ${mailRes.status}`, rendered_html: trackedHtml }).eq("id", id);
+      return res.status(502).json({ error: `mail proxy ${mailRes.status}: ${t.slice(0, 200)}` });
+    }
     const mj = await mailRes.json().catch(() => ({}));
     const messageId = mj.messageId ?? mj.id ?? null;
 
-    // 4) record it so the cell flips from "—" to a count and the email is viewable
-    await sb.from("roi_event_emails").insert({
-      team_id: teamId, enterprise_id: enterpriseId || null, department: dept, email_type: emailType,
-      event_key: `manual-${emailType}-${messageId || Date.now()}`, status: "sent", subject,
-      rendered_html: html, message_id: messageId, sent_at: new Date().toISOString(),
-      recipients: recipients.map((email) => ({ email, received: true })),
-    });
+    // 5) finalize the row → flips the cell from "—" to a count, email viewable + trackable
+    await sb.from("roi_event_emails").update({
+      status: "sent", message_id: messageId, sent_at: new Date().toISOString(),
+      rendered_html: trackedHtml, recipients: recipients.map((email) => ({ email, received: true })),
+    }).eq("id", id);
     return res.json({ ok: true, messageId, to: recipients });
   } catch (err) {
     console.error("POST /api/email/roi-event-generate-send error:", err?.message ?? err);
@@ -2604,15 +2690,33 @@ app.post("/api/recipients/toggle", async (req, res) => {
   }
 });
 
-// ── Update a rooftop's send hour / minute / timezone ─────────────────────────
+// ── Update a rooftop's config: send hour/minute/timezone, email-type toggles,
+//    and daily-digest template. All writes go through the service key so the
+//    browser (publishable/anon key) never needs write grants on roi_rooftop_config.
+const ROOFTOP_BOOL_COLS = new Set([
+  "daily_enabled", "weekly_enabled", "monthly_enabled",
+  "post_appointment_enabled", "post_conversation_enabled",
+  "action_item_enabled", "action_item_overdue_enabled",
+]);
 app.post("/api/rooftop-config", async (req, res) => {
   try {
-    const { teamId, sendHour, sendMinute, timezone } = req.body ?? {};
+    const { teamId, sendHour, sendMinute, timezone, daily_template } = req.body ?? {};
     if (!teamId) return res.status(400).json({ error: "teamId required" });
     const patch = {};
     if (sendHour != null) { const h = Number(sendHour); if (!Number.isInteger(h) || h < 0 || h > 23) return res.status(400).json({ error: "sendHour must be 0–23" }); patch.digest_send_hour = h; }
     if (sendMinute != null) { const m = Number(sendMinute); if (!Number.isInteger(m) || m < 0 || m > 59) return res.status(400).json({ error: "sendMinute must be 0–59" }); patch.digest_send_minute = m; }
     if (typeof timezone === "string" && timezone.trim()) patch.timezone = timezone.trim();
+    // Email-type toggles: whitelist boolean columns only.
+    for (const [k, v] of Object.entries(req.body ?? {})) {
+      if (ROOFTOP_BOOL_COLS.has(k)) {
+        if (typeof v !== "boolean") return res.status(400).json({ error: `${k} must be a boolean` });
+        patch[k] = v;
+      }
+    }
+    if (daily_template != null) {
+      if (daily_template !== "v1" && daily_template !== "v2") return res.status(400).json({ error: "daily_template must be 'v1' or 'v2'" });
+      patch.daily_template = daily_template;
+    }
     if (!Object.keys(patch).length) return res.status(400).json({ error: "nothing to update" });
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;

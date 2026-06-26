@@ -22,6 +22,8 @@ const { createClient } = require("@supabase/supabase-js");
 // (src/email/renderDigest.ts) imports, so the cron-sent bytes never drift from
 // what the tracker shows.
 const { renderDigestHtml } = require("../../src/email/digestTemplate.cjs");
+// Anti-churn value gate — never email a no-value digest unless overridden (DANGER).
+const emailValue = require("./emailValue.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -31,6 +33,25 @@ const MAIL_TOKEN = process.env.MAIL_TOKEN || "";
 const DRY_RUN = process.env.DRY_RUN !== "false";               // default ON
 // Metrics source: the Reporting API (Supabase-backed) at reporting-vini. Metabase has been removed.
 const REPORTING_API_BASE = process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app";
+// The reporting-vini read API requires a credential (it returns PII). Forward the trusted service
+// secret (preferred) or the Spyne token so server-to-server calls authorize; else they 401.
+const REPORTING_AUTH = process.env.CRON_SECRET || process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
+
+// ── Per-appointment dollar value (whiteboard spec) ───────────────────────────
+// Same per-category rates as the Programs dashboard (src/agents/AgentsDashboard.tsx):
+//   Sales Inbound $200 · Sales Outbound $250 · Service Inbound $100 · Service Outbound $200.
+// The digest is per-DEPARTMENT and the meetings API has no inbound/outbound split
+// (see reporting-vini src/lib/spyne/meetings.ts), so the per-row "Est. value" uses the
+// department average of its two directions: Sales = avg(200,250) = 225, Service =
+// avg(100,200) = 150. Env vars still override for ad-hoc tuning.
+const APPT_DOLLAR = { sales_inbound: 200, sales_outbound: 250, service_inbound: 100, service_outbound: 200 };
+const DIGEST_DOLLAR_RATE_SALES = (APPT_DOLLAR.sales_inbound + APPT_DOLLAR.sales_outbound) / 2;     // 225
+const DIGEST_DOLLAR_RATE_SERVICE = (APPT_DOLLAR.service_inbound + APPT_DOLLAR.service_outbound) / 2; // 150
+function digestDollarRate(department) {
+  return Number(department === "service"
+    ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || DIGEST_DOLLAR_RATE_SERVICE)
+    : (process.env.DIGEST_DOLLAR_RATE_SALES || DIGEST_DOLLAR_RATE_SALES));
+}
 
 // --rerender only re-renders rendered_html from already-stored metrics → Supabase only, no Metabase.
 const RERENDER_ONLY = process.argv.includes("--rerender");
@@ -55,13 +76,20 @@ function localParts(tz) {
   const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", hour12: false }).formatToParts(new Date());
   const g = (t) => parseInt(p.find((x) => x.type === t)?.value ?? "0");
   const Y = g("year"), M = g("month"), D = g("day"), H = g("hour") === 24 ? 0 : g("hour");
-  const yStart = localToUTC(Y, M, D - 1, tz);
+  const pad = (n) => String(n).padStart(2, "0");
+  // "Yesterday" (the reported day) with calendar-safe month/year rollover. The old naive `D - 1`
+  // produced a malformed `YYYY-MM-00` on the 1st of the month, corrupting the API window every month.
+  const yd = new Date(Date.UTC(Y, M - 1, D - 1));
+  const yY = yd.getUTCFullYear(), yM = yd.getUTCMonth() + 1, yD = yd.getUTCDate();
+  const yStart = localToUTC(yY, yM, yD, tz);
   const yEnd = new Date(localToUTC(Y, M, D, tz).getTime() - 1000);
-  const monthStart = localToUTC(Y, M, 1, tz);
-  const localDate = `${Y}-${String(M).padStart(2, "0")}-${String(D - 1).padStart(2, "0")}`;
+  const monthStart = localToUTC(yY, yM, 1, tz);   // first of the reported (yesterday's) month
+  const localDate = `${yY}-${pad(yM)}-${pad(yD)}`;
   const dateLabel = new Date(yStart.getTime()).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+  // apiEnd stays "today" (exclusive end) → the day window is yesterday..today = the reported day,
+  // and MTD is the first of yesterday's month..today.
   return { localHour: H, localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
-    apiStart: localDate, apiEnd: `${Y}-${String(M).padStart(2, "0")}-${String(D).padStart(2, "0")}`, apiMonthStart: `${Y}-${String(M).padStart(2, "0")}-01` };
+    apiStart: localDate, apiEnd: `${Y}-${pad(M)}-${pad(D)}`, apiMonthStart: `${yY}-${pad(yM)}-01` };
 }
 
 // ── Reporting API source (reporting-vini, Supabase-backed) — the only metrics source ──
@@ -72,9 +100,13 @@ async function apiReport(teamId, start, end) {
   const k = `${teamId}|${start}|${end}`;
   if (_apiCache.has(k)) return _apiCache.get(k);
   const p = (async () => {
-    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}`);
+    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}`, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {} });
     if (!res.ok) throw new Error(`reporting-api ${res.status} (${teamId} ${start}..${end}): ${(await res.text()).slice(0, 120)}`);
     const j = await res.json();
+    // The reporting API returns a zeroed report with `degraded:true` on a backend read failure.
+    // Treat that as a hard error so the digest holds (guardrail → no_data) instead of emailing
+    // "0 calls, 0 appointments" — sending zeros during an outage is itself a churn risk.
+    if (j && j.degraded) throw new Error(`reporting-api degraded (${teamId} ${start}..${end}) — holding digest`);
     const byName = {};
     for (const a of j.agents || []) byName[a.name] = a;
     return byName;
@@ -221,16 +253,26 @@ const humanizeIntent = (k) => INTENT_LABELS[k] || String(k || "").toLowerCase().
 // bytes never drift). This wrapper just builds the view-model: console deep links,
 // the open-tracking pixel URL, and the enrichment that rides on the metrics object
 // (upcoming appointments, top vehicles, $/appt) populated by processOne().
+// ── Open-tracking pixel ───────────────────────────────────────────────────────
+// Points at the track-open Edge Function on reporting-vini (qludn). Override the
+// host with DIGEST_TRACK_BASE if it ever moves. Used by BOTH digest templates
+// (v1 classic + v2 redesign) so every sent mail is trackable.
+const TRACK_OPEN_URL = (process.env.DIGEST_TRACK_BASE || "https://qludnojfibguobgeeujw.supabase.co/functions/v1/track-open").replace(/\/$/, "");
+function pixelUrlFor(team, dept, localDate, cadence) {
+  const enc = encodeURIComponent;
+  return `${TRACK_OPEN_URL}?t=${enc(team)}&d=${enc(dept)}&c=${enc(cadence || "daily")}&dt=${enc(localDate)}`;
+}
+function pixelImg(team, dept, localDate, cadence) {
+  return `<img src="${pixelUrlFor(team, dept, localDate, cadence)}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;opacity:0;" />`;
+}
+
 function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
   const L = links(ent, team, dept, localDate, tz);
-  const enc = encodeURIComponent;
-  // First-party open pixel — only emitted when a public base URL is configured
-  // (a relative URL can't resolve inside an inbox). Deterministic from team/dept/
-  // date so a re-render reproduces the same tracker.
-  const base = (process.env.DIGEST_TRACK_BASE || process.env.PUBLIC_APP_URL || "").replace(/\/$/, "");
-  const pixelUrl = base ? `${base}/api/email/track-open?t=${enc(team)}&d=${enc(dept)}&dt=${enc(localDate)}` : "";
-  // Email images need ABSOLUTE URLs — DIGEST_ASSET_BASE (CDN/app URL) else the public base.
-  const assetBase = (process.env.DIGEST_ASSET_BASE || base || "").replace(/\/$/, "");
+  // First-party open pixel → the track-open Edge Function (always reachable from an
+  // inbox; deterministic from team/dept/cadence/date so a re-render reproduces it).
+  const pixelUrl = pixelUrlFor(team, dept, localDate, cadence);
+  // Email images need ABSOLUTE URLs — DIGEST_ASSET_BASE (CDN/app URL) when configured.
+  const assetBase = (process.env.DIGEST_ASSET_BASE || "").replace(/\/$/, "");
   const campaignImages = assetBase ? [`${assetBase}/digest-assets/campaign-honda.jpg`, `${assetBase}/digest-assets/campaign-tata.jpg`] : [];
   const mm = Object.assign({}, m, { campaigns: campaigns || m.campaigns || [] });
   return renderDigestHtml(mm, {
@@ -310,7 +352,7 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
     <div style="padding:0 6px;">${rule}${sect("Outbound activity")}<div style="font-size:11px;color:#9CA3AF;margin:-4px 0 4px;">Yesterday's activity</div></div>
     <table width="100%"><tr>
       ${mini("Unique reached", m.outboundUniqueReached || 0, `Yesterday · ${m.outboundUniqueReachedMTD || 0} MTD`)}
-      ${mini("Connect rate", `${m.outboundConnectRate || 0}%`, `Yesterday · ${m.outboundConnectRateMTD || 0}% MTD`)}
+      ${mini("Connect rate", `${Math.round(Number(m.outboundConnectRate) || 0)}%`, `Yesterday · ${Math.round(Number(m.outboundConnectRateMTD) || 0)}% MTD`)}
       ${mini("Appointments set", m.outboundAppointmentsSet || 0, `Yesterday · ${m.outboundAppointmentsSetMTD || 0} MTD`)}
     </tr></table>
     ${hasOutboundConv ? `<div style="padding:0 6px;">${sect("Channel breakdown")}${mkBar(callOut, smsOut, chatOut)}</div>` : ""}
@@ -335,9 +377,20 @@ function pickTemplate(cfg, cadence) {
 // Render the right template. v1 shims inboundUniqueLeads back to its legacy value so
 // the classic email stays byte-faithful to production.
 function renderDigest(tpl, name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
-  if (tpl === "v2") return renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence);
-  const m1 = Object.assign({}, m, { inboundUniqueLeads: (m.inboundUniqueLeadsLegacy != null ? m.inboundUniqueLeadsLegacy : m.inboundUniqueLeads) });
-  return renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m1, campaigns);
+  let html, gateM = m;
+  if (tpl === "v2") {
+    html = renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence);
+  } else {
+    const m1 = Object.assign({}, m, { inboundUniqueLeads: (m.inboundUniqueLeadsLegacy != null ? m.inboundUniqueLeadsLegacy : m.inboundUniqueLeads) });
+    gateM = m1;   // gate v1 on the SAME shimmed metrics it renders from, so the no-value
+                  // marker can't disagree with the numbers actually shown in the email.
+    // v1 classic has no built-in pixel slot — inject the open-tracking pixel before </body>.
+    html = renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m1, campaigns)
+      .replace("</body></html>", `${pixelImg(team, dept, localDate, cadence)}</body></html>`);
+  }
+  // Stamp the no-value marker for the v1 path too (the v2 renderer self-stamps);
+  // sendMail refuses a marked email unless overridden. Idempotent.
+  return emailValue.digestHasValue(gateM) ? html : emailValue.markNoValue(html);
 }
 // Apply the matching guardrail. v1 uses the original (stricter) send rule on the
 // legacy-shimmed leads value; v2 uses the permissive "any activity" rule.
@@ -347,7 +400,15 @@ function guardrailFor(tpl, m) {
   return guardrailV1(m1);
 }
 
-async function sendMail(to, subject, html) {
+async function sendMail(to, subject, html, opts) {
+  // Anti-churn gate: refuse to send a no-value digest (stamped by the renderer)
+  // unless the caller passes { force: true } (a deliberate DANGER override). The
+  // marker is stripped so a customer never sees it.
+  const force = opts && opts.force === true;
+  if (emailValue.isNoValue(html)) {
+    if (!force) { const e = new Error("This email shows no value — blocked to avoid churn. Override with the password to send."); e.code = "BLOCKED_NO_VALUE"; throw e; }
+    html = emailValue.stripMarker(html);
+  }
   const body = JSON.stringify({ to: to.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } });
   let lastErr = "";
   // retry transient mail-gateway failures (5xx / 429) a couple times with backoff
@@ -461,7 +522,7 @@ async function runOnce() {
       // Enrichment: upcoming appointments (car + $ + schedule) + top vehicles — sourced from the
       // SAME Reporting service as every other metric (single source of truth), not a separate
       // ClickHouse query. Optional — degrades to empty (section omitted) when unavailable.
-      const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+      const dollarRate = digestDollarRate(L.department);
       let enr = { appointments: [], topVehicles: [] };
       try {
         const { enrichRooftop } = await import("./digestEnrich.js");
@@ -682,6 +743,8 @@ function onDemandWindow(tz, cadence) {
 async function generateAndSendNow(opts) {
   opts = opts || {};
   const cadence = (opts.cadence === "weekly" || opts.cadence === "monthly") ? opts.cadence : "daily";
+  // DANGER override: when true, send even a no-value digest (manual force-send).
+  const force = opts.force === true;
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const onlyTeam = opts.teamId ? String(opts.teamId) : null;
   const onlyDept = opts.department === "service" ? "service" : opts.department === "sales" ? "sales" : null;
@@ -726,9 +789,9 @@ async function generateAndSendNow(opts) {
       const tpl = pickTemplate(c, cadence);
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
       const g = guardrailFor(tpl, m);
-      if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
+      if (!g.ok && !force) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
       const camps = await getCampaigns(L.team_id, L.department, w);
-      const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+      const dollarRate = digestDollarRate(L.department);
       let enr = { appointments: [], topVehicles: [] };
       try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
@@ -736,7 +799,7 @@ async function generateAndSendNow(opts) {
       const dry = forceDry || DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
       const sentAt = new Date().toISOString();
-      const messageId = await sendMail(emails, subject, html);
+      const messageId = await sendMail(emails, subject, html, { force });
       await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || `manual-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++; note("sent", { recipients: emails.length });
       console.log(`  ✓ SENT (on-demand) ${cadence} ${name} [${L.department}]`);
@@ -786,7 +849,7 @@ async function previewDigestNow(opts) {
   const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
   const g = guardrailFor(tpl, m);
   const camps = await getCampaigns(teamId, department, w);
-  const dollarRate = Number(department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+  const dollarRate = digestDollarRate(department);
   let enr = { appointments: [], topVehicles: [] };
   try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(teamId, { dollarRate, dept: department, enterpriseId, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
   const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
@@ -841,7 +904,7 @@ async function runCadence(cadence) {
       const sendHour = c?.digest_send_hour ?? 7;
       if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; return; }
       const camps = await getCampaigns(L.team_id, L.department, w);
-      const dollarRate = Number(L.department === "service" ? (process.env.DIGEST_DOLLAR_RATE_SERVICE || 420) : (process.env.DIGEST_DOLLAR_RATE_SALES || 3000));
+      const dollarRate = digestDollarRate(L.department);
       let enr = { appointments: [], topVehicles: [] };
       try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
@@ -890,18 +953,19 @@ async function syncLive() {
   try { const j = JSON.parse(text); rows = Array.isArray(j) ? j : (j.data ?? [j]); }
   catch { rows = text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
 
-  // normalize → {team_id, enterprise_id, department}; held as is_live=true + dry_run=true
+  // normalize → {team_id, department}; held as is_live=true + dry_run=true
   const seen = new Set();
   const cand = [];
   for (const r of rows) {
     const team_id = String(r.t ?? r.team_id ?? "").trim();
-    const enterprise_id = String(r.e ?? r.enterprise_id ?? "").trim();
     const department = String(r.d ?? r.department ?? "").trim().toLowerCase();
     if (!team_id || (department !== "sales" && department !== "service")) continue;
     const k = `${team_id}|${department}`;
     if (seen.has(k)) continue;
     seen.add(k);
-    cand.push({ team_id, enterprise_id, department, is_live: true, dry_run: true });
+    // enterprise_id lives on roi_rooftop_config, not roi_live_departments (canonical schema) —
+    // don't write it here or the upsert 400s on reporting-vini. Set at rooftop onboarding instead.
+    cand.push({ team_id, department, is_live: true, dry_run: true });
   }
 
   // figure out which (team,dept) are genuinely new (for reporting)

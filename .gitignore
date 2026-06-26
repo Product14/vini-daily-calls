@@ -8,3 +8,12 @@ server/vins.db
 
 # local scratch / debug artifacts
 scratch-*
+
+# Control Tower generated report artifacts (regenerated each run)
+controlTower/agents-preview-2.html
+controlTower/slack-report.html
+controlTower/slack-report.png
+# stray output if a build is ever invoked from the repo root
+/agents-preview-2.html
+# Control Tower raw data caches (regenerated from ClickHouse/Sheets each run — not source)
+controlTower/data/

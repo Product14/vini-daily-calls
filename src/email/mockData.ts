@@ -64,6 +64,8 @@ export type CellRun = {
   renderedHtml?: string;
   /** First time the email was opened (tracking pixel). */
   openedAt?: string;
+  /** Total tracking-pixel loads (open count) for this run. */
+  openCount?: number;
   /** Who the email was actually sent to (run.recipients). */
   recipients?: { email: string; name?: string; received?: boolean; bounced?: boolean; opened?: boolean; openedAt?: string }[];
 };
@@ -406,7 +408,7 @@ export type Summary = {
   liveAgentsTotal: number;
   rooftopsWithAgents: number;
   liveDepartments: { sales: number; service: number; total: number };
-  emailStatus: { sent: number; notSent: number; sentRatePct: number; opened: number; openRatePct: number };
+  emailStatus: { sent: number; notSent: number; suppressed: number; sentRatePct: number; opened: number; openRatePct: number };
 };
 
 export function computeSummary(rooftops: RooftopRow[], cadence: Cadence): Summary {
@@ -431,23 +433,29 @@ export function computeSummary(rooftops: RooftopRow[], cadence: Cadence): Summar
   }
 
   // Email status · most-recent date in the chosen cadence
+  // Only truly-sent runs count toward `sent`. Suppressed runs were generated but never
+  // emailed, so they're tracked separately and kept OUT of `sent` / the open-rate denominator
+  // (a suppressed run can't be opened — counting it would deflate the open rate).
   let sent = 0;
   let notSent = 0;
+  let suppressed = 0;
   let opened = 0; // sent cells whose run was opened (tracking pixel)
   for (const r of rooftops) {
     const cells = cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly;
     const latest = cells[0];
     if (!latest) continue;
-    if (latest.status === "sent" || latest.status === "suppressed") {
+    if (latest.status === "sent") {
       sent += 1;
       const wasOpened = (latest.runs ?? []).some(
         (run) => run.openedAt || (run.recipients ?? []).some((rec) => rec.opened)
       );
       if (wasOpened) opened += 1;
-    } else if (latest.status === "not_sent") notSent += 1;
+    } else if (latest.status === "suppressed") suppressed += 1;
+    else if (latest.status === "not_sent") notSent += 1;
   }
   const denom = sent + notSent;
   const sentRatePct = denom > 0 ? Math.round((sent / denom) * 100) : 0;
+  // Rooftop-granularity open rate: a sent rooftop counts as "opened" if ANY recipient opened.
   const openRatePct = sent > 0 ? Math.round((opened / sent) * 100) : 0;
 
   return {
@@ -455,7 +463,7 @@ export function computeSummary(rooftops: RooftopRow[], cadence: Cadence): Summar
     liveAgentsTotal: Object.values(liveAgents).reduce((s, x) => s + x, 0),
     rooftopsWithAgents,
     liveDepartments,
-    emailStatus: { sent, notSent, sentRatePct, opened, openRatePct },
+    emailStatus: { sent, notSent, suppressed, sentRatePct, opened, openRatePct },
   };
 }
 

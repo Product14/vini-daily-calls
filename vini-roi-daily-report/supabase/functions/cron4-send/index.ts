@@ -10,14 +10,16 @@
 //   (verified 2026-06-08: Authorization: Bearer <token> returns 200 OK; Cookie auth is NOT used.)
 //
 // SEND DECISION (per row), in precedence order:
-//   1. ?spyneOnly=true      → real send, but recipients are filtered to ONLY
-//                             @spyne.ai addresses (every external/customer address
-//                             is dropped). This is the tracker's "preview to Spyne"
-//                             action — internal testers get the real email, no
-//                             customer ever does. Overrides the dry_run flag. The
-//                             run is recorded status='suppressed'/reason='spyne_preview'
-//                             (NOT 'sent') because the DEALER was not sent, so it
-//                             never inflates the tracker's sent count.
+//   1. ?spyneOnly=true      → real send, but recipients are OVERRIDDEN with the
+//                             fixed PREVIEW_RECIPIENTS reviewer allowlist (see
+//                             below). Every rooftop's preview goes to ONLY those
+//                             internal reviewers — no customer, and no other
+//                             @spyne.ai address, ever receives. This is the
+//                             tracker's "preview to Spyne" action. Overrides the
+//                             dry_run flag. The run is recorded
+//                             status='suppressed'/reason='spyne_preview' (NOT
+//                             'sent') because the DEALER was not sent, so it never
+//                             inflates the tracker's sent count.
 //   2. ?dry=true            → ALWAYS suppress (hard safety).
 //   3. ?force=true          → real send, ignoring the rooftop's dry_run flag
 //                             (manual "Send now" from the UI for ONE rooftop).
@@ -31,10 +33,26 @@
 //   The token is read from a HEADER, never the URL, because it's a secret.
 // ⚠ The token expires. On a 401/403 the row is marked not_sent/mail_auth and the
 //   summary sets auth_failed=true so the UI can prompt for a fresh token.
+//
+// MANUAL SEND-LIVE PASSWORD (anti-churn / deliberate-send guard):
+//   A human-triggered run from the tracker supplies the FE mail token in the
+//   `x-mail-token` header; the SCHEDULED cron (pg_cron → cron1) does NOT (it uses the
+//   env token). So when `x-mail-token` is present we treat it as a MANUAL send and
+//   REQUIRE the override password in the `x-send-override` header to equal DANGER — for
+//   BOTH a real customer "Send live" AND the reviewer "Preview all" (spyneOnly).
+//   Missing/wrong → the row is left QUEUED (not sent) and summary.override_required=true.
+//   Only the scheduled cron (no FE token) is exempt.
 import { supa, json } from "../_shared/lib.ts";
 
 const MAIL_URL = "https://mail.spyne.ai/api/v1/send-template-email";
 const TEMPLATE = "email-control-tower-report";
+
+// PREVIEW allowlist — a spyneOnly ("Preview to Spyne") run is sent ONLY to these
+// fixed internal reviewers, regardless of each rooftop's configured recipients.
+// This guarantees no customer (and no other @spyne.ai address) ever receives a
+// preview, and that every rooftop's preview reaches the reviewers even when the
+// rooftop has no @spyne.ai recipient of its own.
+const PREVIEW_RECIPIENTS = ["devansh.hasija@spyne.ai", "subhav.malhotra@spyne.ai"];
 
 Deno.serve(async (req) => {
   const u = new URL(req.url);
@@ -42,8 +60,14 @@ Deno.serve(async (req) => {
   const dryParam = u.searchParams.get("dry") === "true";
   const force = u.searchParams.get("force") === "true";
   const spyneOnly = u.searchParams.get("spyneOnly") === "true";
-  const isSpyne = (e: unknown) => /@spyne\.ai\s*$/i.test(String(e ?? "").trim());
   const mailToken = req.headers.get("x-mail-token") || Deno.env.get("MAIL_TOKEN") || Deno.env.get("MAIL_COOKIE") || "";
+  // Manual bulk "Send live" guard: a human-triggered run supplies the FE mail token
+  // in the x-mail-token header; the SCHEDULED cron uses the env token (no such header).
+  // For a manual real CUSTOMER send we require the override password (DANGER) — typed
+  // in the tracker's Send-live prompt and forwarded by cron1 as x-send-override. The
+  // scheduled cron and the reviewer-only preview (spyneOnly) are exempt.
+  const isManual = !!req.headers.get("x-mail-token");
+  const overrideOk = (req.headers.get("x-send-override") || "").trim() === "DANGER";
   const sb = supa();
 
   let q = sb.from("roi_digest_runs").select("id,team_id,department,local_date,recipients,rendered_html,subject").eq("status", "queued");
@@ -54,7 +78,7 @@ Deno.serve(async (req) => {
   // default to dry (true) if no row — fail safe
   const dryOf = new Map((liveRows ?? []).map((l) => [`${l.team_id}|${l.department}`, l.dry_run !== false]));
 
-  const out = { sent: 0, suppressed: 0, preview: 0, errors: 0, skipped: 0, pending_render: 0, auth_failed: false };
+  const out = { sent: 0, suppressed: 0, preview: 0, errors: 0, skipped: 0, pending_render: 0, auth_failed: false, override_required: false };
 
   for (const r of rows ?? []) {
     const flagDry = dryOf.get(`${r.team_id}|${r.department}`) ?? true;
@@ -62,16 +86,25 @@ Deno.serve(async (req) => {
     // hard-safety wins, then force, then the per-rooftop flag.
     const realSend = spyneOnly || (!dryParam && (force || !flagDry));
     let recips = (r.recipients ?? []).map((x: any) => x.email).filter(Boolean);
-    // Preview mode: keep ONLY internal @spyne.ai recipients so no customer is emailed.
-    if (spyneOnly) recips = recips.filter(isSpyne);
+    // Preview mode: override the recipient set with the fixed reviewer allowlist so
+    // ONLY those internal addresses are emailed — never a customer, never any other
+    // @spyne.ai address, and the preview lands even if the rooftop has no recipients.
+    if (spyneOnly) recips = [...PREVIEW_RECIPIENTS];
 
     if (!realSend) {
       await sb.from("roi_digest_runs").update({ status: "suppressed", reason: "dry_run" }).eq("id", r.id);
       out.suppressed++; continue;
     }
+    // Any manual send (live customer OR reviewer preview) needs the override password.
+    // Leave the row QUEUED (don't mark it) so a correct-password retry — or the next
+    // scheduled cron run — still sends it; only block this manual attempt.
+    if (isManual && !overrideOk) {
+      out.override_required = true; out.skipped++; continue;
+    }
     if (!recips.length) {
-      // For a preview run, "no @spyne.ai recipient" is the expected skip reason.
-      await sb.from("roi_digest_runs").update({ status: "not_sent", reason: spyneOnly ? "no_spyne_recipient" : "recipients_missing" }).eq("id", r.id);
+      // Preview always has the reviewer allowlist, so this only trips a real send
+      // for a rooftop with no configured recipients.
+      await sb.from("roi_digest_runs").update({ status: "not_sent", reason: "recipients_missing" }).eq("id", r.id);
       out.skipped++; continue;
     }
     if (!r.rendered_html) {
@@ -100,20 +133,20 @@ Deno.serve(async (req) => {
       }
       if (!res.ok) throw new Error(`mail ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const j = await res.json().catch(() => ({}));
-      // Preview: mark received=true ONLY for the @spyne.ai addresses we actually
-      // sent to, so the tracker never claims a customer received the email.
-      const sentSet = new Set(recips.map((e: string) => String(e).trim().toLowerCase()));
-      // A preview reached internal recipients only — the DEALER was NOT sent, so
-      // it must NOT count as 'sent'. Record it 'suppressed/spyne_preview' (the
-      // internal delivery is still captured in recipients[].received + reason_detail).
+      // A preview reached the internal reviewers only — the DEALER was NOT sent, so
+      // it must NOT count as 'sent'. Record it 'suppressed/spyne_preview' and store
+      // the reviewer list we actually emailed (so the tracker shows who got it),
+      // never claiming a customer received the email.
       await sb.from("roi_digest_runs").update({
         status: spyneOnly ? "suppressed" : "sent",
         sent_at: new Date().toISOString(),
         message_id: (j as any).messageId ?? (j as any).id ?? null,
         send_path: spyneOnly ? "spyne_preview" : "raw_html",
         reason: spyneOnly ? "spyne_preview" : null,
-        reason_detail: spyneOnly ? `preview emailed to ${recips.length} @spyne.ai recipient(s); dealer not sent` : null,
-        recipients: (r.recipients ?? []).map((x: any) => ({ ...x, received: spyneOnly ? sentSet.has(String(x.email).trim().toLowerCase()) : true })),
+        reason_detail: spyneOnly ? `preview emailed to reviewers (${recips.join(", ")}); dealer not sent` : null,
+        recipients: spyneOnly
+          ? recips.map((e: string) => ({ email: e, received: true }))
+          : (r.recipients ?? []).map((x: any) => ({ ...x, received: true })),
       }).eq("id", r.id);
       if (spyneOnly) out.preview++; else out.sent++;
     } catch (e) {

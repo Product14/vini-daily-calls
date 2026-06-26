@@ -117,8 +117,13 @@ function convOpts(row, transfer) {
  * Render ONE transactional email live from ClickHouse. Matches eventKey when possible,
  * else falls back to the most-recent real item for the rooftop (a representative customer).
  * Returns HTML string, or null when no data exists.
+ *
+ * `strict` (SEND path): when an eventKey is given but doesn't resolve to that exact item, return null
+ * instead of substituting a different customer. The "most-recent representative customer" fallback is
+ * fine for a PREVIEW, but on the real send path it would email a dealer another customer's PII — so the
+ * send endpoint passes strict:true and refuses (404) rather than send the wrong person's data.
  */
-export async function previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz }) {
+export async function previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict = false }) {
   if (!hasClickhouseCreds()) throw new Error("ClickHouse not configured on this server (set CLICKHOUSE_HOST/PASSWORD)");
   if (!teamId) throw new Error("teamId required");
   const dept = department === "service" ? "service" : "sales";
@@ -145,6 +150,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
     if (String(eventKey || "").startsWith("sms:")) {
       const cv = await smsConvById(eventKey.slice(4));
       if (cv) return renderSms(cv);
+      if (strict) return null; // explicit SMS event didn't resolve — never substitute another customer
     }
     const order = " ORDER BY e.createdAt DESC LIMIT 1";
     let row = eventKey && !eventKey.startsWith("sms:") ? await one(base + " AND (e.callId=" + lit(eventKey) + " OR e.id=" + lit(eventKey) + ")" + order) : null;
@@ -155,6 +161,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       if (cv && (!row || Date.parse(cv.at) > Date.parse(row.at))) return renderSms(cv);
     }
     if (!row) {
+      if (eventKey && strict) return null; // requested event didn't resolve — don't email a different customer
       // matched key found no call, or rooftop has only SMS — fall back to the latest SMS thread
       const cv = await smsConvLatest(teamId);
       if (cv) return renderSms(cv);
@@ -175,7 +182,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'";
     const order = " ORDER BY m.created_at DESC LIMIT 1";
     let row = eventKey ? await one(base + " AND (m.meeting_id=" + lit(eventKey) + " OR m._id=" + lit(eventKey) + ")" + order) : null;
-    if (!row) row = await one(base + order);
+    if (!row && !(eventKey && strict)) row = await one(base + order); // strict send path: don't substitute another appointment
     if (!row) return null;
     const w = fmtWhen(row.startTime, row.mtz || tz);
     // include the booking text thread when the appointment was set over SMS
@@ -199,7 +206,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
     (leadKey ? " AND e.leadId=" + lit(leadKey) : "") +
     " GROUP BY e.leadId, c.name, c.mobile_number ORDER BY at DESC LIMIT 1";
   let row = await one(base);
-  if (!row && leadKey) { // matched lead had nothing — show the rooftop's most recent instead
+  if (!row && leadKey && !strict) { // matched lead had nothing — show the rooftop's most recent instead
     row = await one(base.replace(" AND e.leadId=" + lit(leadKey), ""));
   }
   if (!row) return null;
@@ -238,13 +245,14 @@ const SMS_DIR = "if(notEmpty(cv.outboundTaskId) OR notEmpty(cv.followupId),'outb
 const APPT_DIR_JOIN =
   " LEFT JOIN (SELECT callId, any(report_inOutType) dir FROM dealer_leads.endcallreports WHERE __deleted=0 GROUP BY callId) ecr ON ecr.callId=m.call_id";
 
-export async function listEventsCH({ teamId, department, emailType, direction, sinceDays = 120, limit = 200 }) {
+export async function listEventsCH({ teamId, department, emailType, direction, sinceDays = 120, limit = 200, offset = 0 }) {
   if (!hasClickhouseCreds()) throw new Error("ClickHouse not configured on this server");
   if (!teamId) throw new Error("teamId required");
   const dept = department === "service" ? "service" : "sales";
   const dir = direction === "inbound" || direction === "outbound" ? direction : null; // null = both (all agents in this dept)
   const since = "now() - INTERVAL " + (Number(sinceDays) || 120) + " DAY";
   const lim = Math.min(Number(limit) || 200, 500);
+  const off = Math.max(0, Number(offset) || 0); // DB-level pagination: fetch only the requested page, newest first
   const dfilt = (expr) => (dir ? " AND " + expr + "=" + lit(dir) : "");
 
   if (emailType === "post_appointment") {
@@ -257,7 +265,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
       " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
       " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne' AND m.created_at >= " + since + dfilt(dx) +
-      " ORDER BY m.created_at DESC LIMIT " + lim;
+      " ORDER BY m.created_at DESC LIMIT " + lim + " OFFSET " + off;
     return (await runClickhouse(sql)).map((r) => {
       const w = fmtWhen(r.startTime, r.mtz || null);
       return { eventKey: r.eventKey, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
@@ -275,7 +283,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
       " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)" +
       " AND lower(e.callDetails_agentInfo_agentType)=" + lit(dept) + " AND e.createdAt >= " + since + dfilt(cdx) +
-      " ORDER BY e.createdAt DESC LIMIT " + lim;
+      " ORDER BY e.createdAt DESC LIMIT " + (off + lim);
     const calls = (await runClickhouse(callSql)).map((r) => ({
       eventKey: r.eventKey, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
       label: (r.customer || "Unknown") + " — " + (r.title || "Conversation"),
@@ -287,12 +295,12 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " coalesce(nullIf(dm.dept,''),'sales') dept, " + SMS_DIR + " direction FROM dealer_leads.conversations cv" + CONV_IDENTITY +
       " LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
       " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since + dfilt(SMS_DIR) +
-      " ORDER BY cv.createdAt DESC LIMIT " + lim;
+      " ORDER BY cv.createdAt DESC LIMIT " + (off + lim);
     const sms = (await runClickhouse(smsSql)).filter((r) => r.dept === dept).map((r) => ({
       eventKey: "sms:" + r.eventKey, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
       label: (r.customer || "Unknown") + " — Text conversation", sub: r.direction === "outbound" ? "SMS · Outbound" : "SMS · Inbound",
     }));
-    return [...calls, ...sms].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(0, lim);
+    return [...calls, ...sms].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(off, off + lim);
   }
 
   // action_item / action_item_overdue — lead level (matches the generator's lead:<id> grouping)
@@ -304,7 +312,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
     " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0" +
     " AND notEmpty(e.report_actionItems) AND e.report_actionItems NOT IN ('[]','[\"\"]')" +
     " AND lower(e.callDetails_agentInfo_agentType)=" + lit(dept) + dfilt(CALL_DIR("e.report_inOutType")) + " AND e.createdAt >= " + since +
-    " GROUP BY e.leadId ORDER BY createdAt DESC LIMIT " + lim;
+    " GROUP BY e.leadId ORDER BY createdAt DESC LIMIT " + lim + " OFFSET " + off;
   return (await runClickhouse(sql)).map((r) => ({
     eventKey: "lead:" + r.leadId, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
     label: (r.customer || "Unknown") + " — " + (Number(r.nItems) || 0) + " action item" + ((Number(r.nItems) || 0) === 1 ? "" : "s"),

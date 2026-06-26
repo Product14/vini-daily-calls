@@ -29,8 +29,13 @@ function fmtSched(iso, tz) {
   }
 }
 
+// reporting-vini's read API requires a credential (it returns PII). The meetings call already forwards
+// the Spyne token as ?auth_key=; this header is a fallback to the trusted service secret so the call
+// still authorizes when no per-rooftop token was passed.
+const REPORTING_AUTH = process.env.CRON_SECRET || process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
 async function fetchJson(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  const headers = REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {};
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`reporting-api ${res.status}: ${(await res.text()).slice(0, 120)}`);
   return res.json();
 }

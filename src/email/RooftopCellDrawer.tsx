@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   NOT_SENT_REASON_LABEL,
   type DeptKind,
@@ -27,6 +28,16 @@ import { sendDigestNow, generateAndSendNow, generatePreviewNow, addRecipientNow,
  *   2. Snippet · numbers added (no real send happened)
  *   3. Fill data & send · reason-aware form
  */
+/** Step the open digest to an adjacent rooftop (same date) or date (same rooftop).
+ * Each handler is null when there's nowhere to go in that direction. */
+export type CellNav = {
+  prevRooftop: (() => void) | null;
+  nextRooftop: (() => void) | null;
+  olderDate: (() => void) | null;
+  newerDate: (() => void) | null;
+  rooftopPos: { idx: number; total: number } | null;
+};
+
 type DrawerProps = {
   rooftop: RooftopRow | null;
   cell: SendCell | null;
@@ -34,6 +45,8 @@ type DrawerProps = {
   onSend: (rooftopId: string, date: string, cadence: SendCell["cadence"]) => void;
   /** Reload tracker data after a dry-run pipeline trigger (rows change status). */
   onReload?: () => void;
+  /** Prev/next rooftop + date stepping (computed by the parent from the filtered table). */
+  nav?: CellNav | null;
 };
 
 const REASON_HELPER: Record<NotSentReason, string> = {
@@ -49,7 +62,7 @@ const REASON_HELPER: Record<NotSentReason, string> = {
   silent_day: "No customer activity for this rooftop on this day.",
 };
 
-export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: DrawerProps) {
+export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, nav }: DrawerProps) {
   const open = !!(rooftop && cell);
   const [mounted, setMounted] = useState(open);
   const [visible, setVisible] = useState(false);
@@ -72,10 +85,19 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
 
   useEffect(() => {
     if (!open) return;
-    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { onClose(); return; }
+      // Don't hijack arrows while typing in a field.
+      const t = e.target as HTMLElement | null;
+      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); nav?.olderDate?.(); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); nav?.newerDate?.(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); nav?.prevRooftop?.(); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); nav?.nextRooftop?.(); }
+    };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [open, onClose]);
+  }, [open, onClose, nav]);
 
   if (!mounted || !rooftop || !cell) return null;
 
@@ -101,9 +123,10 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
     ? "bg-warning-soft text-warning"
     : "bg-negative-soft text-negative";
 
-  return (
+  // Portal + high z-index so this overlays the host shell's sidebar instead of opening below it.
+  return createPortal(
     <div
-      className={`fixed inset-0 z-50 flex flex-col bg-surface-background transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}
+      className={`fixed inset-0 z-[9999] flex flex-col bg-surface-background transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}
       role="dialog"
       aria-modal="true"
       aria-label={`${rooftop.name} daily digest`}
@@ -122,6 +145,22 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
           </div>
         </div>
         <div className="flex flex-shrink-0 items-center gap-2">
+          {nav ? (
+            <div className="mr-1 flex items-center gap-3">
+              <div className="flex items-center gap-0.5" title="Previous / next rooftop (↑ / ↓)">
+                <NavBtn onClick={nav.prevRooftop}>‹</NavBtn>
+                <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  Rooftop{nav.rooftopPos ? ` ${nav.rooftopPos.idx}/${nav.rooftopPos.total}` : ""}
+                </span>
+                <NavBtn onClick={nav.nextRooftop}>›</NavBtn>
+              </div>
+              <div className="flex items-center gap-0.5" title="Older / newer date (← / →)">
+                <NavBtn onClick={nav.olderDate}>‹</NavBtn>
+                <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Date</span>
+                <NavBtn onClick={nav.newerDate}>›</NavBtn>
+              </div>
+            </div>
+          ) : null}
           <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
             {(["desktop", "email"] as const).map((v) => (
               <button
@@ -197,6 +236,16 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
             </Section>
             {isSent ? (
               <>
+                <Section eyebrow="Engagement" title="Opens">
+                  {primary?.openedAt ? (
+                    <div className="rounded-md bg-positive/10 px-3 py-2 text-[12px] font-semibold text-positive">
+                      👁 Opened · {primary.openCount || 1} view{(primary.openCount || 1) === 1 ? "" : "s"}
+                      <span className="font-normal text-text-muted"> · first {new Date(primary.openedAt).toLocaleString()}</span>
+                    </div>
+                  ) : (
+                    <div className="rounded-md bg-surface-background px-3 py-2 text-[12px] text-text-muted">Sent · no open detected yet</div>
+                  )}
+                </Section>
                 <Section eyebrow="Sent to" title="Email IDs on this send">
                   <SentToList recipients={primary?.recipients} />
                 </Section>
@@ -264,7 +313,8 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload }: 
           </aside>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -548,6 +598,16 @@ function RecipientManager({
       {depts.map((d) => {
         const emails = d.recipients.map((r) => r.email).filter(validEmail);
         const chosenCount = emails.filter((e) => selected.has(e.toLowerCase())).length;
+        // "X/Y received" — for a SENT run, base Y on who the run actually targeted (the run's
+        // recipients[]), NOT the full configured recipient list. Configured-but-not-targeted
+        // recipients default to received:false and would inflate the denominator into a false
+        // "didn't receive". For non-sent states fall back to the configured count.
+        const targeted = isSent && d.kind === dept && (sentRecipients?.length ?? 0) > 0
+          ? new Set((sentRecipients ?? []).map((r) => r.email.toLowerCase()))
+          : null;
+        const denomRecips = targeted
+          ? d.recipients.filter((r) => targeted.has(r.email.toLowerCase()))
+          : d.recipients;
         return (
           <div key={d.kind}>
             <div className="mb-1.5 flex items-center justify-between">
@@ -555,7 +615,7 @@ function RecipientManager({
                 {d.kind} department
               </span>
               <span className="text-[10px] text-text-muted">
-                {d.recipients.filter((r) => r.received).length}/{d.recipients.length} received
+                {denomRecips.filter((r) => r.received).length}/{denomRecips.length} received
               </span>
             </div>
             {d.recipients.length === 0 ? (
@@ -1370,6 +1430,20 @@ function SnippetLogo() {
       <circle cx="6" cy="18" r="3" fill="#4600F2" />
       <circle cx="18" cy="18" r="3" fill="#16A34A" />
     </svg>
+  );
+}
+
+/** A single ‹ / › step button — disabled (greyed) when there's nowhere to go. */
+function NavBtn({ onClick, children }: { onClick: (() => void) | null; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onClick?.()}
+      disabled={!onClick}
+      className="rounded-md border border-border-subtle bg-surface-card px-2 py-1 text-[13px] leading-none text-text-secondary hover:bg-surface-subtle disabled:opacity-30 disabled:hover:bg-surface-card"
+    >
+      {children}
+    </button>
   );
 }
 

@@ -15,6 +15,7 @@ import {
   type AgentType,
   type Cadence,
   type CellRun,
+  type DailyTemplate,
   type Department,
   type DeptKind,
   type DigestMetrics,
@@ -48,6 +49,7 @@ type RunRow = {
   message_id: string | null;
   sent_at: string | null;
   opened_at: string | null;
+  open_count: number | null;
 };
 type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null; cs_poc: string | null; digest_send_hour: number | null; digest_send_minute: number | null;
   daily_enabled: boolean | null; weekly_enabled: boolean | null; monthly_enabled: boolean | null;
@@ -111,6 +113,7 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
     metrics: r.metrics ?? undefined,
     renderedHtml: r.rendered_html ?? undefined,
     openedAt: r.opened_at ?? undefined,
+    openCount: r.open_count ?? undefined,
     recipients: (r.recipients ?? undefined)?.map(rec => ({
       email: rec.email, name: rec.name, received: rec.received, bounced: rec.bounced,
       opened: rec.opened, openedAt: rec.opened_at,
@@ -140,18 +143,23 @@ export async function loadRooftops(): Promise<LoadResult> {
 
   const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
     supabase.from("roi_digest_runs")
-      .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at")
+      .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
       .order("local_date", { ascending: false }).limit(5000),
     supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
 
-  const err = runsRes.error || cfgRes.error || recRes.error || liveRes.error;
-  if (err) {
-    console.warn("[tracker] Supabase read failed:", err.message);
+  // CRITICAL reads — these define the rooftop rows themselves (runs, config, and the live
+  // departments that seed one row per (team, dept)). If any fail, the tracker has nothing to show.
+  const critErr = runsRes.error || cfgRes.error || liveRes.error;
+  if (critErr) {
+    console.warn("[tracker] Supabase read failed:", critErr.message);
     return { rooftops: [], source: "error", today: todayIso, lastSynced: new Date() };
   }
+  // NON-CRITICAL: recipients only enrich the rows (recipient lists / received overlay). A failure
+  // here shouldn't nuke the whole tracker — degrade to empty recipients rather than "error".
+  if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
 
   const runs = (runsRes.data ?? []) as RunRow[];
   const configs = (cfgRes.data ?? []) as ConfigRow[];
@@ -259,7 +267,7 @@ export async function loadRooftops(): Promise<LoadResult> {
         post_conversation_enabled: cfg?.post_conversation_enabled === true,
         action_item_enabled: cfg?.action_item_enabled === true,
         action_item_overdue_enabled: cfg?.action_item_overdue_enabled === true,
-        daily_template: cfg?.daily_template === "v2" ? "v2" : "v1",   // default classic
+        daily_template: (cfg?.daily_template === "v2" ? "v2" : "v1") as DailyTemplate,   // default classic
       },
     };
   })
@@ -281,8 +289,8 @@ export type EventTypeCount = { total: number; sent: number; notSent: number; las
 export type EventCounts = Map<string, Record<string, EventTypeCount>>;
 export type EventEmailRow = {
   id: string; email_type: string; status: string;
-  subject: string | null; recipients: { email: string; received?: boolean; opened?: boolean }[] | null;
-  sent_at: string | null; created_at: string; opened_at: string | null;
+  subject: string | null; recipients: { email: string; received?: boolean; opened?: boolean; opened_at?: string }[] | null;
+  sent_at: string | null; created_at: string; opened_at: string | null; open_count?: number | null;
   reason: string | null; rendered_html: string | null; event_key: string; message_id: string | null;
 };
 
@@ -333,59 +341,91 @@ export async function loadEventCounts(): Promise<EventCounts> {
   return m;
 }
 
-/** The individual transactional emails behind a count — newest first. Backfill + live:
- * the list comes from ClickHouse (every real event in the window, history included),
- * with each generated/sent row from roi_event_emails overlaid by event_key. Events that
- * haven't been generated yet appear as `status:"live"` rows (id:"" → the drawer's "Live
- * preview · decide to send or ignore" path). Degrades to the stored rows on CH failure. */
-export async function loadEventEmails(teamId: string, department: string, emailType: string, limit = 500, direction?: string | null): Promise<EventEmailRow[]> {
-  // Stored/generated rows (sent, suppressed, etc.) keyed by event_key for overlay.
+export type EventEmailPage = { rows: EventEmailRow[]; hasMore: boolean };
+
+/** One page of the individual transactional emails behind a count — newest first.
+ * Paginated end-to-end: ClickHouse is the spine (every real event in the window,
+ * newest first, sliced server-side via LIMIT/OFFSET), and only the generated/sent rows
+ * for THIS page's event_keys are pulled from roi_event_emails to overlay sent-status —
+ * so each page is a small, fast fetch. Events not generated yet appear as `status:"live"`
+ * rows (id:"" → the drawer's "Live preview · decide to send or ignore" path). When CH is
+ * unavailable (or a type has no live events), degrades to the stored rows, paged directly
+ * from Supabase. `hasMore` is true when a full page came back (more pages likely follow). */
+export async function loadEventEmails(
+  teamId: string, department: string, emailType: string,
+  opts: { limit?: number; offset?: number; direction?: string | null } = {},
+): Promise<EventEmailPage> {
+  const limit = opts.limit ?? 50;
+  const offset = Math.max(0, opts.offset ?? 0);
+
+  // 1) CH page (the spine) — only the requested slice of events, newest first.
+  let chEvents: Array<{ eventKey: string; label: string; sub: string; createdAt: string }> = [];
+  let chOk = false;
+  try {
+    const q = `teamId=${encodeURIComponent(teamId)}&department=${encodeURIComponent(department)}&emailType=${encodeURIComponent(emailType)}&limit=${limit}&offset=${offset}` + (opts.direction ? `&direction=${encodeURIComponent(opts.direction)}` : "");
+    const r = await fetch(`/api/email/roi-event-list?${q}`, { cache: "no-store" });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && Array.isArray((j as { events?: unknown }).events)) { chEvents = (j as { events: typeof chEvents }).events; chOk = true; }
+  } catch { /* fall through to stored-only */ }
+
+  if (chOk && chEvents.length) {
+    // Overlay sent-status for just this page's events (bounded .in() lookup, not the whole history).
+    const byKey = new Map<string, EventEmailRow>();
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from("roi_event_emails")
+        .select("id,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
+        .eq("team_id", teamId).eq("department", department).eq("email_type", emailType)
+        .in("event_key", chEvents.map((e) => e.eventKey));
+      if (error) console.warn("[tracker] event emails overlay read failed:", error.message);
+      for (const r of (data ?? []) as EventEmailRow[]) byKey.set(r.event_key, r);
+    }
+    const rows: EventEmailRow[] = chEvents.map((e) => {
+      const hit = byKey.get(e.eventKey);
+      if (hit) return { ...hit, subject: hit.subject || e.label };
+      // Not generated yet → "live, decide to send/ignore" row (id:"" routes to the live preview/generate path).
+      return {
+        id: "", email_type: emailType, status: "live",
+        subject: e.label + (e.sub ? ` · ${e.sub}` : ""),
+        recipients: null, sent_at: null, created_at: e.createdAt, opened_at: null, open_count: 0,
+        reason: null, rendered_html: null, event_key: e.eventKey, message_id: null,
+      };
+    });
+    return { rows, hasMore: chEvents.length === limit };
+  }
+
+  // Fallback: CH unavailable or this type has no live events → page the stored rows directly.
   let stored: EventEmailRow[] = [];
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from("roi_event_emails")
-      .select("id,email_type,status,subject,recipients,sent_at,created_at,opened_at,reason,rendered_html,event_key,message_id")
+      .select("id,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
       .eq("team_id", teamId).eq("department", department).eq("email_type", emailType)
       .order("created_at", { ascending: false })
-      .limit(limit);
+      .range(offset, offset + limit - 1);
     if (error) console.warn("[tracker] event emails read failed:", error.message);
     stored = (data ?? []) as EventEmailRow[];
   }
-  // Live CH events (history + ongoing).
-  let chEvents: Array<{ eventKey: string; label: string; sub: string; createdAt: string }> = [];
-  try {
-    const q = `teamId=${encodeURIComponent(teamId)}&department=${encodeURIComponent(department)}&emailType=${encodeURIComponent(emailType)}&limit=${limit}` + (direction ? `&direction=${encodeURIComponent(direction)}` : "");
-    const r = await fetch(`/api/email/roi-event-list?${q}`, { cache: "no-store" });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok && Array.isArray((j as { events?: unknown }).events)) chEvents = (j as { events: typeof chEvents }).events;
-  } catch { /* fall through to stored-only */ }
-  if (!chEvents.length) return stored; // CH unavailable / no events → previous behavior
-
-  const byKey = new Map(stored.map((r) => [r.event_key, r] as const));
-  const seen = new Set<string>();
-  const merged: EventEmailRow[] = chEvents.map((e) => {
-    const hit = byKey.get(e.eventKey);
-    if (hit) { seen.add(e.eventKey); return { ...hit, subject: hit.subject || e.label }; }
-    // Not generated yet → "live, decide to send/ignore" row (id:"" routes to the live preview/generate path).
-    return {
-      id: "", email_type: emailType, status: "live",
-      subject: e.label + (e.sub ? ` · ${e.sub}` : ""),
-      recipients: null, sent_at: null, created_at: e.createdAt, opened_at: null,
-      reason: null, rendered_html: null, event_key: e.eventKey, message_id: null,
-    };
-  });
-  // Keep any generated rows outside the CH window so nothing already-sent disappears.
-  for (const s of stored) if (s.event_key && !seen.has(s.event_key)) merged.push(s);
-  return merged;
+  return { rows: stored, hasMore: stored.length === limit };
 }
 
 /** Persist a per-rooftop email-type toggle (roi_rooftop_config). Browser write — RLS is off
  * on this project and anon has been granted UPDATE, so the tracker writes directly. */
+// Persist rooftop config (email-type toggles + daily template) through the backend
+// (service key) so the browser's publishable key never needs write grants on
+// roi_rooftop_config. The server whitelists the columns it accepts.
 export async function updateRooftopConfig(teamId: string, patch: Partial<RooftopConfig>): Promise<{ ok: boolean; error?: string }> {
-  if (!isSupabaseConfigured || !supabase) return { ok: false, error: "Supabase not configured" };
-  const { error } = await supabase
-    .from("roi_rooftop_config")
-    .update({ ...patch, updated_at: new Date().toISOString() })
-    .eq("team_id", teamId);
-  return error ? { ok: false, error: error.message } : { ok: true };
+  if (!teamId) return { ok: false, error: "teamId required" };
+  try {
+    const res = await fetch("/api/rooftop-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId, ...patch }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }

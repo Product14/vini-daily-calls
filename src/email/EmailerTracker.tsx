@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   NOT_SENT_REASON_CTA,
   NOT_SENT_REASON_LABEL,
@@ -13,12 +14,13 @@ import {
   type RooftopConfig,
   type EmailTypeKey,
   type SendCell,
+  type Recipient,
 } from "./mockData";
 import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, type EventCounts, type EventEmailRow } from "./dataSource";
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
-import { reportMissingRooftopNow, generateSendEventNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow } from "./sendDigest";
 
 export function EmailerTracker() {
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -78,17 +80,28 @@ export function EmailerTracker() {
   // every recipient list down to @spyne.ai addresses — no customer is emailed.
   // Subject is prefixed "[PREVIEW]". Needs a mail token, like a live send.
   const runSpynePreviewAll = useCallback(async () => {
-    const ok = window.confirm(
-      "Send a PREVIEW now?\n\nThis really emails — but ONLY @spyne.ai (internal) recipients across all rooftops. " +
-      "Every external/customer address is dropped, so no customer receives anything. Subject is prefixed “[PREVIEW]”.",
+    const pw = window.prompt(
+      "Send a PREVIEW now?\n\nThis really emails — but ONLY the internal reviewers " +
+      "devansh.hasija@spyne.ai and subhav.malhotra@spyne.ai, across all rooftops. " +
+      "No customer (and no other address) receives anything. Subject is prefixed “[PREVIEW]”.\n\n" +
+      "Type the send password to confirm:",
     );
-    if (!ok) return;
+    if (pw == null) return; // cancelled
+    if (!pw.trim()) {
+      setPreviewState("error");
+      setPreviewMsg("Preview cancelled — the send password is required.");
+      setTimeout(() => setPreviewState("idle"), 5000);
+      return;
+    }
     setPreviewState("running");
     setPreviewMsg("");
-    const r = await runPreviewPipeline({}); // no team → all rooftops; cron4 keeps @spyne.ai only
+    const r = await runPreviewPipeline({ sendOverride: pw.trim() }); // no team → all rooftops; cron4 keeps @spyne.ai only
     if (r.simulated) {
       setPreviewState("done");
       setPreviewMsg("Simulated — no backend configured.");
+    } else if (r.overrideRequired) {
+      setPreviewState("error");
+      setPreviewMsg("Wrong send password — nothing was sent.");
     } else if (r.authFailed || r.status === 401 || r.status === 403) {
       setPreviewState("error");
       setPreviewMsg("Mail token rejected/expired. Open a rooftop’s “Send now” to paste a fresh token, then retry.");
@@ -97,7 +110,7 @@ export function EmailerTracker() {
       setPreviewMsg("Functions not deployed yet.");
     } else if (r.ok) {
       setPreviewState("done");
-      setPreviewMsg(`Preview sent to Spyne only · ${r.counts?.preview ?? 0} previewed (dealer not sent, not counted) · ${r.counts?.skipped ?? 0} skipped (no @spyne.ai recipient) · ${r.counts?.errors ?? 0} errors.`);
+      setPreviewMsg(`Preview sent to reviewers only · ${r.counts?.preview ?? 0} previewed (dealer not sent, not counted) · ${r.counts?.skipped ?? 0} skipped (no recipients) · ${r.counts?.errors ?? 0} errors.`);
       await reload();
     } else {
       setPreviewState("error");
@@ -115,16 +128,28 @@ export function EmailerTracker() {
       setTimeout(() => setLiveState("idle"), 5000);
       return;
     }
-    const ok = window.confirm(
-      `Send REAL emails now?\n\n${liveCount} live rooftop(s) (dry_run = false) will receive their digest via mail.spyne.ai.\nDry-run rooftops are skipped. This is not a preview.`,
+    // Manual bulk live send requires a typed password (anti-churn / deliberate-send
+    // guard). It's forwarded to cron4 as x-send-override and must match the override
+    // password; the scheduled cron is exempt (it carries no FE mail token).
+    const pw = window.prompt(
+      `⚠ Send REAL emails now to ${liveCount} live rooftop(s)?\n\nThis emails real customers via mail.spyne.ai (dry-run rooftops are skipped). This is not a preview.\n\nType the send password to confirm:`,
     );
-    if (!ok) return;
+    if (pw == null) return; // cancelled
+    if (!pw.trim()) {
+      setLiveState("error");
+      setLiveMsg("Send cancelled — the send password is required.");
+      setTimeout(() => setLiveState("idle"), 5000);
+      return;
+    }
     setLiveState("running");
     setLiveMsg("");
-    const r = await runRespectPipeline({}); // no team → all rooftops; honours each dry_run flag
+    const r = await runRespectPipeline({ sendOverride: pw.trim() }); // no team → all rooftops; honours each dry_run flag
     if (r.simulated) {
       setLiveState("done");
       setLiveMsg("Simulated — no backend configured. Nothing sent.");
+    } else if (r.overrideRequired) {
+      setLiveState("error");
+      setLiveMsg("Wrong send password — nothing was sent.");
     } else if (r.authFailed || r.status === 401 || r.status === 403) {
       setLiveState("error");
       setLiveMsg("Mail token rejected/expired. Open a live rooftop’s “Send now” to paste a fresh token, then retry.");
@@ -165,8 +190,9 @@ export function EmailerTracker() {
   }, [rooftops, search, csmFilter, productFilter, reasonFilter]);
 
   // Per-column tallies shown above each date: sent / not-sent / not-eligible.
-  // not-eligible = not_subscribed (dept not subscribed / no run that day); everything
-  // else that didn't send (not_sent, suppressed, scheduled) counts as not-sent.
+  // not-eligible = not_subscribed OR scheduled — neither is a send failure: not_subscribed has
+  // no run that day, and scheduled is a pending/future run that hasn't come due. Only genuine
+  // misses (not_sent, suppressed) count as not-sent.
   const colStats = useMemo(() => {
     const arr = Array.from({ length: colCount }, () => ({ sent: 0, notSent: 0, notEligible: 0 }));
     for (const r of filtered) {
@@ -175,7 +201,7 @@ export function EmailerTracker() {
         const st = cells[i]?.status;
         if (!st) continue;
         if (st === "sent") arr[i].sent++;
-        else if (st === "not_subscribed") arr[i].notEligible++;
+        else if (st === "not_subscribed" || st === "scheduled") arr[i].notEligible++;
         else arr[i].notSent++;
       }
     }
@@ -191,6 +217,40 @@ export function EmailerTracker() {
       a.name.localeCompare(b.name) ||
       (a.department ?? "").localeCompare(b.department ?? ""));
   }, [filtered, groupBy]);
+
+  // Digest-drawer navigation: step the open cell to the prev/next rooftop (same date) or
+  // older/newer date (same rooftop). Cells are anchored to `today` (index 0 = today, higher = older),
+  // so "newer" = lower index. Date stepping is capped at the visible column count for that cadence.
+  const cellNav = useMemo(() => {
+    if (!activeCell) return null;
+    const cad = activeCell.cell.cadence as Cadence;
+    const getCells = (r: RooftopRow) => (cad === "daily" ? r.daily : cad === "weekly" ? r.weekly : r.monthly);
+    const visibleCols = cad === "daily" ? 10 : cad === "weekly" ? 8 : 6;
+    const oi = ordered.findIndex((r) => r.rooftop_id === activeCell.rooftop.rooftop_id);
+    const cells = getCells(activeCell.rooftop);
+    const ci = cells.findIndex((c) => c.date === activeCell.cell.date);
+    const maxCi = Math.min(cells.length, visibleCols) - 1;
+    const toRooftop = (delta: number) => {
+      const ni = oi + delta;
+      if (oi < 0 || ni < 0 || ni >= ordered.length) return null;
+      const r = ordered[ni];
+      const cs = getCells(r);
+      const c = cs.find((x) => x.date === activeCell.cell.date) ?? cs[0];
+      return c ? () => setActiveCell({ rooftop: r, cell: c }) : null;
+    };
+    const toDate = (delta: number) => {
+      const ni = ci + delta;
+      if (ci < 0 || ni < 0 || ni > maxCi) return null;
+      return () => setActiveCell({ rooftop: activeCell.rooftop, cell: cells[ni] });
+    };
+    return {
+      prevRooftop: toRooftop(-1),
+      nextRooftop: toRooftop(1),
+      olderDate: toDate(1),   // ← back in time
+      newerDate: toDate(-1),  // → toward today
+      rooftopPos: oi >= 0 ? { idx: oi + 1, total: ordered.length } : null,
+    };
+  }, [activeCell, ordered]);
 
   // Summary reflects the CURRENT filter set (so filtering to one CSM updates the count + %).
   const summary = useMemo(() => computeSummary(filtered, cadence), [filtered, cadence]);
@@ -255,7 +315,7 @@ export function EmailerTracker() {
               type="button"
               onClick={() => void runSpynePreviewAll()}
               disabled={previewState === "running"}
-              title="Fire cron1→4 for every rooftop as a REAL send, but cron4 keeps only @spyne.ai recipients — no customer is emailed. Subject prefixed “[PREVIEW]”. Needs a mail token."
+              title="Fire cron1→4 for every rooftop as a REAL send, but cron4 sends only to the reviewers devansh.hasija@spyne.ai + subhav.malhotra@spyne.ai — no customer is emailed. Subject prefixed “[PREVIEW]”. Needs a mail token."
               className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold ${
                 previewState === "error"
                   ? "border-negative/40 bg-negative-soft text-negative"
@@ -454,11 +514,15 @@ export function EmailerTracker() {
           <Stat
             label="Sent rate"
             value={`${summary.emailStatus.sentRatePct}%`}
+            sub={`${summary.emailStatus.sent} of ${summary.emailStatus.sent + summary.emailStatus.notSent} eligible`}
+            title="Of eligible rooftops (sent + not-sent); not-subscribed and scheduled rooftops are excluded from the denominator."
             tone={summary.emailStatus.sentRatePct >= 50 ? "positive" : "negative"}
           />
           <Stat
-            label="Open rate"
+            label="Rooftops opened"
             value={`${summary.emailStatus.openRatePct}%`}
+            sub={`${summary.emailStatus.opened} of ${summary.emailStatus.sent} sent`}
+            title="Rooftop-level open rate: a rooftop counts as opened if ANY recipient opened. Denominator is sent rooftops only (suppressed runs excluded)."
             tone={summary.emailStatus.openRatePct >= 40 ? "positive" : summary.emailStatus.opened > 0 ? "neutral" : undefined}
           />
         </div>
@@ -546,7 +610,7 @@ export function EmailerTracker() {
                     <DeptBadge dept={r.department} />
                   </td>
                   <td className={`${divider} ${groupTop} px-3 py-2`}>
-                    <DryRunToggle rooftop={r} />
+                    <DryRunToggle rooftop={r} onChanged={() => void reload()} />
                   </td>
                   {view === "digests"
                     ? cells.slice(0, colCount).map((c) => (
@@ -600,6 +664,7 @@ export function EmailerTracker() {
       <RooftopCellDrawer
         rooftop={activeCell?.rooftop ?? null}
         cell={activeCell?.cell ?? null}
+        nav={cellNav}
         onClose={() => setActiveCell(null)}
         onSend={(rid, date, cad) =>
           setSentNow((p) => ({ ...p, [`${rid}::${cad}::${date}`]: true }))
@@ -616,8 +681,12 @@ export function EmailerTracker() {
 
 /* Drill-down list of the individual transactional emails behind a count
  * (e.g. all 100 post-conversation emails sent to a rooftop). */
+const EVENT_PAGE_SIZE = 50; // rows fetched per page in the drill-down list
+
 function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; type: string; label: string; direction?: "inbound" | "outbound" | null } | null; onClose: () => void }) {
   const [rows, setRows] = useState<EventEmailRow[] | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [preview, setPreview] = useState<EventEmailRow | null>(null); // the email currently being viewed
   const [sending, setSending] = useState(false);
   const [sendMsg, setSendMsg] = useState("");
@@ -629,15 +698,62 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   const [genState, setGenState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   // A synthetic "preview" row (no id) for a type with no stored events — live-renders the
   // latest design for the rooftop's most-recent matching customer, then Send-to-customer/Ignore.
-  const synthetic = (): EventEmailRow => ({ id: "", email_type: entry?.type ?? "", status: "preview", subject: null, recipients: null, sent_at: null, created_at: new Date().toISOString(), opened_at: null, reason: null, rendered_html: null, event_key: "", message_id: null });
+  const synthetic = (): EventEmailRow => ({ id: "", email_type: entry?.type ?? "", status: "preview", subject: null, recipients: null, sent_at: null, created_at: new Date().toISOString(), opened_at: null, open_count: 0, reason: null, rendered_html: null, event_key: "", message_id: null });
   useEffect(() => {
-    if (!entry) { setRows(null); setPreview(null); return; }
-    setRows(null); setPreview(null); setSendMsg(""); setGenState("idle");
-    void loadEventEmails(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, 500, entry.direction).then((rs) => {
-      setRows(rs);
-      if (!rs.length) setPreview(synthetic()); // empty type → jump straight to a live preview
+    if (!entry) { setRows(null); setPreview(null); setHasMore(false); return; }
+    setRows(null); setPreview(null); setSendMsg(""); setGenState("idle"); setHasMore(false);
+    void loadEventEmails(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction }).then((page) => {
+      setRows(page.rows); setHasMore(page.hasMore);
+      if (!page.rows.length) setPreview(synthetic()); // empty type → jump straight to a live preview
     });
   }, [entry]);
+  const loadMore = useCallback(async () => {
+    if (!entry || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const offset = rows?.length ?? 0;
+      const page = await loadEventEmails(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset, direction: entry.direction });
+      setRows((prev) => [...(prev ?? []), ...page.rows]);
+      setHasMore(page.hasMore);
+    } finally { setLoadingMore(false); }
+  }, [entry, rows, loadingMore]);
+  // ── prev/next navigation through the list while previewing a single email ──
+  const rowKey = (r: EventEmailRow) => r.id || r.event_key;
+  const previewIdx = useMemo(() => {
+    if (!preview || !rows) return -1;
+    const k = rowKey(preview);
+    return rows.findIndex((x) => rowKey(x) === k);
+  }, [preview, rows]);
+  // When the user hits Next at the last loaded row (more pages exist), load the next
+  // page first, then advance once the new rows land.
+  const [pendingNext, setPendingNext] = useState(false);
+  useEffect(() => {
+    if (pendingNext && rows && previewIdx >= 0 && previewIdx + 1 < rows.length) {
+      setPreview(rows[previewIdx + 1]);
+      setPendingNext(false);
+    }
+  }, [pendingNext, rows, previewIdx]);
+  const go = useCallback((delta: number) => {
+    if (previewIdx < 0 || !rows) return;
+    const next = previewIdx + delta;
+    if (next < 0) return;
+    if (next >= rows.length) {
+      if (delta > 0 && hasMore && !loadingMore) { setPendingNext(true); void loadMore(); }
+      return;
+    }
+    setPreview(rows[next]);
+  }, [previewIdx, rows, hasMore, loadingMore, loadMore]);
+  // Keyboard: ← / → step between emails, Esc returns to the list (or closes from the list).
+  useEffect(() => {
+    if (!entry) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { if (preview && rows && rows.length) setPreview(null); else onClose(); }
+      else if (preview && e.key === "ArrowRight") { e.preventDefault(); go(1); }
+      else if (preview && e.key === "ArrowLeft") { e.preventDefault(); go(-1); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [entry, preview, rows, go, onClose]);
   // When opening a row: show stored if we have it, else jump straight to the live design.
   useEffect(() => {
     setLiveHtml(null); setLiveState("idle"); setLiveErr("");
@@ -663,20 +779,27 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   if (!entry) return null;
   const fmt = (iso: string) => { try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true }); } catch { return iso; } };
   const recipientsOf = (r: EventEmailRow) => (r.recipients ?? []).map((x) => x.email).join(", ");
+  // Who actually opened (recipients flagged by the tracking pixel).
+  const openedRecips = (r: EventEmailRow) => (r.recipients ?? []).filter((x) => x.opened).map((x) => x.email);
+  const openTitle = (r: EventEmailRow) =>
+    !r.opened_at ? "" :
+    `First opened ${fmt(r.opened_at)}` +
+    (r.open_count ? ` · ${r.open_count} view${r.open_count === 1 ? "" : "s"}` : "") +
+    (openedRecips(r).length ? ` · ${openedRecips(r).join(", ")}` : "");
   const openTab = (html: string) => { const w = window.open("", "_blank"); if (w) { w.document.open(); w.document.write(html); w.document.close(); } };
   const sendNow = async (r: EventEmailRow) => {
     if (!r.rendered_html) return;
     if (!window.confirm(`Send this ${entry.label} email now to its recipient(s)?\n\nThis sends a REAL email via the mail proxy.`)) return;
     setSending(true); setSendMsg("");
     try {
-      const res = await fetch("/api/email/roi-event-send-now", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: r.id }) });
-      const j = await res.json().catch(() => ({}));
+      // Anti-churn gated: if the email shows no value the client prompts for the override password.
+      const res = await sendStoredEventNow({ id: r.id });
       if (res.ok) {
-        setSendMsg(`✓ Sent to ${(j.to ?? []).join(", ") || "recipients"}`);
+        setSendMsg(`✓ Sent to ${(res.to ?? []).join(", ") || "recipients"}`);
         setPreview({ ...r, status: "sent" });
         setRows((prev) => (prev ? prev.map((x) => (x.id === r.id ? { ...x, status: "sent" } : x)) : prev));
       } else {
-        setSendMsg(j.error ? `Send failed — ${j.error}` : `Send failed (${res.status})`);
+        setSendMsg(res.error ? `Send failed — ${res.error}` : "Send failed");
       }
     } catch (e) {
       setSendMsg(`Send failed — ${e instanceof Error ? e.message : String(e)}`);
@@ -701,23 +824,48 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     : s === "error" || s === "not_sent" ? "bg-negative-soft text-negative"
     : "bg-surface-subtle text-text-muted";
 
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
+  // Portal to <body> + a high z-index so the drawer overlays the host shell's sidebar
+  // (a transformed/overflow ancestor was trapping the `fixed` overlay below it).
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex justify-end bg-black/30" onClick={onClose}>
       <div className="flex h-full w-[680px] max-w-[96vw] flex-col bg-surface-card shadow-xl" onClick={(e) => e.stopPropagation()}>
-        {/* header — shows a Back button when previewing a single email */}
+        {/* header — Back returns to the list; ‹ › step between emails while previewing */}
         <div className="flex items-center justify-between gap-3 border-b border-border-subtle px-5 py-4">
           <div className="flex min-w-0 items-center gap-3">
             {preview ? (
-              <button type="button" onClick={() => { if (rows && rows.length) setPreview(null); else onClose(); }} className="shrink-0 rounded-md border border-border-subtle px-2 py-1 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle">← Back</button>
+              <button type="button" onClick={() => { if (rows && rows.length) setPreview(null); else onClose(); }} title="Back to list (Esc)" className="shrink-0 rounded-md border border-border-subtle px-2 py-1 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle">← Back</button>
             ) : null}
             <div className="min-w-0">
               <div className="truncate text-[14px] font-semibold text-text-primary">{entry.rooftop.name} · {entry.label}</div>
               <div className="text-[11px] text-text-muted">
-                {preview ? (preview.id ? `${fmt(preview.created_at)} · ${recipientsOf(preview) || "—"}` : "Live preview · decide to send or ignore") : rows === null ? "Loading…" : `${rows.length} email${rows.length === 1 ? "" : "s"} · ${entry.rooftop.department}`}
+                {preview ? (preview.id ? `${fmt(preview.created_at)} · ${recipientsOf(preview) || "—"}` : "Live preview · decide to send or ignore") : rows === null ? "Loading…" : `${rows.length}${hasMore ? "+" : ""} email${rows.length === 1 ? "" : "s"} · ${entry.rooftop.department}`}
               </div>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="shrink-0 text-text-muted hover:text-text-primary">✕</button>
+          <div className="flex shrink-0 items-center gap-2">
+            {preview && previewIdx >= 0 && rows && rows.length > 1 ? (
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => go(-1)}
+                  disabled={previewIdx <= 0}
+                  title="Previous email (←)"
+                  className="rounded-md border border-border-subtle px-2 py-1 text-[13px] leading-none text-text-secondary hover:bg-surface-subtle disabled:opacity-30 disabled:hover:bg-transparent"
+                >‹</button>
+                <span className="min-w-[44px] text-center text-[11px] font-semibold tabular text-text-muted">
+                  {previewIdx + 1} / {rows.length}{hasMore ? "+" : ""}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => go(1)}
+                  disabled={previewIdx >= rows.length - 1 && !hasMore}
+                  title="Next email (→)"
+                  className="rounded-md border border-border-subtle px-2 py-1 text-[13px] leading-none text-text-secondary hover:bg-surface-subtle disabled:opacity-30 disabled:hover:bg-transparent"
+                >{pendingNext ? "…" : "›"}</button>
+              </div>
+            ) : null}
+            <button type="button" onClick={onClose} title="Close" className="text-text-muted hover:text-text-primary">✕</button>
+          </div>
         </div>
 
         {preview ? (
@@ -757,6 +905,18 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
               </span>
             </div>
             {sendMsg ? <div className={`border-b border-border-subtle px-5 py-1.5 text-[11px] ${sendMsg.startsWith("✓") ? "bg-positive/10 text-positive" : "bg-negative-soft text-negative"}`}>{sendMsg}</div> : null}
+            {!isSynth && preview.status === "sent" ? (
+              <div className="border-b border-border-subtle px-5 py-1.5 text-[11px]">
+                {preview.opened_at ? (
+                  <span className="font-semibold text-positive">
+                    👁 Opened · {preview.open_count || 1} view{(preview.open_count || 1) === 1 ? "" : "s"} · first {fmt(preview.opened_at)}
+                    {openedRecips(preview).length ? <span className="font-normal text-text-muted"> · by {openedRecips(preview).join(", ")}</span> : null}
+                  </span>
+                ) : (
+                  <span className="text-text-muted">Sent · not opened yet</span>
+                )}
+              </div>
+            ) : null}
             {mode === "live" && liveState === "loading" ? (
               <div className="flex flex-1 items-center justify-center gap-2 text-[13px] text-text-muted"><span className="h-4 w-4 animate-spin rounded-full border-2 border-border-subtle border-t-brand-primary" /> Rendering latest design from live data…</div>
             ) : mode === "live" && liveState === "error" ? (
@@ -779,30 +939,47 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
             ) : rows.length === 0 ? (
               <div className="py-12 text-center text-[13px] text-text-muted">No emails of this type yet.</div>
             ) : (
-              rows.map((r) => (
-                <button
-                  key={r.id || r.event_key}
-                  type="button"
-                  onClick={() => setPreview(r)}
-                  className="flex w-full items-center justify-between gap-3 border-b border-border-subtle px-5 py-2.5 text-left hover:bg-surface-subtle"
-                >
-                  <div className="min-w-0">
-                    <div className="truncate text-[13px] font-medium text-text-primary">{r.subject || entry.label}</div>
-                    <div className="mt-0.5 text-[11px] text-text-muted">
-                      {fmt(r.created_at)}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}{r.reason ? " · " + r.reason : ""}
+              <>
+                {rows.map((r) => (
+                  <button
+                    key={r.id || r.event_key}
+                    type="button"
+                    onClick={() => setPreview(r)}
+                    className="flex w-full items-center justify-between gap-3 border-b border-border-subtle px-5 py-2.5 text-left hover:bg-surface-subtle"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-[13px] font-medium text-text-primary">{r.subject || entry.label}</div>
+                      <div className="mt-0.5 text-[11px] text-text-muted">
+                        {fmt(r.created_at)}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}{r.reason ? " · " + r.reason : ""}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone(r.status)}`}>{r.status}</span>
-                    <span className="text-[12px] text-text-muted">View →</span>
-                  </div>
-                </button>
-              ))
+                    <div className="flex shrink-0 items-center gap-2">
+                      {r.opened_at ? (
+                        <span title={openTitle(r)} className="rounded-full bg-positive/10 px-2 py-0.5 text-[10px] font-semibold text-positive">
+                          👁 Opened{r.open_count && r.open_count > 1 ? ` ·${r.open_count}` : ""}
+                        </span>
+                      ) : r.status === "sent" ? (
+                        <span title="Sent — no open detected yet" className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-muted">Not opened</span>
+                      ) : null}
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone(r.status)}`}>{r.status}</span>
+                      <span className="text-[12px] text-text-muted">View →</span>
+                    </div>
+                  </button>
+                ))}
+                {hasMore ? (
+                  <button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="flex w-full items-center justify-center gap-2 px-5 py-3 text-[12px] font-semibold text-brand-primary hover:bg-surface-subtle disabled:opacity-50">
+                    {loadingMore ? <><span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-border-subtle border-t-brand-primary" /> Loading…</> : `Load ${EVENT_PAGE_SIZE} more ↓`}
+                  </button>
+                ) : (
+                  <div className="px-5 py-3 text-center text-[11px] text-text-muted">End of list</div>
+                )}
+              </>
             )}
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -813,7 +990,14 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   const [busy, setBusy] = useState<EmailTypeKey | null>(null);
   const [tplBusy, setTplBusy] = useState(false);
   const [err, setErr] = useState("");
-  useEffect(() => { setCfg(rooftop?.config ?? null); setErr(""); }, [rooftop]);
+  // Recipients of this rooftop's department (roi_recipients) — view, enable/disable, add.
+  const [recips, setRecips] = useState<Recipient[]>([]);
+  const [recipBusy, setRecipBusy] = useState<string | null>(null);
+  useEffect(() => {
+    setCfg(rooftop?.config ?? null);
+    setErr("");
+    setRecips(rooftop?.departments?.[0]?.allRecipients ?? rooftop?.departments?.[0]?.recipients ?? []);
+  }, [rooftop]);
   if (!rooftop || !cfg) return null;
 
   const toggle = async (key: EmailTypeKey) => {
@@ -840,8 +1024,20 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     onSaved();
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
+  // Enable/disable a recipient (email_enabled) — persists, never sends. Optimistic; reverts on failure.
+  const dept = rooftop.department;
+  const toggleRecip = async (email: string, next: boolean) => {
+    setRecips((prev) => prev.map((r) => (r.email === email ? { ...r, enabled: next } : r)));
+    setRecipBusy(email); setErr("");
+    const res = await toggleRecipientNow({ teamId: rooftop.team_id, email, enabled: next });
+    setRecipBusy(null);
+    if (!res.ok) { setRecips((prev) => prev.map((r) => (r.email === email ? { ...r, enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+
+  // Portal + high z-index so this overlays the host shell's sidebar (see EventListDrawer).
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex justify-end bg-black/30" onClick={onClose}>
       <div className="h-full w-[380px] overflow-auto bg-surface-card shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-4">
           <div>
@@ -895,8 +1091,88 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
           <div className="mt-4 text-[11px] leading-relaxed text-text-muted">
             Changes save immediately and gate the cron (digests + transactional sends). Daily/weekly/monthly also need a send-hour; transactional types fire on the poll.
           </div>
+
+          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-widest text-text-muted">
+            Recipients · {dept === "service" ? "Service" : "Sales"}
+          </div>
+          {recips.length === 0 ? (
+            <p className="mb-2 text-[12px] text-warning">No recipients yet — add at least one below, then turn it on.</p>
+          ) : (
+            <ul className="mb-2">
+              {recips.map((r) => (
+                <li key={r.email} className="flex items-center justify-between gap-2 border-b border-border-subtle py-2.5">
+                  <div className="min-w-0">
+                    {r.name ? <div className="truncate text-[13px] text-text-primary">{r.name}</div> : null}
+                    <div className="truncate text-[12px] text-text-muted">{r.email}</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={r.enabled}
+                    disabled={recipBusy === r.email}
+                    onClick={() => void toggleRecip(r.email, !r.enabled)}
+                    title={r.enabled ? "Receiving — click to pause" : "Paused — click to start receiving"}
+                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
+                  >
+                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.enabled ? "left-[18px]" : "left-0.5"}`} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <AddRecipientRow teamId={rooftop.team_id} dept={dept} onAdded={onSaved} />
+          <div className="mt-3 text-[11px] leading-relaxed text-text-muted">
+            Recipients (and their on/off state) apply to every email this rooftop sends — daily digests and transactional “Send to customer”. New recipients are added paused; turn them on to start receiving.
+          </div>
         </div>
       </div>
+    </div>,
+    document.body,
+  );
+}
+
+/* Add a recipient (name + email) to roi_recipients for this rooftop+department.
+ * Added paused (email_enabled=false) — the user flips the On toggle to start sending. */
+function AddRecipientRow({ teamId, dept, onAdded }: { teamId?: string; dept: DeptKind; onAdded: () => void }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
+  const [msg, setMsg] = useState("");
+  const submit = async () => {
+    if (!/\S+@\S+\.\S+/.test(email.trim())) { setState("error"); setMsg("Enter a valid email."); return; }
+    setState("saving"); setMsg("");
+    const r = await addRecipientNow({ teamId, dept, email: email.trim(), name: name.trim() || undefined, emailEnabled: false });
+    if (r.ok) { setState("done"); setMsg("Added (paused) — flip the On toggle to start sending."); setName(""); setEmail(""); onAdded(); setTimeout(() => setState("idle"), 1800); }
+    else { setState("error"); setMsg(r.error || "Add failed"); }
+  };
+  return (
+    <div>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Name (optional)"
+          className="min-w-0 w-28 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
+        />
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => { setEmail(e.target.value); if (state === "error") setState("idle"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
+          placeholder="name@dealer.com"
+          className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={state === "saving"}
+          className="flex-shrink-0 rounded-md bg-brand-primary px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60"
+        >
+          {state === "saving" ? "Adding…" : state === "done" ? "Added ✓" : "+ Add"}
+        </button>
+      </div>
+      {msg ? <p className={`mt-1 text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</p> : null}
     </div>
   );
 }
@@ -908,16 +1184,23 @@ function Stat({
   label,
   value,
   tone = "neutral",
+  sub,
+  title,
 }: {
   label: string;
   value: string | number;
   tone?: "neutral" | "positive" | "negative";
+  /** Small clarifying line under the label (e.g. the rate's denominator). */
+  sub?: string;
+  /** Hover tooltip — extra precision without crowding the strip. */
+  title?: string;
 }) {
   const c = tone === "positive" ? "text-positive" : tone === "negative" ? "text-negative" : "text-text-primary";
   return (
-    <div className="rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[84px]">
+    <div title={title} className="rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[84px]">
       <div className={`text-[19px] font-extrabold tabular leading-none ${c}`}>{value}</div>
       <div className="mt-1 text-[9px] font-semibold uppercase tracking-widest text-text-muted">{label}</div>
+      {sub ? <div className="mt-0.5 text-[9px] font-medium tabular text-text-muted">{sub}</div> : null}
     </div>
   );
 }
@@ -988,7 +1271,7 @@ function MissingRooftopButton() {
   );
 }
 
-function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
+function DryRunToggle({ rooftop, onChanged }: { rooftop: RooftopRow; onChanged?: () => void }) {
   const [on, setOn] = useState<boolean>(rooftop.dryRun !== false); // on = dry-run held (Live | Paused | Not started)
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -1012,7 +1295,11 @@ function DryRunToggle({ rooftop }: { rooftop: RooftopRow }) {
         .eq("team_id", rooftop.team_id).eq("department", rooftop.department);
       if (error) { setBusy(false); return false; }
     }
-    setOn(nextDry); setBusy(false); return true;
+    setOn(nextDry); setBusy(false);
+    // Optimistic local update done — now reload the parent so liveCount / "Send live (N)" /
+    // each row's liveStatus reflect the new dry_run instead of going stale until manual Refresh.
+    onChanged?.();
+    return true;
   };
 
   const onClick = () => {

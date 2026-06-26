@@ -1,20 +1,27 @@
 // Callback-from-outbound re-attribution.
 //
-// Business rule: an outbound agent calls a lead; the lead later calls back and
-// our INBOUND agent picks up and (often) books the appointment. That callback is
-// outbound-driven effort, so the conversation — and every metric on it, incl. the
-// appointment — must be credited to the OUTBOUND agent, not Inbound.
+// Business rule: an OUTBOUND campaign calls a lead; the lead later calls back —
+// often on the very outbound number it was dialled from — and an INBOUND agent
+// picks up and (often) books the appointment. That callback is outbound-driven
+// effort, so the conversation — and every metric on it, incl. the appointment —
+// must be credited to the OUTBOUND agent, not Inbound.
 //
-// The only signal for this lives in the raw endcallreports document at
-// callDetails.outboundCallbackContext.callbackFromOutbound = true. It is NOT in
-// the flattened dealer_leads.endcallreports table, so we read it from
-// dealer_leads_raw.endcallreports (JSON `doc` column, ~169k rows, direct JSON
-// path access is fast). Every such call is an inboundPhoneCall today.
+// Signal: the flattened dealer_leads.endcallreports columns isCallbackFromOutbound
+// / callbackCampaignId / callbackOutboundTaskId, joined to the spine by callId.
+// A row is a callback when isCallbackFromOutbound = 1 OR it carries a
+// callbackCampaignId / callbackOutboundTaskId (the campaign + outbound-task ids
+// that originated the outreach). We read these flattened columns rather than the
+// raw doc JSON (callDetails.outboundCallbackContext.callbackFromOutbound): the
+// flattened signal is ≈1:1 with the raw flag, far cheaper (no OOM-prone raw-doc
+// FINAL scan), and additionally carries the originating campaign/task ids that
+// the raw path lacks — kept here so callback-booked appointments can be
+// campaign-attributed downstream. Mirrors reporting-vini's callbackAttribution.ts.
 //
 // Rather than fork the Metabase-synced SQL (server/agentBaseFact.sql and the 6
 // queries in agentMetricsQueries.json are regenerated from card 12227), this
 // module injects the same three edits into any of those SQL bodies at load time:
-//   1. a `callback_from_outbound` CTE (callId + team_id of callback calls),
+//   1. a `callback_from_outbound` CTE (callId + team_id + originating
+//      campaign/task of callback calls),
 //   2. a LEFT JOIN of that CTE onto the conversation spine, and
 //   3. a direction / agent_type override that flips matched inbound rows to
 //      Outbound.
@@ -23,18 +30,35 @@
 
 const CTE_ANCHOR = "customer_opt_out AS (";
 
+// The CTE is floored to a fixed window so the endcallreports FINAL scan stays
+// bounded (avoids an all-time scan / OOM). Unlike reporting-vini's spine, this
+// repo's consumers don't share one {START}/{END} pair — the rooftop spine
+// substitutes only {START} (−120d) and the 6 metrics queries carry their own
+// per-grain floors (day −45d, week −84d, month ≈ −5mo) with no {END} — so we use
+// a single conservative floor wide enough to cover the widest consumer (the month
+// grain). Callback rows outside a given query's window simply never join.
+const CALLBACK_FLOOR = "toStartOfMonth(addMonths(today(), -6))";
+
 const CTE_BLOCK = `callback_from_outbound AS (
     -- Inbound calls the customer placed back in response to an outbound touch.
-    -- Signal lives only in the raw endcallreports doc; these arrive as
-    -- inboundPhoneCall but are outbound-driven, so we re-attribute them.
+    -- Flattened signal on dealer_leads.endcallreports (joined by callId); floored
+    -- to a fixed window to avoid an all-time endcallreports FINAL scan. Also
+    -- carries the originating campaign/task so callback-booked appointments can
+    -- be campaign-attributed downstream.
     SELECT
-        toString(doc.callId) AS callId,
-        toString(doc.teamId) AS team_id,
-        toUInt8(1)           AS is_callback
-    FROM dealer_leads_raw.endcallreports
-    WHERE _peerdb_is_deleted = 0
-      AND doc.callDetails.outboundCallbackContext.callbackFromOutbound = true
-    GROUP BY callId, team_id
+        ecr.callId AS callId,
+        ecr.teamId AS team_id,
+        toUInt8(1) AS is_callback,
+        any(ecr.callbackCampaignId)     AS callback_campaign_id,
+        any(ecr.callbackOutboundTaskId) AS callback_outbound_task_id
+    FROM dealer_leads.endcallreports AS ecr FINAL
+    WHERE ecr.__deleted = 0
+      AND ecr.callId IS NOT NULL AND ecr.callId != ''
+      AND toDate(ecr.createdAt) >= ${CALLBACK_FLOOR}
+      AND ( ecr.isCallbackFromOutbound = 1
+            OR ifNull(ecr.callbackCampaignId, '') != ''
+            OR ifNull(ecr.callbackOutboundTaskId, '') != '' )
+    GROUP BY ecr.callId, ecr.teamId
 ),
 
 `;

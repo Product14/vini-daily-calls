@@ -43,6 +43,30 @@ async function postJson(path: string, body: unknown): Promise<{ ok: boolean; err
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
+// Anti-churn override prompt: every customer-facing send goes through this. `doPost`
+// performs the request with an optional override password in its body. If the server
+// replies { blocked: true } (the email shows no value → churn risk), we prompt the
+// operator for the password and retry once with it; the server only sends if it
+// matches (DANGER). Returns the parsed body plus an `ok`/`blocked` summary.
+type SendResult = { ok: boolean; error?: string; blocked?: boolean; body?: Record<string, unknown> };
+async function sendWithOverridePrompt(doPost: (override?: string) => Promise<Response>): Promise<SendResult> {
+  const run = async (override?: string): Promise<{ status: number; b: Record<string, unknown> }> => {
+    const res = await doPost(override);
+    const b = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    return { status: res.status, b };
+  };
+  let { status, b } = await run();
+  if (b && b.blocked === true && b.ok !== true) {
+    const pw = typeof window !== "undefined"
+      ? window.prompt("⚠ This email shows NO value to the customer.\nSending it now is a churn risk.\n\nType the override password to send anyway:")
+      : null;
+    if (!pw || !pw.trim()) return { ok: false, blocked: true, error: "Send cancelled — the email shows no value.", body: b };
+    ({ status, b } = await run(pw.trim()));
+  }
+  if (b && b.ok === true) return { ok: true, body: b };
+  return { ok: false, blocked: b?.blocked === true, error: (b?.error as string) || `Request failed (HTTP ${status})`, body: b };
+}
+
 /** Toggle a recipient's email_enabled (persist; does NOT send). */
 export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabled: boolean }) =>
   postJson("/api/recipients/toggle", { teamId: opts.teamId, email: opts.email, enabled: opts.enabled });
@@ -114,21 +138,20 @@ export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: stri
 
 export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind; dryRun?: boolean }): Promise<{ ok: boolean; error?: string; summary?: GenerateSendSummary }> {
   try {
-    const res = await fetch("/api/email/roi-generate-send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        cadence: opts.cadence,
-        teamId: opts.teamId,
-        department: opts.teamId ? (opts.dept === "service" ? "service" : "sales") : undefined,
-        dryRun: opts.dryRun === true,
-      }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || !(body as { ok?: boolean }).ok) {
-      return { ok: false, error: (body as { error?: string }).error || `Send failed (HTTP ${res.status})` };
-    }
-    return { ok: true, summary: body as GenerateSendSummary };
+    const r = await sendWithOverridePrompt((override) =>
+      fetch("/api/email/roi-generate-send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cadence: opts.cadence,
+          teamId: opts.teamId,
+          department: opts.teamId ? (opts.dept === "service" ? "service" : "sales") : undefined,
+          dryRun: opts.dryRun === true,
+          override,
+        }),
+      }));
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, summary: r.body as unknown as GenerateSendSummary };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
@@ -140,17 +163,18 @@ export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: stri
  */
 export async function generateSendEventNow(opts: { teamId?: string; enterpriseId?: string; department?: DeptKind; emailType: string; eventKey?: string; rooftopName?: string; tz?: string }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
   try {
-    const res = await fetch("/api/email/roi-event-generate-send", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        teamId: opts.teamId, enterpriseId: opts.enterpriseId,
-        department: opts.department === "service" ? "service" : "sales",
-        emailType: opts.emailType, eventKey: opts.eventKey, rooftopName: opts.rooftopName, tz: opts.tz,
-      }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Send failed (HTTP ${res.status})` };
-    return { ok: true, to: (body as { to?: string[] }).to };
+    const r = await sendWithOverridePrompt((override) =>
+      fetch("/api/email/roi-event-generate-send", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          teamId: opts.teamId, enterpriseId: opts.enterpriseId,
+          department: opts.department === "service" ? "service" : "sales",
+          emailType: opts.emailType, eventKey: opts.eventKey, rooftopName: opts.rooftopName, tz: opts.tz,
+          override,
+        }),
+      }));
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, to: (r.body as { to?: string[] })?.to };
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
@@ -168,20 +192,32 @@ export async function sendDigestNow(opts: SendDigestOpts): Promise<{ ok: boolean
   const subject = `${dept === "service" ? "Service" : "Sales"} Daily Digest — ${opts.rooftopName}`;
 
   try {
-    const res = await fetch("/api/email/roi-send-now", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ teamId: opts.teamId, department: dept, localDate: opts.localDate, to: recipients, subject, html }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || !(body as { ok?: boolean }).ok) {
-      return { ok: false, error: (body as { error?: string }).error || `Send failed (HTTP ${res.status})` };
-    }
-    if ((body as { dbUpdated?: boolean }).dbUpdated === false) {
+    const r = await sendWithOverridePrompt((override) =>
+      fetch("/api/email/roi-send-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ teamId: opts.teamId, department: dept, localDate: opts.localDate, to: recipients, subject, html, override }),
+      }));
+    if (!r.ok) return { ok: false, error: r.error };
+    if ((r.body as { dbUpdated?: boolean })?.dbUpdated === false) {
       return { ok: true, error: "Email sent, but the run wasn't marked in Supabase (set ROI_SUPABASE_SERVICE_KEY on the server)." };
     }
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+}
+
+/** Resend a STORED transactional event email by row id (anti-churn gated). */
+export async function sendStoredEventNow(opts: { id: string; to?: string[] }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
+  try {
+    const r = await sendWithOverridePrompt((override) =>
+      fetch("/api/email/roi-event-send-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: opts.id, to: opts.to, override }),
+      }));
+    if (!r.ok) return { ok: false, error: r.error };
+    return { ok: true, to: (r.body as { to?: string[] })?.to };
+  } catch (e) { return { ok: false, error: String(e) }; }
 }

@@ -63,6 +63,8 @@ export type PipelineResult = {
   error?: string;
   /** mail token/cookie was missing or rejected (401/403) → prompt for a token on the FE */
   authFailed?: boolean;
+  /** a manual live customer send was blocked because the override password was missing/wrong */
+  overrideRequired?: boolean;
   /** convenience: per-cron4 counts pulled out of the nested body */
   counts?: { queued?: number; sent?: number; suppressed?: number; preview?: number; errors?: number; skipped?: number };
 };
@@ -97,6 +99,9 @@ type RunOpts = {
   mode?: "dry" | "respect" | "live" | "preview";
   /** mail cookie/token for a real send; falls back to the stored session token. */
   token?: string;
+  /** Manual "Send live" override password (DANGER) — required by cron4 for a manual
+   * live customer send. Forwarded in the x-send-override header, never the URL. */
+  sendOverride?: string;
 };
 
 function extractCounts(body: unknown): PipelineResult["counts"] {
@@ -113,6 +118,10 @@ function extractCounts(body: unknown): PipelineResult["counts"] {
 function detectAuthFailed(body: unknown): boolean {
   const b = body as { cron4?: { body?: { auth_failed?: boolean } } } | undefined;
   return b?.cron4?.body?.auth_failed === true;
+}
+function detectOverrideRequired(body: unknown): boolean {
+  const b = body as { cron4?: { body?: { override_required?: boolean } } } | undefined;
+  return b?.cron4?.body?.override_required === true;
 }
 
 /**
@@ -154,6 +163,8 @@ export async function runPipeline(opts: RunOpts = {}): Promise<PipelineResult> {
   if (mayEmail) {
     const tok = (opts.token ?? getMailToken()).trim();
     if (tok) headers["x-mail-token"] = tok; // secret travels in a header, not the URL
+    const ov = (opts.sendOverride ?? "").trim();
+    if (ov) headers["x-send-override"] = ov; // manual Send-live password (header, not URL)
   }
 
   try {
@@ -164,6 +175,7 @@ export async function runPipeline(opts: RunOpts = {}): Promise<PipelineResult> {
       status: res.status,
       body,
       authFailed: mayEmail && detectAuthFailed(body),
+      overrideRequired: mayEmail && detectOverrideRequired(body),
       counts: extractCounts(body),
     };
   } catch (e) {

@@ -37,6 +37,7 @@ Deno.serve(async (req) => {
   const bypass = u.searchParams.get("bypass") === "true"; // ignore send-hour gate (manual tests)
   const skipSync = u.searchParams.get("skipSync") === "true";
   const mailToken = req.headers.get("x-mail-token") ?? ""; // FE-supplied mail cookie/token, forwarded to cron4
+  const sendOverride = req.headers.get("x-send-override") ?? ""; // manual Send-live password, forwarded to cron4
   const sb = supa();
   const result: Record<string, unknown> = {};
 
@@ -72,7 +73,10 @@ Deno.serve(async (req) => {
   result.cron4 = await call(
     "cron4-send",
     { ...scope, ...(dry ? { dry: "true" } : {}), ...(force ? { force: "true" } : {}), ...(spyneOnly ? { spyneOnly: "true" } : {}) },
-    mailToken ? { "x-mail-token": mailToken } : {}, // forward FE token to cron4 (header, not URL)
+    {
+      ...(mailToken ? { "x-mail-token": mailToken } : {}), // forward FE token to cron4 (header, not URL)
+      ...(sendOverride ? { "x-send-override": sendOverride } : {}), // forward Send-live password to cron4
+    },
   );
 
   return json(result);

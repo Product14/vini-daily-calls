@@ -19,6 +19,13 @@ var GREEN_BIG = "#15803D";
 var POS = "#16A34A", POS_BG = "#DCFCE7", AMBER = "#B45309", AMBER_BG = "#FEF3C7", SLATE_BG = "#EEF2F7";
 
 function esc(v) { return String(v == null ? "" : v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+// Anti-churn no-value marker — MUST stay byte-identical to emailValue.cjs NO_VALUE_MARK. The send
+// chokepoints (eventRunner.sendMail, app.js roi-event-*) refuse to send a marked email unless the
+// DANGER override is supplied; the marker is stripped off the wire so a customer never sees it. This
+// module is required by the server (not bundled into the SPA), so it stamps the marker itself rather
+// than requiring emailValue — the transactional gate was previously dead because nothing stamped it.
+var NO_VALUE_MARK = "<!--vini:no-value-->";
+function stampValue(html, hasValue) { return hasValue ? html : (String(html || "") + NO_VALUE_MARK); }
 function fmtInt(n) { n = Number(n) || 0; return n.toLocaleString("en-US"); }
 function money(n) { n = Number(n) || 0; return "$" + n.toLocaleString("en-US"); }
 function btnPrimary(label, href) {
@@ -109,7 +116,8 @@ function renderPostAppointment(opts) {
     '<div style="margin-top:16px;">' + btnPrimary("Confirm appointment", apptUrl) + "</div>";
 
   var title = (a.customer ? esc(a.customer) : "Appointment") + (a.relDay ? " — " + esc(a.relDay) + (a.time ? " " + esc(a.time) : "") : " is on the calendar");
-  return shell(opts, a.byVini ? "Vini booked an appointment" : "New appointment", title, card + mtdStrip(opts.mtdCount, "appointments booked by Vini this month", apptUrl));
+  var hasValue = !!(a.customer || whenBig || a.intent || a.vehicle);
+  return stampValue(shell(opts, a.byVini ? "Vini booked an appointment" : "New appointment", title, card + mtdStrip(opts.mtdCount, "appointments booked by Vini this month", apptUrl)), hasValue);
 }
 
 // ── intent humanizer (mirrors the digest template's labels) ──
@@ -314,7 +322,10 @@ function renderPostConversation(opts) {
     "</td></tr></table>" +
     '<div style="margin-top:18px;">' + btnPrimary(isSms ? "Open thread" : "Listen & review", url) + "</div>";
 
-  return shell(opts, isSms ? "Text conversation" : "Conversation summary", esc(c.title || "New conversation"), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms ? "conversations handled" : "calls handled", url));
+  // No-value = the blank-summary placeholder with nothing else to show (no action items, no booked
+  // appointment, no SMS thread, no takeaways, no recording) — exactly the empty email the gate exists for.
+  var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl);
+  return stampValue(shell(opts, isSms ? "Text conversation" : "Conversation summary", esc(c.title || "New conversation"), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms ? "conversations handled" : "calls handled", url)), hasValue);
 }
 
 // One stacked action-item row (used by both the new-item and overdue emails).
@@ -400,7 +411,7 @@ function renderActionItem(opts) {
     mtdStrip(opts.mtdOpen, "open action items across all leads", url);
 
   var title = fmtInt(totalOpen) + " thing" + (totalOpen === 1 ? "" : "s") + " to do for " + esc(lead.customer || "a customer");
-  return shell(opts, "Action items · by lead", title, body);
+  return stampValue(shell(opts, "Action items · by lead", title, body), items.length > 0);
 }
 
 // "overdue by" age, from the oldest due date among a lead's items
@@ -438,7 +449,7 @@ function renderActionItemOverdue(opts) {
     smsThread(opts.sms, opts.smsFailed) +
     '<div style="margin-top:6px;">' + btnPrimary("Resolve now", url) + "</div>";
   var title = lead.customer ? fmtInt(count) + " overdue for " + esc(lead.customer) : fmtInt(count) + " overdue action item" + (count === 1 ? "" : "s");
-  return shell(opts, "Overdue · by lead", title, body);
+  return stampValue(shell(opts, "Overdue · by lead", title, body), count > 0);
 }
 
 module.exports = {
