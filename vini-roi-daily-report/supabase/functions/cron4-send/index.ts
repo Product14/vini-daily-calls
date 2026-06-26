@@ -101,6 +101,18 @@ Deno.serve(async (req) => {
     if (isManual && !overrideOk) {
       out.override_required = true; out.skipped++; continue;
     }
+    // SAFETY LOCK: the redesigned (v2) digest may ONLY reach @spyne.ai while in testing. Detected via
+    // the hidden v2 marker the renderer stamps. spyneOnly is already reviewer-only; for a real customer
+    // send, filter to @spyne.ai (none → suppressed). Lift deliberately with V2_TO_CUSTOMERS=true.
+    const V2_TO_CUSTOMERS = Deno.env.get("V2_TO_CUSTOMERS") === "true";
+    const isV2 = typeof r.rendered_html === "string" && r.rendered_html.includes("<!--vini:v2-->");
+    if (isV2 && !V2_TO_CUSTOMERS && !spyneOnly) {
+      recips = recips.filter((e: string) => /@spyne\.ai$/i.test(String(e).trim().toLowerCase()));
+      if (!recips.length) {
+        await sb.from("roi_digest_runs").update({ status: "suppressed", reason: "v2_spyne_only" }).eq("id", r.id);
+        out.suppressed++; continue;
+      }
+    }
     if (!recips.length) {
       // Preview always has the reviewer allowlist, so this only trips a real send
       // for a rooftop with no configured recipients.
@@ -123,7 +135,7 @@ Deno.serve(async (req) => {
       const res = await fetch(MAIL_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${mailToken}` },
-        body: JSON.stringify({ to: recips.join(","), subject: spyneOnly ? `[PREVIEW] ${r.subject ?? "Daily Digest"}` : (r.subject ?? "Daily Digest"), template: TEMPLATE, templateData: { HTMLdata: r.rendered_html } }),
+        body: JSON.stringify({ to: recips.join(","), subject: spyneOnly ? `[PREVIEW] ${r.subject ?? "Daily Digest"}` : (r.subject ?? "Daily Digest"), template: TEMPLATE, templateData: { HTMLdata: String(r.rendered_html).split("<!--vini:v2-->").join("").split("<!--vini:no-value-->").join("") } }),
       });
       if (res.status === 401 || res.status === 403) {
         out.auth_failed = true;

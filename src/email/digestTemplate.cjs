@@ -512,6 +512,9 @@ function renderDigestHtml(metrics, opts) {
     num(m.outboundTotalCalls) +
     num(m.actionItemsTotal);
   if (!(__sig > 0)) __html += "<!--vini:no-value-->";
+  // SAFETY: tag every render of the NEW (redesign) template. Send chokepoints use this marker to
+  // restrict v2 emails to @spyne.ai while in testing (until V2_TO_CUSTOMERS=true). Stripped off the wire.
+  __html += "<!--vini:v2-->";
   return __html;
 }
 

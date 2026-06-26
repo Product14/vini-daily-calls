@@ -13,6 +13,21 @@
 const NO_VALUE_MARK = "<!--vini:no-value-->";
 const OVERRIDE_PASSWORD = "DANGER";
 
+// ─── v2 (redesign) recipient lock ────────────────────────────────────────────
+// SAFETY: while the redesigned digest is in testing, a v2 email may ONLY reach @spyne.ai.
+// The v2 renderer stamps V2_MARK; every send chokepoint filters recipients to @spyne.ai when the
+// HTML is v2-marked, unless V2_TO_CUSTOMERS=true is explicitly set (the deliberate "ship it" switch).
+const V2_MARK = "<!--vini:v2-->";
+const V2_TO_CUSTOMERS = String(process.env.V2_TO_CUSTOMERS || "").trim() === "true";
+function isV2(html) { return typeof html === "string" && html.includes(V2_MARK); }
+function isSpyne(email) { return /@spyne\.ai$/i.test(String(email == null ? "" : email).trim().toLowerCase()); }
+// Returns { locked, allowed }. locked=true means a v2-in-testing email; allowed = the @spyne.ai subset.
+function lockV2Recipients(html, recipients) {
+  const list = Array.isArray(recipients) ? recipients : [];
+  if (isV2(html) && !V2_TO_CUSTOMERS) return { locked: true, allowed: list.filter(isSpyne) };
+  return { locked: false, allowed: list };
+}
+
 // The digest "signal": any real activity worth emailing. Mirrors runner.cjs
 // guardrail() — zero means a truly empty day (no appointments, conversations,
 // calls, leads, outbound dials, or action items) → no value → churn risk.
@@ -35,11 +50,13 @@ function markNoValue(html) {
   return html.includes(NO_VALUE_MARK) ? html : html + NO_VALUE_MARK;
 }
 function isNoValue(html) { return typeof html === "string" && html.includes(NO_VALUE_MARK); }
-function stripMarker(html) { return typeof html === "string" ? html.split(NO_VALUE_MARK).join("") : html; }
+// Strip ALL hidden vini markers (no-value + v2) off the wire so a recipient never sees them.
+function stripMarker(html) { return typeof html === "string" ? html.split(NO_VALUE_MARK).join("").split(V2_MARK).join("") : html; }
 function overrideOk(v) { return String(v == null ? "" : v).trim() === OVERRIDE_PASSWORD; }
 
 module.exports = {
-  NO_VALUE_MARK, OVERRIDE_PASSWORD,
+  NO_VALUE_MARK, OVERRIDE_PASSWORD, V2_MARK, V2_TO_CUSTOMERS,
   digestSignal, digestHasValue,
   markNoValue, isNoValue, stripMarker, overrideOk,
+  isV2, isSpyne, lockV2Recipients,
 };

@@ -407,8 +407,17 @@ async function sendMail(to, subject, html, opts) {
   const force = opts && opts.force === true;
   if (emailValue.isNoValue(html)) {
     if (!force) { const e = new Error("This email shows no value — blocked to avoid churn. Override with the password to send."); e.code = "BLOCKED_NO_VALUE"; throw e; }
-    html = emailValue.stripMarker(html);
   }
+  // SAFETY LOCK: the redesigned (v2) digest may ONLY reach @spyne.ai while in testing. Even if a
+  // rooftop is live with real recipients, a v2 email is filtered to its @spyne.ai addresses (none →
+  // nothing sent). Lift deliberately with V2_TO_CUSTOMERS=true. Not overridable by the DANGER force.
+  const lock = emailValue.lockV2Recipients(html, to);
+  if (lock.locked) {
+    if (!lock.allowed.length) { const e = new Error("New (v2) template is @spyne.ai-only in testing — no @spyne.ai recipient for this rooftop, nothing sent."); e.code = "V2_SPYNE_ONLY"; throw e; }
+    if (lock.allowed.length !== to.length) console.log(`  🔒 v2 spyne-only lock → recipients restricted to ${lock.allowed.join(", ")}`);
+    to = lock.allowed;
+  }
+  html = emailValue.stripMarker(html); // strip no-value + v2 markers off the wire
   const body = JSON.stringify({ to: to.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } });
   let lastErr = "";
   // retry transient mail-gateway failures (5xx / 429) a couple times with backoff
