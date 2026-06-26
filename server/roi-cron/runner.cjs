@@ -688,6 +688,35 @@ async function rerender() {
   return out;
 }
 
+// ── Render ONE stored day in a CHOSEN template — render-only, NO send, NO write ──
+// Powers the tracker's daily-digest "New / Classic" preview toggle: load the metrics already
+// stored for (team, dept, cadence, local_date) and render them in the requested template, so any
+// past day can be viewed under either design regardless of what actually went out. `tpl` ('v1'|'v2')
+// overrides the rooftop's config; weekly/monthly are always v2. Returns null if no metrics are stored.
+async function renderStoredDigest({ teamId, department, cadence = "daily", localDate, tpl }) {
+  if (!teamId || !department || !localDate) throw new Error("teamId, department, localDate required");
+  const dept = department === "service" ? "service" : "sales";
+  const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
+  const { data: row, error } = await sb.from("roi_digest_runs")
+    .select("enterprise_id,dealer_timezone,metrics")
+    .eq("team_id", teamId).eq("department", dept).eq("cadence", cad).eq("local_date", localDate)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!row || !row.metrics) return null;
+  const { data: cfg } = await sb.from("roi_rooftop_config")
+    .select("rooftop_name,daily_template").eq("team_id", teamId).maybeSingle();
+  const m = row.metrics || {};
+  const tz = row.dealer_timezone || "America/New_York";
+  const name = (cfg && cfg.rooftop_name) || teamId;
+  const dateLabel = new Date(`${localDate}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
+  // daily honors the requested template (falls back to the rooftop's config); weekly/monthly always v2.
+  const chosen = cad === "daily" ? (tpl === "v1" || tpl === "v2" ? tpl : pickTemplate(cfg, cad)) : "v2";
+  const html = renderDigest(chosen, name, dept, dateLabel, row.enterprise_id, teamId, localDate, tz, m, camps, cad);
+  // strip the no-value marker — this is an on-screen preview, never a send
+  return { html: emailValue.stripMarker(html), template: chosen };
+}
+
 // ── WEEKLY / MONTHLY cadence generation ─────────────────────────────────────
 // The hourly cron also produces the weekly digest (sent Mondays) and the monthly
 // digest (sent on the 1st), gated by roi_rooftop_config.weekly_enabled/monthly_enabled
@@ -988,7 +1017,7 @@ async function syncLive() {
 }
 
 // Importable surface for the Vercel serverless cron + tests.
-module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive, apiMetrics, apiActionItems, apiCampaigns };
+module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive, apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {

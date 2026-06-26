@@ -2809,6 +2809,25 @@ app.get("/api/cron/roi-email", async (req, res) => {
   }
 });
 
+// ── Preview a STORED digest day in a chosen template (render-only, NO send) ──
+// Powers the tracker's daily "New / Classic" preview toggle: renders the metrics already stored for
+// (teamId, department, cadence, localDate) under tpl=v1|v2 so any past day can be viewed in either
+// template. Pure render — no email, no DB write. Returns 404 when that day has no stored metrics.
+//   GET /api/email/roi-render-preview?teamId&department&localDate[&cadence=daily][&tpl=v1|v2]
+app.get("/api/email/roi-render-preview", async (req, res) => {
+  try {
+    const { teamId, department, localDate, cadence, tpl } = req.query ?? {};
+    if (!teamId || !department || !localDate) return res.status(400).json({ error: "teamId, department, localDate required" });
+    const { renderStoredDigest } = require("./roi-cron/runner.cjs");
+    const out = await renderStoredDigest({ teamId, department, cadence: cadence || "daily", localDate, tpl });
+    if (!out) return res.status(404).json({ error: "no stored digest data for that day — nothing to preview" });
+    return res.json({ ok: true, ...out });
+  } catch (err) {
+    console.error("GET /api/email/roi-render-preview error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "render failed" });
+  }
+});
+
 // ── Manual ROI digest BACKFILL (record-only, NO emails) ─────────────────────
 // On-demand: re-record roi_digest_runs for a past date range (e.g. to fill a gap
 // after an outage). Runs the SAME fetch+render pipeline as the cron but never sends

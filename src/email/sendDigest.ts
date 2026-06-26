@@ -119,6 +119,30 @@ export type DigestPreview = {
  * writing to the DB or emailing. The drawer shows it so the user previews the
  * weekly/monthly digest before manually triggering the actual send.
  */
+/**
+ * Render a STORED digest day in a chosen template (v1 = Classic, v2 = New) — render-only, no send.
+ * Lets the drawer preview any past day under either template, regardless of what was actually sent.
+ */
+export async function renderStoredPreview(opts: { teamId: string; dept: DeptKind; localDate: string; cadence?: Cadence; tpl: "v1" | "v2" }): Promise<{ ok: boolean; html?: string; error?: string }> {
+  try {
+    const q = new URLSearchParams({
+      teamId: opts.teamId,
+      department: opts.dept === "service" ? "service" : "sales",
+      localDate: opts.localDate,
+      cadence: opts.cadence || "daily",
+      tpl: opts.tpl,
+    });
+    const res = await fetch(`/api/email/roi-render-preview?${q.toString()}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) {
+      return { ok: false, error: (body as { error?: string }).error || `Preview failed (HTTP ${res.status})` };
+    }
+    return { ok: true, html: (body as { html?: string }).html };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind }): Promise<{ ok: boolean; error?: string; preview?: DigestPreview }> {
   try {
     const res = await fetch("/api/email/roi-generate-preview", {

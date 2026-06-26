@@ -11,7 +11,7 @@ import {
 } from "./mockData";
 import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
-import { sendDigestNow, generateAndSendNow, generatePreviewNow, addRecipientNow, toggleRecipientNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
+import { sendDigestNow, generateAndSendNow, generatePreviewNow, renderStoredPreview, addRecipientNow, toggleRecipientNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
 
 /**
  * Cell-action drawer.
@@ -69,8 +69,12 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   const [view, setView] = useState<"desktop" | "email">("email");
   // Generated weekly/monthly preview HTML (render-only) shown in the left pane before a manual send.
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
-  // Clear any generated preview when the drawer's target cell changes.
-  useEffect(() => { setPreviewHtml(null); }, [rooftop?.rooftop_id, cell?.date, cell?.cadence]);
+  // Daily "New / Classic" template preview toggle: null = as-sent/default, else the chosen template.
+  const [tplActive, setTplActive] = useState<"v1" | "v2" | null>(null);
+  const [tplBusy, setTplBusy] = useState(false);
+  const [tplErr, setTplErr] = useState<string | null>(null);
+  // Clear any generated/toggled preview when the drawer's target cell changes.
+  useEffect(() => { setPreviewHtml(null); setTplActive(null); setTplErr(null); }, [rooftop?.rooftop_id, cell?.date, cell?.cadence]);
 
   useEffect(() => {
     if (open) {
@@ -115,6 +119,20 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   const isPeriodic = cell.cadence !== "daily";
   // Department for the generate/send call: the cell's run dept, else the rooftop's first department.
   const effDept = (dept ?? rooftop.departments?.[0]?.kind) as DeptKind | undefined;
+
+  // Daily template preview toggle: render this day's STORED metrics in v1 (Classic) / v2 (New).
+  // null → restore the as-sent / default view. Render-only — never sends.
+  const showTemplate = async (tpl: "v1" | "v2" | null) => {
+    setTplErr(null);
+    setTplActive(tpl);
+    if (tpl === null) { setPreviewHtml(null); return; }
+    if (!rooftop.team_id || !effDept) { setTplErr("Missing rooftop/department"); setTplActive(null); return; }
+    setTplBusy(true);
+    const r = await renderStoredPreview({ teamId: rooftop.team_id, dept: effDept, localDate: cell.date, cadence: cell.cadence, tpl });
+    setTplBusy(false);
+    if (r.ok && r.html) setPreviewHtml(r.html);
+    else { setTplErr(r.error || "Preview failed"); setTplActive(null); }
+  };
 
   const statusLabel = isSent ? "Sent" : isSuppressed ? "Suppressed" : NOT_SENT_REASON_LABEL[reason];
   const statusChip = isSent
@@ -202,15 +220,43 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto grid max-w-[1180px] grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-w-0">
-            <div className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-              {isSent
-                ? primary?.renderedHtml
-                  ? "Email sent · exact HTML"
-                  : "Email sent · exact HTML not stored"
-                : previewHtml
-                ? `${cell.cadence} digest · generated preview`
-                : `${cell.cadence} digest · default template preview`}
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+                {tplActive
+                  ? `${cell.cadence} digest · ${tplActive === "v2" ? "New" : "Classic"} template preview`
+                  : isSent
+                  ? primary?.renderedHtml
+                    ? "Email sent · exact HTML"
+                    : "Email sent · exact HTML not stored"
+                  : previewHtml
+                  ? `${cell.cadence} digest · generated preview`
+                  : `${cell.cadence} digest · default template preview`}
+              </div>
+              {/* Daily only: preview this day's data under either template (render-only, no send). */}
+              {cell.cadence === "daily" ? (
+                <div className="inline-flex shrink-0 overflow-hidden rounded-md border border-border-subtle text-[10px] font-semibold">
+                  {([
+                    { v: null as "v1" | "v2" | null, label: "As sent" },
+                    { v: "v2" as const, label: "New" },
+                    { v: "v1" as const, label: "Classic" },
+                  ]).map((o) => (
+                    <button
+                      key={String(o.v)}
+                      type="button"
+                      disabled={tplBusy}
+                      onClick={() => void showTemplate(o.v)}
+                      className={`px-2.5 py-1 transition-colors disabled:opacity-50 ${
+                        tplActive === o.v ? "bg-accent text-white" : "bg-surface text-text-muted hover:bg-surface-background"
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </div>
+            {tplErr ? <div className="mb-2 rounded bg-negative/10 px-2 py-1 text-[11px] text-negative">{tplErr}</div> : null}
+            {tplBusy ? <div className="mb-2 text-[11px] text-text-muted">Rendering preview…</div> : null}
             <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={previewHtml ?? primary?.renderedHtml} isSent={isSent} view={view} />
           </div>
 
