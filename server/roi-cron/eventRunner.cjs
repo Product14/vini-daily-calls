@@ -289,12 +289,17 @@ async function previewEvent(opts) {
   const teamId = opts.teamId, ent = opts.enterpriseId || "";
   const emailType = opts.emailType, eventKey = String(opts.eventKey || "");
   const L_ = links(teamId, ent, dept);
+  // When a specific event was clicked (eventKey present) we must render THAT customer or nothing.
+  // Falling back to the feed's most-recent item rendered a different customer's PII into the
+  // preview (the "shows data for <someone else>" bug). The representative-customer fallback is only
+  // allowed for the synthetic "latest design" preview, which carries no eventKey.
+  const keyed = eventKey !== "";
 
   if (emailType === "post_appointment") {
     const day = localDateISO(tz);
     const j = await apiJson(`/api/meetings?scope=window&team_id=${teamId}&enterprise_id=${encodeURIComponent(ent)}&serviceType=${dept}&start=${day}&end=${day}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
     const list = j.meetings || [];
-    const m = list.find((x) => String(x.id) === eventKey) || list[0];
+    const m = list.find((x) => String(x.id) === eventKey) || (keyed ? null : list[0]);
     if (!m) return null;
     const mtd = await apptMTD(teamId, dept).catch(() => 0);
     return T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: {
@@ -307,7 +312,7 @@ async function previewEvent(opts) {
   if (emailType === "post_conversation") {
     const j = await apiJson(`/api/conversations?team_id=${teamId}&serviceType=${dept}&minutes=20160&limit=200`);
     const list = j.conversations || [];
-    const cv = list.find((x) => String(x.id) === eventKey) || list[0];
+    const cv = list.find((x) => String(x.id) === eventKey) || (keyed ? null : list[0]);
     if (!cv) return null;
     return T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ });
   }
@@ -319,7 +324,9 @@ async function previewEvent(opts) {
   const all = j.actionItems || [];
   const keyOf = (it) => it.leadId || it.lead_id || it.customer || it.id;
   const items = leadKey ? all.filter((it) => String(keyOf(it)) === leadKey) : [];
-  const use = items.length ? items : all.slice(0, 4);
+  // Keyed click → only that lead's items (never another lead's, which showed the wrong customer's
+  // action items). all.slice fallback is reserved for the synthetic, key-less preview.
+  const use = items.length ? items : (keyed ? [] : all.slice(0, 4));
   if (!use.length) return null;
   const seed = use[0] || {};
   const lead = {

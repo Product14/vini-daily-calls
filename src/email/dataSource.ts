@@ -16,6 +16,7 @@ import {
   type Cadence,
   type CellRun,
   type DailyTemplate,
+  type DigestFocus,
   type Department,
   type DeptKind,
   type DigestMetrics,
@@ -54,7 +55,7 @@ type RunRow = {
 type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null; cs_poc: string | null; digest_send_hour: number | null; digest_send_minute: number | null;
   daily_enabled: boolean | null; weekly_enabled: boolean | null; monthly_enabled: boolean | null;
   post_appointment_enabled: boolean | null; post_conversation_enabled: boolean | null; action_item_enabled: boolean | null; action_item_overdue_enabled: boolean | null;
-  daily_template: string | null };
+  daily_template: string | null; digest_focus: string | null };
 // Unfurl a corp email local-part into a display name: "ankur.batra@spyne.ai" →
 // "Ankur Batra". Trailing dedup digits ("vishal.singh1") are stripped. Returns
 // "" for blank/non-email input so callers can fall back.
@@ -145,7 +146,7 @@ export async function loadRooftops(): Promise<LoadResult> {
     supabase.from("roi_digest_runs")
       .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
       .order("local_date", { ascending: false }).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template"),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
@@ -268,6 +269,7 @@ export async function loadRooftops(): Promise<LoadResult> {
         action_item_enabled: cfg?.action_item_enabled === true,
         action_item_overdue_enabled: cfg?.action_item_overdue_enabled === true,
         daily_template: (cfg?.daily_template === "v2" ? "v2" : "v1") as DailyTemplate,   // default classic
+        digest_focus: ((cfg?.digest_focus === "conversation" || cfg?.digest_focus === "appointment") ? cfg.digest_focus : "auto") as DigestFocus,   // default auto (→ conversation)
       },
     };
   })

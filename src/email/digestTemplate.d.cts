@@ -51,6 +51,9 @@ export type DigestTemplateOpts = {
   upsellLeadThreshold?: number;
   /** Cadence → period wording. Omitted/"daily" → "yesterday"; "weekly" → "this week"; "monthly" → "this month". */
   period?: "daily" | "weekly" | "monthly";
+  /** Content focus: 'appointment' (default) leads with appointments; 'conversation' leads with
+   *  conversations handled and demotes appointments to a down-funnel widget. Same design — order/values only. */
+  focus?: "appointment" | "conversation";
 };
 export function renderDigestHtml(
   metrics: Record<string, unknown>,

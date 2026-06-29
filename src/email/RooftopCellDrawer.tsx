@@ -76,6 +76,19 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   // Clear any generated/toggled preview when the drawer's target cell changes.
   useEffect(() => { setPreviewHtml(null); setTplActive(null); setTplErr(null); }, [rooftop?.rooftop_id, cell?.date, cell?.cadence]);
 
+  // The DEFAULT (client-side) preview can only render the NEW (v2) design. So for a rooftop whose
+  // day actually used/uses the CLASSIC (v1) template, the client fallback would show — and label —
+  // the wrong email ("showing old, but it's the new design", and vice-versa). Fix: when the day's
+  // stored run used v1 and it isn't a sent row (whose exact bytes we already show), auto server-render
+  // the real v1 so the preview body matches what the cron sends. Derives from `cell` to keep hook order.
+  useEffect(() => {
+    if (!open || !rooftop || !cell || cell.cadence !== "daily") return;
+    const r = (cell.runs ?? []).find((x) => x.status === cell.status) ?? (cell.runs ?? [])[0] ?? null;
+    const usedTpl = (r?.metrics as { daily_template?: string } | undefined)?.daily_template;
+    if (cell.status !== "sent" && usedTpl === "v1") void showTemplate("v1");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, rooftop?.rooftop_id, cell?.date, cell?.cadence, cell?.status]);
+
   useEffect(() => {
     if (open) {
       setMounted(true);
@@ -119,6 +132,12 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   const isPeriodic = cell.cadence !== "daily";
   // Department for the generate/send call: the cell's run dept, else the rooftop's first department.
   const effDept = (dept ?? rooftop.departments?.[0]?.kind) as DeptKind | undefined;
+  // The template/focus this cell ACTUALLY used (stored on the run's metrics by the cron) — the
+  // authoritative source for the label, so the preview can't claim a different email than was sent.
+  const effTpl: "v1" | "v2" = (metrics as { daily_template?: string } | undefined)?.daily_template === "v2" ? "v2" : "v1";
+  const effTplName = effTpl === "v2" ? "New" : "Classic";
+  const effFocusRaw = (metrics as { digest_focus?: string } | undefined)?.digest_focus;
+  const effFocusName = effFocusRaw === "appointment" ? "Appointment-led" : effFocusRaw === "conversation" ? "Conversation-led" : "";
 
   // Daily template preview toggle: render this day's STORED metrics in v1 (Classic) / v2 (New).
   // null → restore the as-sent / default view. Render-only — never sends.
@@ -226,11 +245,11 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
                   ? `${cell.cadence} digest · ${tplActive === "v2" ? "New" : "Classic"} template preview`
                   : isSent
                   ? primary?.renderedHtml
-                    ? "Email sent · exact HTML"
+                    ? `Email sent · ${effTplName} template${effFocusName ? ` · ${effFocusName}` : ""} · exact HTML`
                     : "Email sent · exact HTML not stored"
                   : previewHtml
-                  ? `${cell.cadence} digest · generated preview`
-                  : `${cell.cadence} digest · default template preview`}
+                  ? `${cell.cadence} digest · ${effTplName} template${effFocusName ? ` · ${effFocusName}` : ""} preview`
+                  : `${cell.cadence} digest · ${effTplName} template${effFocusName ? ` · ${effFocusName}` : ""} preview`}
               </div>
               {/* Daily only: preview this day's data under either template (render-only, no send). */}
               {cell.cadence === "daily" ? (

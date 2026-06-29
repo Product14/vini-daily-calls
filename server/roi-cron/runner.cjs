@@ -176,6 +176,11 @@ async function apiMetrics(teamId, dept, start, end) {
     outboundUniqueReached: n(om.conversations), outboundTotalCalls: obCalls, outboundConnected: Math.round((obCalls * obRate) / 100),
     outboundConnectRate: obRate, outboundAppointmentsSet: n(om.appointments),
     warmTransfers: n(cf.transferred), transferTotalCalls: n(cf.total), transferCount: n(cf.transferred), transferRate: 0,
+    // Inbound "what the agent did" outputs (cf = INBOUND callFlow). Transfers feed the inbound outputs
+    // row; callbacks the template derives from the action-item list (request_callback). cf.transferred
+    // is console-aligned: reporting-vini derives it from endcallreports.callDetails_endedReason='transferred'
+    // (matches the Calls tab, e.g. Honda DTLA 94≈93) — NOT the zero-filled endcallreports.callTransferred.
+    inboundTransfers: n(cf.transferred), inboundTransferTotal: n(cf.total),
   };
 }
 async function apiActionItems(teamId, dept, start, end) {
@@ -303,6 +308,9 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
     // Upsell banner is driven by agent deployment state when it's present on the
     // stored metrics; absent → the template falls back to the speed-to-lead CTA.
     deployment: m.deployment || undefined,
+    // CONTENT FOCUS — 'appointment' (top closers) vs 'conversation' (the ~90%). Stable per rooftop,
+    // resolved by pickFocus() from roi_rooftop_config.digest_focus and stamped onto the metrics.
+    focus: m.digest_focus || m.focus || undefined,
     // daily → undefined ("yesterday" wording); weekly/monthly switch the template's period nouns.
     period: cadence === "weekly" || cadence === "monthly" ? cadence : undefined,
     pixelUrl, assetBase, campaignImages,
@@ -390,6 +398,27 @@ function pickTemplate(cfg, cadence) {
   if (cadence === "weekly" || cadence === "monthly") return "v2";
   return (cfg && cfg.daily_template === "v2") ? "v2" : "v1";
 }
+// ── Content-focus dispatch (the appointment/conversation checker) ────────────
+// Stable, per-rooftop choice of what the digest LEADS with:
+//   • 'appointment' — appointments are the headline (the top closers: STL / during-hours / strong
+//     daily booking cadence). This is the current redesign layout.
+//   • 'conversation' — conversations handled are the headline and appointments demote to a down-funnel
+//     widget. The ~90% of rooftops whose offering rarely books a daily appointment.
+// Set explicitly per rooftop in the tracker (roi_rooftop_config.digest_focus); the explicit choice
+// always wins. 'auto' (the default) resolves from the one console-aligned signal available across all
+// send paths — APPOINTMENT CADENCE. (There is no clean per-rooftop STL/coverage feature flag upstream
+// — verified in reporting-vini; STL/after-hours are per-event classifications, not enablement flags —
+// so cadence is the honest auto signal.) Appointment-focus only for rooftops that actually book at a
+// daily clip (≈2+/business-day, e.g. a busy service drive); the ~90% that rarely book get conversation.
+// MTD-based, so it's STABLE day-to-day (never a daily flip on yesterday's count). Spans daily/weekly/monthly.
+const FOCUS_APPT_PER_DAY = 2;           // appts/business-day above which 'auto' → appointment-focus
+function pickFocus(cfg, m) {
+  const f = cfg && cfg.digest_focus;
+  if (f === "appointment" || f === "conversation") return f;   // explicit override wins
+  const apptMTD = Number((m || {}).appointmentsYesterdayMTD) || 0;
+  if (apptMTD / 22 >= FOCUS_APPT_PER_DAY) return "appointment"; // ~22 business days/month
+  return "conversation";                                        // the safe 90% default (incl. unknown MTD)
+}
 // Render the right template. v1 shims inboundUniqueLeads back to its legacy value so
 // the classic email stays byte-faithful to production.
 function renderDigest(tpl, name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
@@ -459,7 +488,7 @@ async function runOnce() {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
@@ -559,7 +588,7 @@ async function runOnce() {
       } catch (e) { console.warn("[roi-cron] enrich skipped:", String(e).slice(0, 120)); }
       // canonical stored payload — carries everything the template reads so a later
       // re-render (and the SPA preview) reproduce the exact email.
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate, daily_template: tpl };
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, "daily");
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
@@ -608,7 +637,7 @@ async function backfill(start, end) {
   console.log(`\n── BACKFILL ${start}…${end} (record-only, NO emails) ──`);
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template,digest_focus"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
@@ -634,7 +663,7 @@ async function backfill(start, end) {
         const camps = await getCampaigns(L.team_id, L.department, w);
         const m = { ...dayM, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
         const tpl = pickTemplate(c, "daily");
-        const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day, daily_template: tpl };
+        const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day, daily_template: tpl, digest_focus: pickFocus(c, m) };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
         const g = guardrailFor(tpl, m);
         // backfill is historical → no future "upcoming appointments"; render from the
@@ -677,7 +706,7 @@ async function backfill(start, end) {
 // carry rendered_html (sent/suppressed) so the stored bytes match the latest template.
 async function rerender() {
   console.log("\n── RERENDER stored rendered_html from stored metrics (Supabase-only · NO emails · NO data change) ──");
-  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name,daily_template");
+  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name,daily_template,digest_focus");
   const nameOf = new Map((cfg ?? []).map((c) => [c.team_id, c.rooftop_name]));
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   const out = { updated: 0, errors: 0 };
@@ -729,7 +758,7 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
   if (error) throw new Error(error.message);
   if (!row || !row.metrics) return null;
   const { data: cfg } = await sb.from("roi_rooftop_config")
-    .select("rooftop_name,daily_template").eq("team_id", teamId).maybeSingle();
+    .select("rooftop_name,daily_template,digest_focus").eq("team_id", teamId).maybeSingle();
   const m = row.metrics || {};
   const tz = row.dealer_timezone || "America/New_York";
   const name = (cfg && cfg.rooftop_name) || teamId;
@@ -806,7 +835,7 @@ async function generateAndSendNow(opts) {
 
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template,digest_focus"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -841,7 +870,7 @@ async function generateAndSendNow(opts) {
       const ai = await getActionItems(L.team_id, L.department, w);
       const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
       const tpl = pickTemplate(c, cadence);
-      const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
+      const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const g = guardrailFor(tpl, m);
       if (!g.ok && !force) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
       const camps = await getCampaigns(L.team_id, L.department, w);
@@ -883,7 +912,7 @@ async function previewDigestNow(opts) {
 
   const [liveRes, cfgRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department").eq("team_id", teamId).eq("department", department).maybeSingle(),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_template").eq("team_id", teamId).maybeSingle(),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_template,digest_focus").eq("team_id", teamId).maybeSingle(),
   ]);
   const cfg = cfgRes.data || {};
   const tz = cfg.timezone || "America/New_York";
@@ -900,7 +929,7 @@ async function previewDigestNow(opts) {
   const ai = await getActionItems(teamId, department, w);
   const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
   const tpl = pickTemplate(cfg, cadence);
-  const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
+  const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(cfg, m) };
   const g = guardrailFor(tpl, m);
   const camps = await getCampaigns(teamId, department, w);
   const dollarRate = digestDollarRate(department);
@@ -917,7 +946,7 @@ async function runCadence(cadence) {
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,${enabledCol}`),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,${enabledCol}`),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -950,7 +979,7 @@ async function runCadence(cadence) {
       const ai = await getActionItems(L.team_id, L.department, w);
       const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
       const tpl = pickTemplate(c, cadence); // weekly/monthly → always v2
-      const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl };
+      const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const subject = `${L.department === "service" ? "Service" : "Sales"} ${cadence === "weekly" ? "Weekly" : "Monthly"} Digest — ${name}`;
       await upsert({ status: "queued", reason: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
       const g = guardrailFor(tpl, m);

@@ -125,7 +125,11 @@ export const EMAIL_TYPES = [
 export type EmailTypeKey = (typeof EMAIL_TYPES)[number]["key"];
 /** Which DAILY-digest template a rooftop receives: 'v1' = classic (legacy, default), 'v2' = redesign. */
 export type DailyTemplate = "v1" | "v2";
-export type RooftopConfig = Record<EmailTypeKey, boolean> & { daily_template: DailyTemplate };
+/** Content focus (the appointment/conversation checker). Orthogonal to DailyTemplate (the v1/v2 DESIGN):
+ *  'conversation' leads with conversations + demotes appointments; 'appointment' leads with appointments;
+ *  'auto' (default) lets the resolver decide — today → conversation; Phase 2 → feature-flag derived. */
+export type DigestFocus = "auto" | "conversation" | "appointment";
+export type RooftopConfig = Record<EmailTypeKey, boolean> & { daily_template: DailyTemplate; digest_focus: DigestFocus };
 
 /** The 4 transactional (per-event) email types — match roi_event_emails.email_type values. */
 export const TRANSACTIONAL_TYPES = [

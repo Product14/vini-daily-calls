@@ -8,7 +8,7 @@
 //   conversationQualities.callId  (AI score · grade · frustrated)
 //   callTransferEvents.callId     (warm-transfer dept + reason)
 //   report_overview (JSON)        (sentiment · intent · callOutcome · appointment · callback)
-//   report_actionItems (JSON[])   (free-text action items, grouped by lead)
+//   actionItems (curated tasks)   (the CRM action-item feed — system of record, grouped by lead)
 //   meetings (source='spyne')     (Vini-booked appointments)
 import { createRequire } from "node:module";
 import { runClickhouse, hasClickhouseCreds } from "../agentMetrics.js";
@@ -44,17 +44,34 @@ function fmtWhen(dt, tz) {
   return { when: relDay + " · " + time, relDay, time };
 }
 
+// Identity resolution defends against SharedReplacingMergeTree duplicate rows: a plain any()
+// can pick an empty version (lead with no customer_id, customer row with a blank name), which
+// is why so many real customers surfaced as "Unknown". anyIf(..., notEmpty(...)) prefers a
+// populated value across the duplicate versions.
 const IDENTITY_JOINS =
-  " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
-  " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
+  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+
+// Placeholder names the source data stores for unidentified callers (~12k literal "unknown",
+// plus "n/a"/"na"/"test"/etc.) — these are NOT real customer names, so treat them as no-name.
+const JUNK_NAMES = new Set(["unknown", "unknown caller", "n/a", "na", "none", "null", "test", "-", "."]);
+// Display label for a row: real name → phone number → null (a truly anonymous "junk" event with
+// neither, which the list drops). Keeps bare "Unknown — Conversation" rows out of a customer-facing list.
+const cleanName = (name, phone) => {
+  const n = (name || "").trim();
+  if (n && !JUNK_NAMES.has(n.toLowerCase())) return n;
+  const p = (phone || "").trim();
+  return p || null;
+};
+const displayName = (r) => cleanName(r.customer, r.phone);
 
 async function one(sql) { const rows = await runClickhouse(sql); return rows && rows[0] ? rows[0] : null; }
 
 // ── SMS support ──────────────────────────────────────────────────────────────
 // Identity join for the conversations table (its own lead→customer resolution).
 const CONV_IDENTITY =
-  " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON cv.leadId=l.lead_id" +
-  " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) cu ON l.cid=cu.customer_id";
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON cv.leadId=l.lead_id" +
+  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) cu ON l.cid=cu.customer_id";
 const SMS_CONV_SELECT =
   "SELECT cv.conversationId conversationId, cv.leadId leadId, toString(cv.createdAt) at," +
   " ifNull(cv.summary,'') summary, cu.name customer, cu.mobile_number phone FROM dealer_leads.conversations cv" + CONV_IDENTITY;
@@ -62,6 +79,44 @@ const SMS_CONV_SELECT =
 const LEAD_DEPT_MAP =
   "(SELECT leadId, if(countIf(lower(callDetails_agentInfo_agentType)='service') > countIf(lower(callDetails_agentInfo_agentType)='sales'),'service','sales') dept" +
   " FROM dealer_leads.endcallreports WHERE isTestCall=0 AND __deleted=0 AND createdAt >= now()-INTERVAL 180 DAY GROUP BY leadId)";
+
+// ── Structured action items (dealer_leads.actionItems) ───────────────────────────
+// The curated CRM task feed is the SYSTEM OF RECORD for action items — NOT the raw per-call
+// report_actionItems notes (uncurated, noisy, no due date / completion state). This matches the
+// generator (eventRunner), which already sources action items from reporting-vini /api/action-items
+// (the same underlying table). SharedReplacingMergeTree keeps duplicate physical rows, so every
+// query collapses to the latest _version per _id BEFORE gating on open/overdue.
+const AI_DEPT = "if(service_type='service','service','sales')"; // mirror meetings' dept split
+// "2021 Honda Odyssey EX-L" from meta.vehicle_details (year/make/model); '' when the task has none.
+const aiVehicle = (col) =>
+  "trimBoth(concat(JSONExtractString(" + col + ",'vehicle_details','year'),' '," +
+  "JSONExtractString(" + col + ",'vehicle_details','make'),' ',JSONExtractString(" + col + ",'vehicle_details','model')))";
+// Per-lead direction inferred from that lead's calls — action items carry no direction of their own
+// (most rows have no callSid). Mirrors LEAD_DEPT_MAP; leads with no calls fall back to 'inbound'.
+const LEAD_DIR_MAP =
+  "(SELECT leadId, if(countIf(positionCaseInsensitive(ifNull(report_inOutType,''),'out')>0) >" +
+  " countIf(positionCaseInsensitive(ifNull(report_inOutType,''),'out')=0),'outbound','inbound') dir" +
+  " FROM dealer_leads.endcallreports WHERE isTestCall=0 AND __deleted=0 AND createdAt >= now()-INTERVAL 180 DAY GROUP BY leadId)";
+// lead → customer identity for an actionItems subquery aliased `a` (exposes `leadId`).
+const AI_IDENTITY =
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON a.leadId=l.lead_id" +
+  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+// One deduped row per OPEN action item, optionally scoped to a team / dept / single lead, and to a
+// createdAt window. scope: 'open' (is_completed=0) | 'overdue' (open AND due_date in the past).
+function aiBaseSql({ teamId = null, dept = null, scope = "open", leadKey = null, since = null } = {}) {
+  return (
+    "SELECT _id, lead_id leadId, team_id, service_type, description, toString(due_date) dueAt, intent, priority," +
+    " " + aiVehicle("meta") + " vehicle, createdAt" + // raw DateTime — aliasing toString here would shadow the WHERE/ORDER column
+    " FROM dealer_leads.actionItems" +
+    " WHERE is_active=1 AND is_completed=0 AND __deleted=0" +
+    (scope === "overdue" ? " AND due_date < now()" : "") +
+    (teamId ? " AND team_id=" + lit(teamId) : "") +
+    (dept ? " AND " + AI_DEPT + "=" + lit(dept) : "") +
+    (leadKey ? " AND lead_id=" + lit(leadKey) : "") +
+    (since ? " AND createdAt >= " + since : "") +
+    " ORDER BY _version DESC LIMIT 1 BY _id"
+  );
+}
 
 // Deduped, chronological SMS thread for one conversation (latest status per message).
 async function smsThread(conversationId) {
@@ -101,7 +156,7 @@ function convOpts(row, transfer) {
   return {
     id: row.callId, channel: "call",
     direction: String(row.direction || "").toLowerCase().indexOf("out") >= 0 ? "outbound" : "inbound",
-    title: row.title || "Conversation", customer: row.customer, phone: row.phone, at: row.at,
+    title: row.title || "Conversation", customer: cleanName(row.customer, row.phone) || "Customer", phone: row.phone, at: row.at,
     aiScore: row.score != null ? Number(row.score) : undefined, grade: row.grade || undefined, frustrated: Number(row.frustrated) === 1,
     sentiment: overall.sentiment, sentimentScore: overall.sentimentScore,
     intent: overall.customerIntent, callOutcome: ov.callOutcome,
@@ -177,10 +232,10 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       " m.status status, m.transportation_option transportation, m.timezone mtz, m.proposed_vins vins, m.source source," +
       " c.name customer, c.mobile_number phone" +
       " FROM dealer_leads.meetings m" +
-      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
-      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+      " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
+      " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
       " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'";
-    const order = " ORDER BY m.created_at DESC LIMIT 1";
+    const order = " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT 1";
     let row = eventKey ? await one(base + " AND (m.meeting_id=" + lit(eventKey) + " OR m._id=" + lit(eventKey) + ")" + order) : null;
     if (!row && !(eventKey && strict)) row = await one(base + order); // strict send path: don't substitute another appointment
     if (!row) return null;
@@ -189,46 +244,54 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
     const cv = await smsConvByLead(teamId, row.leadId);
     const sms = cv ? await smsThread(cv.conversationId) : { messages: [], failed: 0 };
     return T.renderPostAppointment({ rooftopName: name, dept, tz: row.mtz || tz, mtdCount: 0, links, sms: sms.messages, smsFailed: sms.failed, appointment: {
-      customer: row.customer, phone: row.phone, when: w.when, relDay: w.relDay, time: w.time,
+      customer: cleanName(row.customer, row.phone) || "Customer", phone: row.phone, when: w.when, relDay: w.relDay, time: w.time,
       type: (row.serviceType || dept) === "service" ? "Service" : "Sales", intent: row.intent,
       transportation: row.transportation, status: row.status, byVini: true,
     } });
   }
 
-  // action_item / action_item_overdue — lead level
+  // action_item / action_item_overdue — lead level, from the curated dealer_leads.actionItems feed.
+  // ONE email per lead carrying all of that lead's open (or overdue) tasks + lead context.
+  const scope = emailType === "action_item_overdue" ? "overdue" : "open";
   const leadKey = String(eventKey || "").replace(/^lead:/, "").split(":")[0];
-  const base =
-    "SELECT e.leadId leadId, toString(max(e.createdAt)) at, groupArray(e.report_actionItems) aiArrays," +
-    " any(e.report_overview) overview, anyLast(e.callId) callId, c.name customer, c.mobile_number phone" +
-    " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
-    " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0" +
-    " AND notEmpty(e.report_actionItems) AND e.report_actionItems NOT IN ('[]','[\"\"]')" +
-    (leadKey ? " AND e.leadId=" + lit(leadKey) : "") +
-    " GROUP BY e.leadId, c.name, c.mobile_number ORDER BY at DESC LIMIT 1";
-  let row = await one(base);
-  if (!row && leadKey && !strict) { // matched lead had nothing — show the rooftop's most recent instead
-    row = await one(base.replace(" AND e.leadId=" + lit(leadKey), ""));
+  // The rooftop's most-recently-created open/overdue item → its lead (fallback target).
+  const newestLead = () => one("SELECT leadId FROM (" + aiBaseSql({ teamId, dept, scope }) + ") ORDER BY createdAt DESC LIMIT 1");
+  // All of one lead's open/overdue tasks, earliest-due first, with resolved customer identity.
+  const itemsForLead = (lk) => runClickhouse(
+    "SELECT a.description description, a.dueAt dueAt, a.vehicle vehicle, c.name customer, c.mobile_number phone" +
+    " FROM (" + aiBaseSql({ teamId, dept, scope, leadKey: lk }) + ") a" + AI_IDENTITY +
+    " ORDER BY a.dueAt ASC");
+  let leadId = leadKey || ((await newestLead()) || {}).leadId;
+  let rows = leadId ? await itemsForLead(leadId) : [];
+  if (!rows.length && leadKey && !strict) { // matched lead had nothing open — show the rooftop's most recent instead
+    leadId = ((await newestLead()) || {}).leadId;
+    rows = leadId ? await itemsForLead(leadId) : [];
   }
-  if (!row) return null;
-  const descs = (Array.isArray(row.aiArrays) ? row.aiArrays : []).flatMap(parseJsonArray);
-  if (!descs.length) return null;
-  const ov = parseOverview(row.overview), overall = ov.overall || {};
-  const q = row.callId ? await one("SELECT any(scorePercentage) score, any(overallGrade) grade FROM dealer_leads.conversationQualities WHERE callId=" + lit(row.callId) + " GROUP BY callId LIMIT 1") : null;
+  if (!rows.length) return null;
+  // Lead context (sentiment · score · grade · last summary) — best-effort from the lead's latest call.
+  const ctx = await one(
+    "SELECT e.report_overview overview, q.scorePercentage score, q.overallGrade grade" +
+    " FROM dealer_leads.endcallreports e" +
+    " LEFT JOIN (SELECT callId, any(scorePercentage) scorePercentage, any(overallGrade) overallGrade FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 90 DAY GROUP BY callId) q ON e.callId=q.callId" +
+    " WHERE e.teamId=" + lit(teamId) + " AND e.leadId=" + lit(leadId) + " AND e.__deleted=0 AND notEmpty(e.report_overview)" +
+    " ORDER BY e.createdAt DESC LIMIT 1");
+  const ov = parseOverview(ctx && ctx.overview), overall = ov.overall || {};
+  const first = rows[0];
   const lead = {
-    customer: row.customer, phone: row.phone,
-    aiScore: q && q.score != null ? Number(q.score) : undefined, grade: q ? q.grade : undefined,
+    customer: cleanName(first.customer, first.phone) || "Customer", phone: first.phone, vehicle: first.vehicle || undefined,
+    aiScore: ctx && ctx.score != null ? Number(ctx.score) : undefined, grade: ctx ? ctx.grade : undefined,
     sentiment: overall.sentiment, sentimentScore: overall.sentimentScore,
     lastSummary: parseJsonArray(ov && ov.summary).join(" ") || undefined,
   };
   // If this lead also has a text conversation, include the chat snippet for context.
-  const cv = await smsConvByLead(teamId, row.leadId);
+  const cv = await smsConvByLead(teamId, leadId);
   const sms = cv ? await smsThread(cv.conversationId) : { messages: [], failed: 0 };
   if (emailType === "action_item_overdue") {
-    // No SLA/due dates exist in ClickHouse — use the source call time as the "overdue since" proxy.
-    const items = descs.map((d) => ({ description: d, dueAt: row.at }));
-    return T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: row.at, totalOverdue: items.length, sms: sms.messages, smsFailed: sms.failed, links });
+    const items = rows.map((r) => ({ description: r.description, dueAt: r.dueAt }));
+    const oldest = rows.map((r) => r.dueAt).filter(Boolean).sort()[0]; // dueAt is ISO text → lexical min
+    return T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, sms: sms.messages, smsFailed: sms.failed, links });
   }
-  const items = descs.map((d) => ({ description: d }));
+  const items = rows.map((r) => ({ description: r.description, dueAt: r.dueAt }));
   return T.renderActionItem({ rooftopName: name, dept, tz, lead, items, totalOpen: items.length, justArrived: 0, sms: sms.messages, smsFailed: sms.failed, links });
 }
 
@@ -265,13 +328,15 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
       " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
       " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne' AND m.created_at >= " + since + dfilt(dx) +
-      " ORDER BY m.created_at DESC LIMIT " + lim + " OFFSET " + off;
+      " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT " + lim + " OFFSET " + off;
     return (await runClickhouse(sql)).map((r) => {
+      const who = displayName(r);
+      if (!who) return null; // drop truly-anonymous junk (no name AND no phone)
       const w = fmtWhen(r.startTime, r.mtz || null);
-      return { eventKey: r.eventKey, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
-        label: (r.customer || "Unknown") + (w.when ? " — " + w.when : ""),
+      return { eventKey: r.eventKey, customer: who, phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
+        label: who + (w.when ? " — " + w.when : ""),
         sub: (r.serviceType === "service" ? "Service" : "Sales") + " · " + (r.direction === "outbound" ? "Outbound" : "Inbound") + (r.intent ? " · " + String(r.intent).replace(/_/g, " ") : "") };
-    });
+    }).filter(Boolean);
   }
 
   if (emailType === "post_conversation") {
@@ -283,41 +348,56 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
       " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)" +
       " AND lower(e.callDetails_agentInfo_agentType)=" + lit(dept) + " AND e.createdAt >= " + since + dfilt(cdx) +
-      " ORDER BY e.createdAt DESC LIMIT " + (off + lim);
-    const calls = (await runClickhouse(callSql)).map((r) => ({
-      eventKey: r.eventKey, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
-      label: (r.customer || "Unknown") + " — " + (r.title || "Conversation"),
-      sub: r.direction === "outbound" ? "Call · Outbound" : "Call · Inbound",
-    }));
+      " ORDER BY e.createdAt DESC LIMIT 1 BY e.callId LIMIT " + (off + lim);
+    const calls = (await runClickhouse(callSql)).map((r) => {
+      const who = displayName(r);
+      if (!who) return null; // drop truly-anonymous junk (no name AND no phone)
+      return {
+        eventKey: r.eventKey, customer: who, phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
+        label: who + " — " + (r.title || "Conversation"),
+        sub: r.direction === "outbound" ? "Call · Outbound" : "Call · Inbound",
+      };
+    }).filter(Boolean);
     // SMS conversations (dept via the lead's calls; direction = agent-initiated vs inbound)
     const smsSql =
       "SELECT toString(cv.conversationId) eventKey, toString(cv.createdAt) createdAt, cu.name customer, cu.mobile_number phone," +
       " coalesce(nullIf(dm.dept,''),'sales') dept, " + SMS_DIR + " direction FROM dealer_leads.conversations cv" + CONV_IDENTITY +
       " LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
       " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since + dfilt(SMS_DIR) +
-      " ORDER BY cv.createdAt DESC LIMIT " + (off + lim);
-    const sms = (await runClickhouse(smsSql)).filter((r) => r.dept === dept).map((r) => ({
-      eventKey: "sms:" + r.eventKey, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
-      label: (r.customer || "Unknown") + " — Text conversation", sub: r.direction === "outbound" ? "SMS · Outbound" : "SMS · Inbound",
-    }));
+      " ORDER BY cv.createdAt DESC LIMIT 1 BY cv.conversationId LIMIT " + (off + lim);
+    const sms = (await runClickhouse(smsSql)).filter((r) => r.dept === dept).map((r) => {
+      const who = displayName(r);
+      if (!who) return null; // drop truly-anonymous junk (no name AND no phone)
+      return {
+        eventKey: "sms:" + r.eventKey, customer: who, phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
+        label: who + " — Text conversation", sub: r.direction === "outbound" ? "SMS · Outbound" : "SMS · Inbound",
+      };
+    }).filter(Boolean);
     return [...calls, ...sms].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(off, off + lim);
   }
 
-  // action_item / action_item_overdue — lead level (matches the generator's lead:<id> grouping)
+  // action_item / action_item_overdue — lead level (matches the generator's lead:<id> grouping),
+  // from the curated actionItems feed. One row per lead = one email; direction is inferred per-lead
+  // from that lead's calls (action items carry none of their own), so the IB/OB filter still works.
+  const aiScope = emailType === "action_item_overdue" ? "overdue" : "open";
+  const dirExpr = "coalesce(nullIf(dirm.dir,''),'inbound')"; // LEFT JOIN misses fill '' (not NULL) for no-call leads
   const sql =
-    "SELECT e.leadId leadId, toString(max(e.createdAt)) createdAt, any(c.name) customer, any(c.mobile_number) phone," +
-    " " + CALL_DIR("anyLast(e.report_inOutType)") + " direction," +
-    " sum(length(JSONExtractArrayRaw(ifNull(e.report_actionItems, '[]')))) nItems" +
-    " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
-    " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0" +
-    " AND notEmpty(e.report_actionItems) AND e.report_actionItems NOT IN ('[]','[\"\"]')" +
-    " AND lower(e.callDetails_agentInfo_agentType)=" + lit(dept) + dfilt(CALL_DIR("e.report_inOutType")) + " AND e.createdAt >= " + since +
-    " GROUP BY e.leadId ORDER BY createdAt DESC LIMIT " + lim + " OFFSET " + off;
-  return (await runClickhouse(sql)).map((r) => ({
-    eventKey: "lead:" + r.leadId, customer: r.customer || "Unknown", phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
-    label: (r.customer || "Unknown") + " — " + (Number(r.nItems) || 0) + " action item" + ((Number(r.nItems) || 0) === 1 ? "" : "s"),
-    sub: r.direction === "outbound" ? "Outbound" : "Inbound",
-  }));
+    "SELECT a.leadId leadId, count() nItems, max(a.createdAt) createdAt," +
+    " " + dirExpr + " direction, any(c.name) customer, any(c.mobile_number) phone" +
+    " FROM (" + aiBaseSql({ teamId, dept, scope: aiScope, since }) + ") a" +
+    " LEFT JOIN " + LEAD_DIR_MAP + " dirm ON a.leadId=dirm.leadId" + AI_IDENTITY +
+    " GROUP BY a.leadId, dirm.dir" + (dir ? " HAVING " + dirExpr + "=" + lit(dir) : "") +
+    " ORDER BY createdAt DESC LIMIT " + lim + " OFFSET " + off;
+  return (await runClickhouse(sql)).map((r) => {
+    const who = displayName(r);
+    if (!who) return null; // drop truly-anonymous junk (no name AND no phone)
+    const n = Number(r.nItems) || 0;
+    return {
+      eventKey: "lead:" + r.leadId, customer: who, phone: r.phone || "", createdAt: r.createdAt, direction: r.direction,
+      label: who + " — " + n + " action item" + (n === 1 ? "" : "s"),
+      sub: r.direction === "outbound" ? "Outbound" : "Inbound",
+    };
+  }).filter(Boolean);
 }
 
 // ── COUNT real transactional events per (team × dept × type), live from ClickHouse ──
@@ -333,7 +413,7 @@ export async function countEventsCH({ sinceDays = 120 } = {}) {
   // appointments — direction inherited from the booking call (meetings carry none of their own).
   push(await runClickhouse(
     "SELECT m.team_id team_id, if(m.service_type='service','service','sales') department," +
-    " " + CALL_DIR("ecr.dir") + " direction, count() total, toString(max(m.created_at)) last_at" +
+    " " + CALL_DIR("ecr.dir") + " direction, uniqExact(m.meeting_id) total, toString(max(m.created_at)) last_at" +
     " FROM dealer_leads.meetings m" + APPT_DIR_JOIN +
     " WHERE m.is_active=1 AND m.source='spyne' AND m.created_at >= " + since +
     " GROUP BY team_id, department, direction"), "post_appointment", "total");
@@ -350,22 +430,26 @@ export async function countEventsCH({ sinceDays = 120 } = {}) {
   };
   fold(await runClickhouse(
     "SELECT e.teamId team_id, if(lower(e.callDetails_agentInfo_agentType)='service','service','sales') department," +
-    " " + CALL_DIR("e.report_inOutType") + " direction, count() total, toString(max(e.createdAt)) last_at" +
+    " " + CALL_DIR("e.report_inOutType") + " direction, uniqExact(e.callId) total, toString(max(e.createdAt)) last_at" +
     " FROM dealer_leads.endcallreports e WHERE e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)" +
     " AND lower(e.callDetails_agentInfo_agentType) IN ('sales','service') AND e.createdAt >= " + since +
     " GROUP BY team_id, department, direction"), "total");
   fold(await runClickhouse(
     "SELECT cv.teamId team_id, coalesce(nullIf(dm.dept,''),'sales') department," +
-    " " + SMS_DIR + " direction, count() total, toString(max(cv.createdAt)) last_at" +
+    " " + SMS_DIR + " direction, uniqExact(cv.conversationId) total, toString(max(cv.createdAt)) last_at" +
     " FROM dealer_leads.conversations cv LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
     " WHERE cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since +
     " GROUP BY team_id, department, direction"), "total");
   for (const [k, v] of convAgg) { const [team_id, department, direction] = k.split("::"); out.push({ team_id, department, direction, email_type: "post_conversation", total: v.total, last_at: v.last_at }); }
-  push(await runClickhouse(
-    "SELECT e.teamId team_id, if(lower(e.callDetails_agentInfo_agentType)='service','service','sales') department," +
-    " " + CALL_DIR("e.report_inOutType") + " direction, uniqExact(e.leadId) total, toString(max(e.createdAt)) last_at" +
-    " FROM dealer_leads.endcallreports e WHERE e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_actionItems)" +
-    " AND e.report_actionItems NOT IN ('[]','[\"\"]') AND lower(e.callDetails_agentInfo_agentType) IN ('sales','service') AND e.createdAt >= " + since +
-    " GROUP BY team_id, department, direction"), "action_item", "total");
+  // action items (curated actionItems feed) — count distinct LEADS (one email per lead), split by the
+  // lead's inferred call direction. Open and overdue (now that real due dates exist) are separate columns.
+  const aiCount = async (scope, email_type) => push(await runClickhouse(
+    "SELECT a.team_id team_id, if(a.service_type='service','service','sales') department," +
+    " coalesce(nullIf(dirm.dir,''),'inbound') direction, uniqExact(a.leadId) total, toString(max(a.createdAt)) last_at" +
+    " FROM (" + aiBaseSql({ scope, since }) + ") a" +
+    " LEFT JOIN " + LEAD_DIR_MAP + " dirm ON a.leadId=dirm.leadId" +
+    " GROUP BY team_id, department, direction"), email_type, "total");
+  await aiCount("open", "action_item");
+  await aiCount("overdue", "action_item_overdue");
   return out;
 }

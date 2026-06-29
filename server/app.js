@@ -2356,25 +2356,37 @@ app.post("/api/email/roi-event-preview", async (req, res) => {
   try {
     const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
-    // SINGLE SOURCE OF TRUTH: prefer the reporting-vini API path — it's the exact data eventRunner
-    // SENDS, and the /api/conversations + /api/action-items endpoints now carry customer + AI-quality
-    // (enriched Jun 2026), so the preview matches the real email. The direct-ClickHouse preview
-    // (eventPreviewCH) is now only a fallback for events the API can't serve yet (e.g. SMS-only
-    // conversations — /api/conversations is endcallreports/call-only). This keeps the preview honest
-    // (it shows what actually goes out) instead of a richer second source that drifts from the send.
+    // The tracker's drill-down list is built entirely from ClickHouse (listEventsCH), so a clicked
+    // row carries a ClickHouse event_key (callId / sms:<id> / lead:<id> / meeting_id). The reporting
+    // API only resolves NEW events inside a narrow recent window (it's the send path), so for a
+    // historical click it silently fell back to its most-recent item — rendering a DIFFERENT
+    // customer's PII into the preview ("shows data for <someone else>"). So when an eventKey is
+    // present we resolve that EXACT event from ClickHouse, STRICT (never substitute), matching the
+    // list's source + key. The reporting-API path stays first only for the synthetic, key-less
+    // "latest design" preview, where a representative recent customer is the intended behaviour.
+    const wantKey = !!(eventKey && String(eventKey).trim());
     let html = "";
-    try {
-      const { previewEvent } = require("./roi-cron/eventRunner.cjs");
-      html = await previewEvent({ teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz });
-    } catch (e) {
-      console.warn("[roi-event-preview] API path failed, falling back to ClickHouse:", String(e?.message || e).slice(0, 140));
-    }
-    if (!html) {
-      const { hasClickhouseCreds } = await import("./agentMetrics.js");
-      if (hasClickhouseCreds()) {
-        const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
-        html = await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz });
+    const tryApi = async () => {
+      try {
+        const { previewEvent } = require("./roi-cron/eventRunner.cjs");
+        return await previewEvent({ teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz });
+      } catch (e) {
+        console.warn("[roi-event-preview] API path failed:", String(e?.message || e).slice(0, 140));
+        return "";
       }
+    };
+    const tryCH = async (strict) => {
+      const { hasClickhouseCreds } = await import("./agentMetrics.js");
+      if (!hasClickhouseCreds()) return "";
+      const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
+      return await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict });
+    };
+    if (wantKey) {
+      try { html = await tryCH(true); } catch (e) { console.warn("[roi-event-preview] CH strict path failed:", String(e?.message || e).slice(0, 140)); }
+      if (!html) html = await tryApi(); // CH unavailable → API still won't substitute (keyed)
+    } else {
+      html = await tryApi();
+      if (!html) { try { html = await tryCH(false); } catch (e) { console.warn("[roi-event-preview] CH fallback failed:", String(e?.message || e).slice(0, 140)); } }
     }
     return res.json({ ok: true, empty: !html, html: html || "" });
   } catch (err) {
@@ -2700,7 +2712,7 @@ const ROOFTOP_BOOL_COLS = new Set([
 ]);
 app.post("/api/rooftop-config", async (req, res) => {
   try {
-    const { teamId, sendHour, sendMinute, timezone, daily_template } = req.body ?? {};
+    const { teamId, sendHour, sendMinute, timezone, daily_template, digest_focus } = req.body ?? {};
     if (!teamId) return res.status(400).json({ error: "teamId required" });
     const patch = {};
     if (sendHour != null) { const h = Number(sendHour); if (!Number.isInteger(h) || h < 0 || h > 23) return res.status(400).json({ error: "sendHour must be 0–23" }); patch.digest_send_hour = h; }
@@ -2716,6 +2728,10 @@ app.post("/api/rooftop-config", async (req, res) => {
     if (daily_template != null) {
       if (daily_template !== "v1" && daily_template !== "v2") return res.status(400).json({ error: "daily_template must be 'v1' or 'v2'" });
       patch.daily_template = daily_template;
+    }
+    if (digest_focus != null) {
+      if (!["auto", "conversation", "appointment"].includes(digest_focus)) return res.status(400).json({ error: "digest_focus must be 'auto', 'conversation' or 'appointment'" });
+      patch.digest_focus = digest_focus;
     }
     if (!Object.keys(patch).length) return res.status(400).json({ error: "nothing to update" });
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;

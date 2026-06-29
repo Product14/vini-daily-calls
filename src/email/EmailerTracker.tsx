@@ -989,6 +989,7 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   const [cfg, setCfg] = useState<RooftopConfig | null>(null);
   const [busy, setBusy] = useState<EmailTypeKey | null>(null);
   const [tplBusy, setTplBusy] = useState(false);
+  const [focusBusy, setFocusBusy] = useState(false);
   const [err, setErr] = useState("");
   // Recipients of this rooftop's department (roi_recipients) — view, enable/disable, add.
   const [recips, setRecips] = useState<Recipient[]>([]);
@@ -1021,6 +1022,19 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     const res = await updateRooftopConfig(rooftop.team_id ?? "", { daily_template: next });
     setTplBusy(false);
     if (!res.ok) { setCfg({ ...cfg, daily_template: prev }); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+
+  // Email FOCUS (the appointment/conversation checker) — what every digest LEADS with for this rooftop.
+  // Stable, rooftop-level, spans daily/weekly/monthly. 'auto' → conversation today (Phase 2: feature-flag derived).
+  const prevFocus = cfg.digest_focus ?? "auto";
+  const setFocus = async (next: "auto" | "conversation" | "appointment") => {
+    if (next === prevFocus || focusBusy) return;
+    setCfg({ ...cfg, digest_focus: next }); // optimistic
+    setFocusBusy(true); setErr("");
+    const res = await updateRooftopConfig(rooftop.team_id ?? "", { digest_focus: next });
+    setFocusBusy(false);
+    if (!res.ok) { setCfg({ ...cfg, digest_focus: prevFocus }); setErr(res.error || "Save failed"); return; }
     onSaved();
   };
 
@@ -1070,6 +1084,31 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
             })}
           </div>
           <div className="mb-4 text-[11px] leading-relaxed text-text-muted">Applies to this rooftop's Sales &amp; Service daily digests. Weekly/monthly always use the new template.</div>
+
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Email focus</div>
+          <div className="mb-1 inline-flex w-full rounded-lg border border-border-subtle p-0.5">
+            {([
+              { v: "auto", label: "Auto", sub: prevFocus === "auto" ? "→ Conversation" : "Resolver" },
+              { v: "conversation", label: "Conversation", sub: "Calls-led" },
+              { v: "appointment", label: "Appointment", sub: "Appts-led" },
+            ] as const).map(({ v, label, sub }) => {
+              const active = prevFocus === v;
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  disabled={focusBusy}
+                  aria-pressed={active}
+                  onClick={() => void setFocus(v)}
+                  className={`flex-1 rounded-md px-2 py-1.5 text-center transition-colors ${active ? "bg-brand-primary text-white" : "text-text-primary hover:bg-surface-subtle"} ${focusBusy ? "opacity-60" : ""}`}
+                >
+                  <div className="text-[12px] font-semibold leading-tight">{label}</div>
+                  <div className={`text-[10px] leading-tight ${active ? "text-white/80" : "text-text-muted"}`}>{sub}</div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="mb-4 text-[11px] leading-relaxed text-text-muted">What every digest <span className="font-semibold text-text-primary">leads</span> with. <span className="font-semibold text-text-primary">Conversation</span> (the ~90%) leads with conversations handled and demotes appointments; <span className="font-semibold text-text-primary">Appointment</span> leads with bookings. Stable across daily/weekly/monthly.</div>
 
           <div className="mb-3 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Emails this rooftop receives</div>
           {EMAIL_TYPES.map(({ key, label }) => (

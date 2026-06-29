@@ -134,8 +134,13 @@ const perAgentArrDeltas = (() => {
   return out;
 })();
 
-const today = historical.dates.today;
-const dateStr = new Date(today + "T12:00:00").toLocaleDateString("en-US", {
+// Headline the DATA date, not the run date. The morning run reports the last
+// complete activity day (yesterday IST) — labeling it with today's date read
+// as "today's numbers" when they're actually yesterday's. Use d1 so the big
+// date matches the per-agent "yesterday" column.
+const today   = historical.dates.today;       // run date — kept for filenames/subject
+const dataDay = historical.dates.d1;          // the day the numbers actually cover
+const dateStr = new Date(dataDay + "T12:00:00").toLocaleDateString("en-US", {
   weekday: "short", month: "short", day: "numeric", year: "numeric",
 });
 

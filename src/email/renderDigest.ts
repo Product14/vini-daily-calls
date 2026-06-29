@@ -36,6 +36,8 @@ export type RenderOpts = {
   deployment?: DigestDeployment;
   /** Force/suppress the upsell banner. */
   upsell?: DigestUpsell | false;
+  /** Content focus: 'conversation' leads with conversations, 'appointment' with bookings. */
+  focus?: "conversation" | "appointment";
 };
 
 export function renderDigestEmail(metrics: DigestMetrics, opts: RenderOpts): string {
@@ -62,5 +64,7 @@ export function renderDigestEmail(metrics: DigestMetrics, opts: RenderOpts): str
     // Upsell banner: prefer an explicit opt, else any deployment state carried on the metrics.
     deployment: opts.deployment ?? (m.deployment as DigestDeployment | undefined),
     upsell: opts.upsell,
+    // Content focus: explicit opt, else the rooftop's resolved focus carried on the metrics.
+    focus: opts.focus ?? (m.digest_focus === "conversation" || m.digest_focus === "appointment" ? (m.digest_focus as "conversation" | "appointment") : undefined),
   });
 }
