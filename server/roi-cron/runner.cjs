@@ -145,12 +145,20 @@ async function apiMetrics(teamId, dept, start, end) {
     // warm leads kept moving even when nothing booked (drives the no-appointment hero) — both funnels
     warmLeads: warmWorked || totalLeadsWorked,
     conversationsCall: callIn + callOut, conversationsSms: smsIn + smsOut, conversationsChat: 0, conversationsHandled: callIn + callOut + smsIn + smsOut,
+    // DISPLAYED "Conversations" = reached/two-way conversations, deduped per lead (the funnel's
+    // `connected` stage: a connected call OR an SMS that got a human reply). This is what the console's
+    // Conversations metric counts. The channelSplit-based conversationsHandled above stays as raw
+    // call/SMS activity (channel-breakdown bars + the send guardrail) — see Jun-2026 console-vs-digest bug.
+    conversationsReached: n(ibf.connected) + n(obf.connected), conversationsInbound: n(ibf.connected),
     conversationsCallIn: callIn, conversationsSmsIn: smsIn, conversationsChatIn: 0,
     conversationsCallOut: callOut, conversationsSmsOut: smsOut, conversationsChatOut: 0,
     // ── redesign fields (Conversational AI 2.0) ──────────────────────────────
     agentPerson: sm.person || "",
     callsHandled: calls,                                   // "total calls handled"
-    qualifiedLeads: n(im.qualified), qualifiedPct: n(ir.qualifiedPct),
+    // "Leads Qualified" = distinct qualified LEADS (funnel stage), matching the console. Was
+    // metrics.qualified = per-conversation qualified EVENTS, which over-counts a lead qualified on
+    // multiple conversations (e.g. Covina Kia 6/27: console 31 = leadFunnel.qualified vs event 50).
+    qualifiedLeads: ib.leadFunnel ? n(ibf.qualified) : n(im.qualified), qualifiedPct: n(ir.qualifiedPct),
     bookingRate: n(ir.abr != null ? ir.abr : sm.bookingRate), // ABR % for the booking-rate tile
     deltas: ir.deltas || {},                               // ▲▼ vs prior period
     intent: Array.isArray(ir.intent) ? ir.intent : [],     // query-resolution donut
@@ -234,6 +242,9 @@ function links(ent, team, dept, localDate, tz) {
     appts: `${b}/appointments?enterprise_id=${ent}&team_id=${team}&all_createdAtStart=${enc(start)}&all_createdAtEnd=${enc(end)}&all_createdAtDateValue=yesterday&page=1&serviceType=${dept}&tab=all`,
     conv: `${b}/conversations?enterprise_id=${ent}&team_id=${team}`,
     action: `${b}/action-items?enterprise_id=${ent}&team_id=${team}&serviceType=${dept}&createdAtStart=${enc(start)}&createdAtEnd=${enc(end)}&page=1`,
+    // "Open console" deep-link → the rooftop's reports page. Was a bare base URL with no
+    // enterprise_id/team_id, so the button dropped users on a generic page (Jun-2026 bug report).
+    reports: `${b}/reports?enterprise_id=${ent}&team_id=${team}&serviceType=${dept}`,
   };
 }
 // Map raw action-item intent → human label (matches the v1 template wording).
@@ -280,7 +291,7 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
     dept: dept === "service" ? "service" : "sales",
     dateLabel,
     agentPerson: m.agentPerson || "",
-    links: { appointments: L.appts, conversations: L.conv, actionItems: L.action, console: "https://console.spyne.ai/converse-ai" },
+    links: { appointments: L.appts, conversations: L.conv, actionItems: L.action, console: L.reports },
     appointments: Array.isArray(m.appointments) ? m.appointments : [],
     topVehicles: Array.isArray(m.topVehicles) ? m.topVehicles : [],
     dollarRate: Number(m.dollarRate) || 0,
@@ -333,7 +344,7 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:8px 22px 0;"><table width="100%"><tr>
     <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">${(m.appointmentsYesterday || 0) > 0 ? "Appointments yesterday" : "Leads warmed"}</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${(m.appointmentsYesterday || 0) > 0 ? (m.appointmentsYesterday || 0) : (m.inboundUniqueLeads || 0)}</div><div style="margin-top:12px;"><span style="display:inline-block;font-size:11px;font-weight:600;color:#4600F2;background:#EEF0FF;border-radius:9999px;padding:4px 10px;">${m.appointmentsYesterdayMTD || 0} ${(m.appointmentsYesterday || 0) > 0 ? "month to date" : "appointments MTD"}</span></div></div></td>
-    <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">Conversations handled</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${m.conversationsHandled || 0}</div>${hasConv ? channelBar : `<div style="font-size:11px;color:#9CA3AF;margin-top:10px;">No conversations yesterday</div>`}</div></td>
+    <td class="col" width="50%" valign="top" style="padding:6px;"><div style="border:1px solid #E5E7EB;border-radius:10px;padding:18px;background:#F9FAFB;height:100%;box-sizing:border-box;min-height:150px;"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6B7280;font-weight:600;">Conversations handled</div><div style="font-size:34px;font-weight:800;color:#111827;line-height:1;margin-top:6px;">${(m.conversationsReached != null ? m.conversationsReached : m.conversationsHandled) || 0}</div>${hasConv ? channelBar : `<div style="font-size:11px;color:#9CA3AF;margin-top:10px;">No conversations yesterday</div>`}</div></td>
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:14px 28px 4px;">${btnP("View appointments", L.appts)} ${btnS("Open conversation inbox", L.conv)}</td></tr>
   ${items.length ? `<tr><td class="pad" style="padding:4px 28px;">${rule}${sect("Action required")}<table width="100%">${items.map((it) => `<tr><td style="padding:7px 0;"><span style="display:inline-block;min-width:22px;height:22px;line-height:22px;text-align:center;background:#111827;color:#fff;border-radius:6px;font-size:12px;font-weight:700;">${it.count}</span><span style="font-size:13px;color:#111827;margin-left:10px;">${esc(humanizeIntent(it.intent))}</span></td></tr>`).join("")}</table><div style="margin-top:12px;">${btnP("Review action items", L.action)}</div></td></tr>` : ""}

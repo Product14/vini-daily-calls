@@ -165,8 +165,8 @@ function primaryMetric(m, leads, pn) {
   var appts = num(m.appointmentsYesterday);
   if (appts > 0) return { n: appts, label: plural(appts, "Appointment booked", "Appointments booked"), mode: "appts" };
   var warm = num(m.warmLeads) || leads;
-  if (warm > 0) return { n: warm, label: plural(warm, "Lead warmed " + pn, "Leads warmed " + pn), mode: "warm" };
-  return { n: num(m.qualifiedLeads), label: plural(num(m.qualifiedLeads), "Qualified lead", "Qualified leads"), mode: "qual" };
+  if (warm > 0) return { n: warm, label: "Leads Warmed " + pn, mode: "warm" };
+  return { n: num(m.qualifiedLeads), label: "Leads Qualified", mode: "qual" };
 }
 
 // data-driven commentary — always an interpretation (what · so-what · hope)
@@ -261,9 +261,9 @@ function renderDigestHtml(metrics, opts) {
   // Spec edge: no appointments → drop the booking-rate (ABR) card, show 3.
   // Three cards: Engaged leads · Calls handled · Qualified. (Booking-rate card removed per Jun-2026 review.)
   var cards =
-    kpiCard("Engaged leads", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : "") +
-    kpiCard("Calls handled", fmtInt(callsHandled), "", d.totalCalls, "") +
-    kpiCard("Qualified leads", fmtInt(qualified), "", d.leadsQualified, "");
+    kpiCard("Leads Attempted", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : "") +
+    kpiCard("Calls", fmtInt(callsHandled), "", d.totalCalls, "") +
+    kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, "");
   // kpiCard hardcodes width 25% (4-up); 3 cards → widen each to 33%
   cards = cards.replace(/width="25%"/g, 'width="33%"');
   var kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
@@ -355,7 +355,10 @@ function renderDigestHtml(metrics, opts) {
 
   // ── INBOUND ACTIVITY (spec §5) ──────────────────────────────────────────────
   var callIn = num(m.conversationsCallIn), smsIn = num(m.conversationsSmsIn), chatIn = num(m.conversationsChatIn);
-  var inboundConv = (callIn + smsIn + chatIn) || convHandled;
+  // "Conversations" = reached/two-way leads (connected call OR replied SMS), deduped per lead —
+  // matches the console. Falls back to the channel-split sum only when the reached field is absent
+  // (older stored metrics). callIn/smsIn still drive the channel-breakdown bar above.
+  var inboundConv = (m.conversationsInbound != null) ? num(m.conversationsInbound) : ((callIn + smsIn + chatIn) || convHandled);
   var during = num(m.callingDuring), after = num(m.callingAfter), duringMTD = num(m.callingDuringMTD), afterMTD = num(m.callingAfterMTD);
   // resolution callout from queries[] (resolved/total) when present
   var queries = arr(m.queries);
@@ -375,7 +378,7 @@ function renderDigestHtml(metrics, opts) {
   var inAppts = num(m.appointmentsInbound);
   var inboundBig = inAppts > 0
     ? { n: inAppts, label: plural(inAppts, "Appointment booked", "Appointments booked") }
-    : (num(m.warmLeads) > 0 ? { n: num(m.warmLeads), label: plural(num(m.warmLeads), "Lead warmed " + pn, "Leads warmed " + pn) } : { n: qualified, label: plural(qualified, "Qualified lead", "Qualified leads") });
+    : (num(m.warmLeads) > 0 ? { n: num(m.warmLeads), label: "Leads Warmed " + pn } : { n: qualified, label: "Leads Qualified" });
   var hasInAppts = inAppts > 0;
   // Two-column layout (Jun-2026 review): LEFT = the appointment-booked numbers; RIGHT = channel
   // engaged + during/after hours (moved over from the full-width strip). The "VINI" agent device
@@ -385,8 +388,8 @@ function renderDigestHtml(metrics, opts) {
     return '<div style="border:1px solid ' + LINE + ';border-radius:12px;padding:14px 16px;"><div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + label + '</div><div style="font-size:22px;font-weight:800;color:' + INK + ';margin-top:6px;">' + fmtInt(val) + (mtd ? ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + fmtInt(mtd) + " MTD</span>" : "") + "</div></div>";
   };
   var inHours = (during + after) > 0 ? '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:' + (inChannel ? "18px" : "0") + ';"><tr>' +
-    '<td width="50%" valign="top" style="padding-right:6px;">' + hourCard("During hours", during, duringMTD) + "</td>" +
-    '<td width="50%" valign="top" style="padding-left:6px;">' + hourCard("After hours", after, afterMTD) + "</td>" +
+    '<td width="50%" valign="top" style="padding-right:6px;">' + hourCard("During Hours", during, duringMTD) + "</td>" +
+    '<td width="50%" valign="top" style="padding-left:6px;">' + hourCard("After Hours", after, afterMTD) + "</td>" +
     "</tr></table>" : "";
   var inboundSection =
     '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Inbound " + Dept.toLowerCase() + " performance") +
@@ -397,7 +400,7 @@ function renderDigestHtml(metrics, opts) {
     '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(inboundBig.n) + "</span> &nbsp;" + (hasInAppts ? deltaChip(d.appointments) : "") + "</div>" +
     '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
     miniMetric("Conversations", fmtInt(inboundConv), d.totalCalls, "50%") +
-    miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "50%") +
+    miniMetric("Leads Qualified", fmtInt(qualified), d.leadsQualified, "50%") +
     "</tr></table></td>" +
     // RIGHT — channel engaged + during/after hours
     '<td class="col" width="50%" valign="top">' + (inChannel || inHours ? inChannel + inHours : "&nbsp;") + "</td>" +
@@ -418,13 +421,13 @@ function renderDigestHtml(metrics, opts) {
   if (hasOutbound) {
     var obAppts = num(m.outboundAppointmentsSet);
     var obWarm = num((m.leadFunnel || {}).qualified) || num(m.warmLeads);
-    var obBig = obAppts > 0 ? { n: obAppts, label: plural(obAppts, "Appointment set", "Appointments set") } : { n: obWarm, label: plural(obWarm, "Lead warmed", "Leads warmed") };
+    var obBig = obAppts > 0 ? { n: obAppts, label: "Appointments" } : { n: obWarm, label: "Leads Warmed" };
     var outcomes = arr(m.outcomes).filter(function (o) { return num(o.value) > 0; }), funnel = m.leadFunnel || null, outcomesHtml = "";
     if (outcomes.length) {
       var maxO = outcomes.reduce(function (mx, o) { return Math.max(mx, num(o.value)); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes") + '<div style="font-size:11px;color:' + MUTE + ';margin:-8px 0 8px;">How outbound conversations ended</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table></div>";
     } else if (funnel) {
-      var fr = [["Contacted", funnel.contacted], ["Connected", funnel.connected], ["Qualified", funnel.qualified], ["Appointments", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
+      var fr = [["Leads Attempted", funnel.contacted], ["Leads Engaged", funnel.connected], ["Leads Qualified", funnel.qualified], ["Appointments", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + '<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table></div>";
     }
     // AI-handle callout — share of conversations the agent closed without a transfer
@@ -442,7 +445,7 @@ function renderDigestHtml(metrics, opts) {
       '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
       miniMetric("Unique reached", fmtInt(m.outboundUniqueReached), d.totalCalls, "34%") +
       miniMetric("Connect rate", Math.round(num(m.outboundConnectRate)) + "%", null, "33%") +
-      miniMetric(obAppts > 0 ? "Appointments" : "Leads warmed", obAppts > 0 ? fmtInt(obAppts) : fmtInt(obWarm), null, "33%") +
+      miniMetric(obAppts > 0 ? "Appointments" : "Leads Warmed", obAppts > 0 ? fmtInt(obAppts) : fmtInt(obWarm), null, "33%") +
       "</tr></table></td>" +
       // VINI agent device card removed per Jun-2026 review.
       "</tr></table>" +

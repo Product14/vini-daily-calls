@@ -1417,8 +1417,8 @@ type KpiSpec = { label: string; value: string | number; color: string; sub?: str
 const KPI_INFO: Record<string, string> = {
   "New Leads":
     "Fresh prospects that came in during this period.",
-  "Touched":
-    "Leads the agent actually reached out to — at least one call or SMS. A lead with 20 calls counts once.",
+  "Leads Attempted":
+    "Distinct leads the agent reached out to on any channel (call or SMS) across the period. A lead is counted once no matter how many calls, texts, or days it spanned.",
   "Qualified":
     "Leads the agent confirmed have real buying intent, ready for follow-up.",
   "Appointments":
@@ -1470,8 +1470,8 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
   // also emits a top-of-funnel "New Leads" tier and a "Capture Rate" derived
   // metric — both are currently hidden from the UI (data plumbing kept intact).
   const main: KpiSpec[] = [
-    { label: "Touched", value: fmtNum(totals.touched), color: "#0ea5e9", sub: channelMix(totals),
-      info: KPI_INFO["Touched"] },
+    { label: "Leads Attempted", value: fmtNum(totals.touched), color: "#0ea5e9", sub: channelMix(totals),
+      info: KPI_INFO["Leads Attempted"] },
     { label: "Qualified", value: fmtNum(totals.qualified), color: "#0d9488",
       sub: fmtRate(totals.qualified, totals.touched) + " of touched",
       info: KPI_INFO["Qualified"] },
@@ -1543,13 +1543,13 @@ function chartSpecFor(_agent: ActiveAgent, daily: Bucket[]): ChartSpec {
   // typically ~10x larger than Qualified, which is ~10x larger than Appts —
   // Touched rides the left axis, the two smaller series share the right.
   return {
-    title: "Touched · Qualified · Appointments",
-    leftLabel: "Touched",
+    title: "Leads Attempted · Qualified · Appointments",
+    leftLabel: "Leads Attempted",
     rightLabel: "Qualified / Appts",
     series: [
-      { name: "Touched",      color: "#0ea5e9", values: daily.map(d => d.touched),   axis: "L" },
-      { name: "Qualified",    color: "#0d9488", values: daily.map(d => d.qualified), axis: "R" },
-      { name: "Appointments", color: "#22c55e", values: daily.map(d => d.appts),     axis: "R" },
+      { name: "Leads Attempted", color: "#0ea5e9", values: daily.map(d => d.touched),   axis: "L" },
+      { name: "Qualified",       color: "#0d9488", values: daily.map(d => d.qualified), axis: "R" },
+      { name: "Appointments",    color: "#22c55e", values: daily.map(d => d.appts),     axis: "R" },
     ],
   };
 }
@@ -1735,7 +1735,7 @@ function columnsFor(agent: ActiveAgent): Col[] {
   const showInboundOutcomes =
     agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
   return [
-    { label: "Touched", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
+    { label: "Leads Attempted", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
     { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
     { label: "Conv. Rate", render: b => fmtRate(b.appts, convDenom(b)), sortValue: b => safeRate(b.appts, convDenom(b)), minWidth: 90 },

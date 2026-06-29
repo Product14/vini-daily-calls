@@ -19,7 +19,7 @@ function windowFor(reportDate: string, tz: string): { startISO: string; endISO: 
   return { startISO: start.toISOString(), endISO: end.toISOString() };
 }
 
-export type DigestLinks = { appointments: string; conversations: string; actionItems: string };
+export type DigestLinks = { appointments: string; conversations: string; actionItems: string; reports: string };
 
 export function buildConsoleLinks(opts: {
   enterpriseId?: string;
@@ -39,5 +39,7 @@ export function buildConsoleLinks(opts: {
     appointments: `${base}/appointments?enterprise_id=${ent}&team_id=${team}&all_createdAtStart=${enc(startISO)}&all_createdAtEnd=${enc(endISO)}&all_createdAtDateValue=yesterday&page=1&serviceType=${svc}&tab=all`,
     conversations: `${base}/conversations?enterprise_id=${ent}&team_id=${team}`,
     actionItems: `${base}/action-items?enterprise_id=${ent}&team_id=${team}&serviceType=${svc}&createdAtStart=${enc(startISO)}&createdAtEnd=${enc(endISO)}&page=1`,
+    // "Open console" → the rooftop's reports page (was a bare base URL with no enterprise/team).
+    reports: `${base}/reports?enterprise_id=${ent}&team_id=${team}&serviceType=${svc}`,
   };
 }

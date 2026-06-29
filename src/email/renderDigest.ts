@@ -50,7 +50,7 @@ export function renderDigestEmail(metrics: DigestMetrics, opts: RenderOpts): str
     dept,
     dateLabel,
     agentPerson: (m.agentPerson as string) || undefined,
-    links: { ...L, console: "https://console.spyne.ai/converse-ai" },
+    links: { ...L, console: L.reports },
     // enrichment: prefer explicit opts, else fall back to anything carried on metrics
     appointments: opts.appointments ?? (Array.isArray(m.appointments) ? (m.appointments as DigestAppointment[]) : undefined),
     topVehicles: opts.topVehicles ?? (Array.isArray(m.topVehicles) ? (m.topVehicles as { name: string; count: number }[]) : undefined),
