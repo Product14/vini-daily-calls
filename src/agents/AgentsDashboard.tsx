@@ -1451,20 +1451,20 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
   loading: boolean;
 }) {
   const channelMix = (b: Bucket) => `${fmtNum(b.leadsWithCalls)} via calls · ${fmtNum(b.leadsWithSms)} via SMS`;
-  // For Outbound agents the meaningful "conversion" denominator is qualified
-  // leads (we deliberately filter to qualified before pursuing OB), so swap
-  // the formula on those two tabs. Inbound keeps appts/touched. "All Agents"
-  // rolls IB and OB together, so we fall back to the broader Touched
-  // denominator (qualified-only would understate the mixed funnel).
-  const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
+  // Conversion denominator follows the canonical ABR policy shared with the
+  // Overall dashboard + control tower: Sales Outbound + Service Inbound book
+  // against QUALIFIED leads (their touched lists are huge / pre-filtered, so
+  // touched over-counts), everyone else (and "All Agents", a mixed funnel)
+  // books against touched.
+  const usesQualified = agent === "Sales Outbound" || agent === "Service Inbound";
   // Transfer/Callback are inbound-only outcomes (Sales IB / Service IB). Show
   // them on those two tabs and on "All" (which folds IB in); the data is null
   // on pure-Outbound rows so we hide the cards there rather than show "0".
   const showInboundOutcomes =
     agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
   const convNumer = totals.appts;
-  const convDenom = isOutbound ? totals.qualified : totals.touched;
-  const convDenomLabel = isOutbound ? "qualified" : "touched";
+  const convDenom = usesQualified ? totals.qualified : totals.touched;
+  const convDenomLabel = usesQualified ? "qualified" : "touched";
 
   // V3 funnel: Touched → Qualified → Appointments. The upstream Metabase query
   // also emits a top-of-funnel "New Leads" tier and a "Capture Rate" derived
@@ -1726,10 +1726,11 @@ type Col = {
 
 function columnsFor(agent: ActiveAgent): Col[] {
   // V3 uniform column set across all four agent tabs. Conv. Rate's denominator
-  // switches between touched (IB) and qualified (OB) — see KpiStrip for the
-  // rationale. "All Agents" mixes the two and falls back to Touched.
-  const isOutbound = agent === "Sales Outbound" || agent === "Service Outbound";
-  const convDenom  = (b: Bucket) => isOutbound ? b.qualified : b.touched;
+  // follows the canonical ABR policy (see KpiStrip): Sales Outbound + Service
+  // Inbound book against qualified, everyone else (and "All", a mixed funnel)
+  // against touched.
+  const usesQualified = agent === "Sales Outbound" || agent === "Service Inbound";
+  const convDenom  = (b: Bucket) => usesQualified ? b.qualified : b.touched;
   // Transfer/Callback are inbound-only — surface the columns on the IB tabs and
   // "All"; null on pure-Outbound rows, so we omit them there.
   const showInboundOutcomes =

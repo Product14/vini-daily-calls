@@ -11,10 +11,10 @@ import {
 //   • emph  → appointment-count cells get a solid highlight + white bold text
 // Both also enlarge the row (ov-big) so they read from across the room.
 const EMPH_BG = "#1d4ed8";
-type FmtMeta = { heat?: (r: MetricRow) => number | null; emph?: boolean };
+type FmtMeta = { heat?: (r: MetricRow, agent: AgentCol) => number | null; emph?: boolean };
 function fmtCellStyle(m: FmtMeta, r: MetricRow | undefined, agent: AgentCol): CSSProperties | undefined {
   if (m.heat && r) {
-    const c = abrColor(m.heat(r), agent);
+    const c = abrColor(m.heat(r, agent), agent);
     if (c) return { background: c.bg, color: c.fg, fontWeight: 800 };
   }
   if (m.emph) return { background: EMPH_BG, color: "#fff", fontWeight: 800 };
@@ -407,7 +407,7 @@ function SnapshotSection({ sec, pd }: { sec: typeof SECTIONS[number]; pd: Partia
             const r = pd[c];
             return (
               <td key={c} className={c === "Total" ? "tot" : undefined} style={fmtCellStyle(m, r, c)}>
-                <span className={m.pct ? "ov-pct" : undefined}>{r ? m.value(r) : "—"}</span>
+                <span className={m.pct ? "ov-pct" : undefined}>{r ? m.value(r, c) : "—"}</span>
               </td>
             );
           })}
@@ -462,18 +462,18 @@ function TrendView({ gb, grain, agent, onAgent }: { gb: GrainBundle; grain: Grai
                 {sec.metrics.map((m) => {
                   const vals = periods.map((p) => {
                     const r = gb.data[p]?.[agent];
-                    return m.crit && m.numv && r ? m.numv(r) : null;
+                    return m.crit && m.numv && r ? m.numv(r, agent) : null;
                   });
                   return (
                     <tr key={m.label} className={m.crit ? "ov-crit" : undefined}>
-                      <td className="stick metric">{m.label}{m.crit && <span className="ov-badge">critical</span>}</td>
+                      <td className="stick metric">{m.labelFor?.(agent) ?? m.label}{m.crit && <span className="ov-badge">critical</span>}</td>
                       {periods.map((p, i) => {
                         const r = gb.data[p]?.[agent];
                         const sw = m.crit ? swing(vals[i], vals[i + 1] ?? null, m.floor ?? 0) : null;
                         const cls = [i === 0 ? "latest" : "", sw ? (sw.level === "red" ? "ov-flux-red" : "ov-flux-amber") : ""].filter(Boolean).join(" ");
                         return (
                           <td key={p} className={cls || undefined} title={sw ? `${sw.pct} vs prior ${grain}` : undefined}>
-                            <span className={m.pct ? "ov-pct" : undefined}>{r ? m.value(r) : "—"}</span>
+                            <span className={m.pct ? "ov-pct" : undefined}>{r ? m.value(r, agent) : "—"}</span>
                             {sw && <span className="ov-arrow">{sw.dir}</span>}
                           </td>
                         );
@@ -536,10 +536,10 @@ function TvView({ gb, grain, generated, summary, immersive }: {
                         </tr>
                       )}
                       <tr className={[m.pct ? "pct" : "", isBig(m) ? "ov-big" : ""].filter(Boolean).join(" ") || undefined}>
-                        <td className="m">{m.label}</td>
+                        <td className="m">{m.labelFor?.(agent) ?? m.label}</td>
                         {periods.map((p, i) => {
                           const r = gb.data[p]?.[agent];
-                          return <td key={p} className={i === 0 ? "latest" : undefined} style={fmtCellStyle(m, r, agent)}>{r ? m.value(r) : "—"}</td>;
+                          return <td key={p} className={i === 0 ? "latest" : undefined} style={fmtCellStyle(m, r, agent)}>{r ? m.value(r, agent) : "—"}</td>;
                         })}
                       </tr>
                     </Fragment>

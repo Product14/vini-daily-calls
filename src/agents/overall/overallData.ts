@@ -82,7 +82,8 @@ export const ABR_BANDS: Record<AgentCol, AbrBand> = {
   "Sales Outbound":   { green: 0.03, amber: 0.01 }, // per spec: ≥3% green, ≥1% amber, else red
   "Service Outbound": { green: 0.03, amber: 0.01 }, // outbound default (mirrors Sales OB)
   "Sales Inbound":    { green: 0.10, amber: 0.05 }, // default — adjust to taste
-  "Service Inbound":  { green: 0.12, amber: 0.06 }, // default — adjust to taste
+  "Service Inbound":  { green: 0.25, amber: 0.15 }, // qualified-based ABR runs ~20–27% in healthy months
+
   "Total":            { green: 0.08, amber: 0.04 }, // default — adjust to taste
 };
 const ABR_RED = "#dc2626", ABR_AMBER = "#d97706", ABR_GREEN = "#16a34a";
@@ -92,6 +93,37 @@ export function abrColor(ratio: number | null, agent: AgentCol): { bg: string; f
   const bg = ratio >= band.green ? ABR_GREEN : ratio >= band.amber ? ABR_AMBER : ABR_RED;
   return { bg, fg: "#fff" };
 }
+// ─── ABR denominator policy ─────────────────────────────────────────────────
+// Single source of truth, mirroring the control tower
+// (controlTower/server/agentsSource.js). The appointment booking rate is
+// measured against QUALIFIED leads for Sales Outbound + Service Inbound — their
+// raw touched-lead lists are huge / pre-filtered, so touched over-counts the
+// denominator and crushes the rate. The other agent types (and the all-agent
+// Total rollup) measure against all touched leads.
+export const ABR_USES_QUALIFIED: Partial<Record<AgentCol, boolean>> = {
+  "Sales Outbound": true,
+  "Service Inbound": true,
+};
+// Denominator for one agent column's ABR, given its metric row. The same policy
+// applies to the headline (overall), call-only, and SMS-only booking rates —
+// each just picks the qualified vs touched field for its channel.
+const denomFor = (r: MetricRow, agent: AgentCol, qualifiedField: keyof MetricRow, touchedField: keyof MetricRow): number =>
+  num(ABR_USES_QUALIFIED[agent] ? r[qualifiedField] : r[touchedField]);
+export const abrDenom     = (r: MetricRow, agent: AgentCol): number => denomFor(r, agent, "leads_qualified", "leads_touched");
+export const abrDenomCall = (r: MetricRow, agent: AgentCol): number => denomFor(r, agent, "leads_qualified_call", "leads_touched_call");
+export const abrDenomSms  = (r: MetricRow, agent: AgentCol): number => denomFor(r, agent, "leads_qualified_sms", "leads_touched_sms");
+
+// Per-agent ABR labels so single-agent views (trend matrix, TV wall) name the
+// denominator they actually used. The multi-agent snapshot row stays generic.
+const abrLabelWith = (suffix: string) => (agent: AgentCol): string =>
+  ABR_USES_QUALIFIED[agent] ? `ABR${suffix} % (appts / qualified leads)` : `ABR${suffix} % (appts / leads touched)`;
+export const abrLabel     = abrLabelWith("");
+export const abrLabelCall = abrLabelWith(" (call)");
+export const abrLabelSms  = abrLabelWith(" (SMS)");
+// Compact variant for the narrow TV-wall metric column.
+export const abrLabelShort = (agent: AgentCol): string =>
+  ABR_USES_QUALIFIED[agent] ? "ABR % (qual)" : "ABR % (touched)";
+
 // Compact dollars for the TV-wall header chips (e.g. $1.2M, $840K, $0).
 export const fmtMoneyCompact = (n: unknown): string => {
   const v = Number(n);
@@ -134,17 +166,23 @@ export function periodEnd(grain: Grain, p: string): string {
 // gets highlighted and gets period-over-period swing alerting in the trend view;
 // `numv(row)` is the numeric basis for that swing check and `floor` suppresses
 // noise below a magnitude.
+// `value`/`numv`/`heat` receive the agent column they're being rendered for, so
+// a metric can vary its formula per agent (e.g. the ABR denominator). Functions
+// that don't care just ignore the second arg.
 export type Metric = {
   label: string;
-  value: (r: MetricRow) => string;
+  // Per-agent label override for single-agent views (trend matrix, TV wall).
+  // The multi-agent snapshot row uses `label`.
+  labelFor?: (agent: AgentCol) => string;
+  value: (r: MetricRow, agent: AgentCol) => string;
   pct?: boolean;          // render as a bold percentage cell
   crit?: boolean;
-  numv?: (r: MetricRow) => number | null;
+  numv?: (r: MetricRow, agent: AgentCol) => number | null;
   floor?: number;
   // Conditional formatting (snapshot + TV wall): `heat` returns the 0–1 ratio to
   // colour the cell red→green (ABR); `emph` flags a row to render big & bold
   // with a solid highlight (appointment count). Both built for at-a-glance reads.
-  heat?: (r: MetricRow) => number | null;
+  heat?: (r: MetricRow, agent: AgentCol) => number | null;
   emph?: boolean;
 };
 export type Section = { name: string; metrics: Metric[] };
@@ -166,7 +204,7 @@ export const SECTIONS: Section[] = [
       { label: "Qualified leads (#)", value: (r) => fmtInt(r.leads_qualified) },
       { label: "% qualified leads", pct: true, value: (r) => fmtPct(r.leads_qualified, r.leads_touched), crit: true, numv: (r) => safeDiv(r.leads_qualified, r.leads_touched), floor: 0.03 },
       { label: "Appointments (#)", value: (r) => fmtInt(r.appts), emph: true },
-      { label: "ABR % (appts / leads touched)", pct: true, value: (r) => fmtPct(r.appts, r.leads_touched), crit: true, numv: (r) => safeDiv(r.appts, r.leads_touched), floor: 0.02, heat: (r) => safeDiv(r.appts, r.leads_touched) },
+      { label: "ABR %", labelFor: abrLabel, pct: true, value: (r, a) => fmtPct(r.appts, abrDenom(r, a)), crit: true, numv: (r, a) => safeDiv(r.appts, abrDenom(r, a)), floor: 0.02, heat: (r, a) => safeDiv(r.appts, abrDenom(r, a)) },
     ],
   },
   {
@@ -176,7 +214,7 @@ export const SECTIONS: Section[] = [
       { label: "Qualified leads (call) (#)", value: (r) => fmtInt(r.leads_qualified_call) },
       { label: "% qualified leads (call)", pct: true, value: (r) => fmtPct(r.leads_qualified_call, r.leads_touched_call), crit: true, numv: (r) => safeDiv(r.leads_qualified_call, r.leads_touched_call), floor: 0.03 },
       { label: "Appointments (call) (#)", value: (r) => fmtInt(r.appts_call) },
-      { label: "ABR (call) % (appts / leads touched)", pct: true, value: (r) => fmtPct(r.appts_call, r.leads_touched_call), crit: true, numv: (r) => safeDiv(r.appts_call, r.leads_touched_call), floor: 0.02 },
+      { label: "ABR (call) %", labelFor: abrLabelCall, pct: true, value: (r, a) => fmtPct(r.appts_call, abrDenomCall(r, a)), crit: true, numv: (r, a) => safeDiv(r.appts_call, abrDenomCall(r, a)), floor: 0.02 },
       { label: "Call connect rate", pct: true, value: (r) => fmtPct(r.connected_calls, r.total_calls), crit: true, numv: (r) => safeDiv(r.connected_calls, r.total_calls), floor: 0.05 },
       { label: "Transfer rate", pct: true, value: (r) => fmtPct(r.transfers, r.total_calls), crit: true, numv: (r) => safeDiv(r.transfers, r.total_calls), floor: 0.03 },
       { label: "Callback rate", pct: true, value: (r) => fmtPct(r.callbacks, r.total_calls), crit: true, numv: (r) => safeDiv(r.callbacks, r.total_calls), floor: 0.03 },
@@ -189,7 +227,7 @@ export const SECTIONS: Section[] = [
       { label: "Qualified leads (SMS) (#)", value: (r) => fmtInt(r.leads_qualified_sms) },
       { label: "% qualified leads (SMS)", pct: true, value: (r) => fmtPct(r.leads_qualified_sms, r.leads_touched_sms), crit: true, numv: (r) => safeDiv(r.leads_qualified_sms, r.leads_touched_sms), floor: 0.03 },
       { label: "Appointments (SMS) (#)", value: (r) => fmtInt(r.appts_sms) },
-      { label: "ABR (SMS) % (appts / leads touched)", pct: true, value: (r) => fmtPct(r.appts_sms, r.leads_touched_sms), crit: true, numv: (r) => safeDiv(r.appts_sms, r.leads_touched_sms), floor: 0.02 },
+      { label: "ABR (SMS) %", labelFor: abrLabelSms, pct: true, value: (r, a) => fmtPct(r.appts_sms, abrDenomSms(r, a)), crit: true, numv: (r, a) => safeDiv(r.appts_sms, abrDenomSms(r, a)), floor: 0.02 },
     ],
   },
   {
@@ -207,10 +245,10 @@ export const SECTIONS: Section[] = [
 
 // TV-wall metric set: a focused KPI %-group on top, then a raw-count group.
 // `grp` starts the second (raw-count) group with a divider.
-export type TvMetric = { label: string; value: (r: MetricRow) => string; pct?: boolean; grp?: boolean; heat?: (r: MetricRow) => number | null; emph?: boolean };
+export type TvMetric = { label: string; labelFor?: (agent: AgentCol) => string; value: (r: MetricRow, agent: AgentCol) => string; pct?: boolean; grp?: boolean; heat?: (r: MetricRow, agent: AgentCol) => number | null; emph?: boolean };
 export const TV_METRICS: TvMetric[] = [
   { label: "% Rooftops w/ appt", pct: true, value: (r) => fmtPct(r.rooftops_appt, r.rooftops_any) },
-  { label: "ABR %", pct: true, value: (r) => fmtPct(r.appts, r.leads_touched), heat: (r) => safeDiv(r.appts, r.leads_touched) },
+  { label: "ABR %", labelFor: abrLabelShort, pct: true, value: (r, a) => fmtPct(r.appts, abrDenom(r, a)), heat: (r, a) => safeDiv(r.appts, abrDenom(r, a)) },
   { label: "Transfer %", pct: true, value: (r) => fmtPct(r.transfers, r.total_calls) },
   { label: "Call connection %", pct: true, value: (r) => fmtPct(r.connected_calls, r.total_calls) },
   { label: "SMS reply %", pct: true, value: (r) => fmtPct(r.sms_inbound, r.sms_outbound) },
