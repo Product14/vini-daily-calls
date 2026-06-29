@@ -123,7 +123,12 @@ async function apiMetrics(teamId, dept, start, end) {
   const n = (v) => Number(v) || 0;
   const im = ib.metrics || {}, om = ob.metrics || {}, ics = ib.channelSplit || {}, ocs = ob.channelSplit || {}, ir = ib.report || {}, or = ob.report || {};
   const sm = ir.summary || {};
-  const callIn = n(ics.voice), smsIn = n(ics.sms), callOut = n(ocs.voice), smsOut = n(ocs.sms);
+  // SMS counts = MESSAGES (metrics.smsSent), matching the console / reporting-vini dashboard's
+  // "Total SMS" — NOT channelSplit.sms (conversation threads), which undercounts (1 thread = many
+  // messages). smsSent is scoped to real agent conversations, so automated blasts are excluded.
+  // Verified: Dream Nissan Lawrence 6/25 console out 24 = om.smsSent 24; in 36 ≈ im.smsSent 37.
+  // Calls keep channelSplit.voice (≈ one call per conversation).
+  const callIn = n(ics.voice), smsIn = n(im.smsSent), callOut = n(ocs.voice), smsOut = n(om.smsSent);
   const obCalls = n(om.calls), obRate = n(om.connectRate), cf = ir.callFlow || {};
   const calls = n(im.calls), after = n(im.afterHours);
   // Leads WORKED = inbound + outbound (leadFunnel.contacted is the funnel top; falls back to the
