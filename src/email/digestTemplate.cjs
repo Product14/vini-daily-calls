@@ -427,7 +427,7 @@ function renderDigestHtml(metrics, opts) {
       var maxO = outcomes.reduce(function (mx, o) { return Math.max(mx, num(o.value)); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes") + '<div style="font-size:11px;color:' + MUTE + ';margin:-8px 0 8px;">How outbound conversations ended</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table></div>";
     } else if (funnel) {
-      var fr = [["Leads Attempted", funnel.contacted], ["Leads Engaged", funnel.connected], ["Leads Qualified", funnel.qualified], ["Appointments", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
+      var fr = [["Leads Attempted", funnel.contacted], ["Conversations", funnel.connected], ["Leads Qualified", funnel.qualified], ["Appointments", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + '<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table></div>";
     }
     // AI-handle callout — share of conversations the agent closed without a transfer
