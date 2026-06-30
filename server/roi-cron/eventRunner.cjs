@@ -34,6 +34,9 @@ const DRY_RUN = process.env.DRY_RUN !== "false";
 const REPORTING_API_BASE = (process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app").replace(/\/$/, "");
 const SPYNE_TOKEN = process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
 const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 20); // look-back window per pass
+// SMS post-conversation is batched to END OF DAY (the thread runs all day, so one email per lead/day
+// instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
+const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
 const CONSOLE_BASE = "https://console.spyne.ai/converse-ai";
 
 // Open-tracking pixel → the track-open Edge Function (keyed by the event-email row id).
@@ -57,6 +60,15 @@ function localDateISO(tz) {
     const g = (t) => p.find((x) => x.type === t)?.value;
     return `${g("year")}-${g("month")}-${g("day")}`;
   } catch { return todayISO(); }
+}
+// Dealer-local hour+minute (0–23, 0–59) — gates the EOD SMS batch and sizes its since-midnight window.
+function localHourMin(tz) {
+  try {
+    const p = new Intl.DateTimeFormat("en-GB", { timeZone: tz || "UTC", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
+    const g = (t) => Number(p.find((x) => x.type === t)?.value);
+    let h = g("hour"); if (h === 24) h = 0; // some ICU builds emit "24" at midnight
+    return { h, m: g("minute") };
+  } catch { return { h: 0, m: 0 }; }
 }
 // Appointment time in the dealer's local zone, e.g. "Mon, Jun 23 · 2:30 PM".
 function fmtSched(iso, tz) {
@@ -146,6 +158,7 @@ async function runOnce() {
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0 };
+  const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
 
@@ -183,14 +196,42 @@ async function runOnce() {
         }
       }
       if (c.post_conversation_enabled) {
+        // CALLS → instant. One email per call as soon as the poll sees it (channel=call, the default).
         const actionableOnly = (c.post_conversation_mode || "actionable") === "actionable";
-        const j = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&minutes=${POLL_MINUTES}&limit=50${actionableOnly ? "&actionableOnly=1" : ""}`);
+        const j = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&channel=call&minutes=${POLL_MINUTES}&limit=50${actionableOnly ? "&actionableOnly=1" : ""}`);
         for (const cv of j.conversations || []) {
           // outbound: only when the customer responded (config) — proxy: actionable signal present.
           if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
           jobs.push({ type: "post_conversation", key: cv.id,
             subject: `Conversation summary — ${name}`,
             html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
+        }
+        // SMS → END OF DAY. The thread keeps growing all day, so we DON'T email per message. Once the
+        // dealer-local hour hits SMS_EOD_HOUR we pull the day's SMS (since local midnight) and send ONE
+        // summary per lead, carrying the full thread. SMS isn't dept-split, so this runs once per team
+        // and the dedupe key is dept-agnostic (`sms:lead:day`) — whichever dept-pass claims it wins.
+        const { h, m } = localHourMin(tz);
+        if (h >= SMS_EOD_HOUR && !smsDoneTeams.has(L.team_id)) {
+          smsDoneTeams.add(L.team_id);
+          const day = localDateISO(tz);
+          const sinceMin = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
+          const js = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=sms&minutes=${sinceMin}&limit=200`);
+          const byLead = new Map(); // group a lead's threads into ONE email
+          for (const cv of js.conversations || []) {
+            // No customer reply all day → nothing to report (an all-AI outbound blast isn't a "conversation").
+            if (!cv.hasReply && c.post_conversation_outbound_requires_reply !== false) continue;
+            const k = cv.leadId || cv.id;
+            const g = byLead.get(k) || []; g.push(cv); byLead.set(k, g);
+          }
+          for (const [k, threads] of byLead) {
+            threads.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+            const seed = threads[threads.length - 1];
+            const sms = threads.flatMap((t) => t.sms || []).sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(-12);
+            const cv = { ...seed, channel: "sms", sms, smsFailed: sms.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length };
+            jobs.push({ type: "post_conversation", key: `sms:${k}:${day}`,
+              subject: `SMS summary — ${seed.customer || name}`,
+              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
+          }
         }
       }
       if (c.action_item_enabled) {
