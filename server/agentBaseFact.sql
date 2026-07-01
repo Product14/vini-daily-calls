@@ -163,14 +163,10 @@ ecr_events AS (
                              IN (SELECT intent FROM sales_intents))
                     )
                 )
-                OR
-                (
-                    ira.sourceId IS NULL
-                    AND arrayExists(
-                        x -> JSONExtractString(x, 'role') = 'user',
-                        JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
-                    )
-                )
+                -- Call-qualified = IRA buying-intent only. Outbound calls have no
+                -- IRA records today, so qualified_via_call is structurally 0 for
+                -- outbound (upstream pipeline gap — outbound qualification comes
+                -- from the SMS-engagement rule + the booking guard, not here).
             ),
             1, 0
         ) AS is_qualifying_call,
@@ -285,7 +281,7 @@ lead_optout AS (
 -- has not exited the campaign. We read the lead's MOST RECENT campaign mapping
 -- (a stale closed campaign shouldn't disqualify a lead that's active again) and
 -- treat it as exited when ANY of three signals says so:
---   • leadEngagementStatus = CLOSED       (lifecycle closed)
+--   • leadEngagementStatus ∈ CLOSED/PAUSED (lifecycle no longer active)
 --   • status ∈ DNC / CANCELLED            (removed from cadence)
 --   • outcome ∈ opted-out / disqualified  (Opt Out, Not Interested, Already
 --     Purchased, Wrong Number) — NEGATIVE exits only; positive exits (booked)
@@ -295,7 +291,7 @@ campaign_state AS (
         lead_id,
         team_id,
         if(
-            latest_engagement = 'CLOSED'
+            latest_engagement IN ('CLOSED', 'PAUSED')
             OR latest_status IN ('DNC_REQUESTED', 'DNC_REGISTERED', 'CANCELLED')
             OR latest_outcome IN ('Opt Out', 'Not Interested', 'Already Purchased', 'Wrong Number'),
             1, 0
