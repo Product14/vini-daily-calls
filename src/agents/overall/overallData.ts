@@ -255,7 +255,11 @@ export const TV_METRICS: TvMetric[] = [
   { label: "Rooftops w/ activity", grp: true, value: (r) => fmtInt(r.rooftops_any) },
   { label: "Rooftops w/ appointment", value: (r) => fmtInt(r.rooftops_appt) },
   { label: "Unique leads touched", value: (r) => fmtInt(r.leads_touched) },
-  { label: "Qualified calls", value: (r) => fmtInt(r.leads_qualified_call) },
+  // Overall qualified leads (all channels) — this is the denominator the ABR
+  // above uses for Sales OB + Service IB, so the two reconcile on screen. Must
+  // NOT be leads_qualified_call: Sales OB qualifies via SMS (call-qualified = 0),
+  // so a "Qualified calls" row reads as 0 next to a non-zero ABR.
+  { label: "Qualified leads", value: (r) => fmtInt(r.leads_qualified) },
   { label: "Appointments", value: (r) => fmtInt(r.appts), emph: true },
   { label: "Total calls", value: (r) => fmtInt(r.total_calls) },
   { label: "Total SMS outbound", value: (r) => fmtInt(r.sms_outbound) },
