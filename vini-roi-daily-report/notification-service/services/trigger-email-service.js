@@ -57,6 +57,7 @@ const SALES_ADAPTER = {
     inboundAppts:              Q.countInboundSalesAppointments,
     outboundStats:             Q.getOutboundCallStats,
     outboundAppts:             Q.countOutboundSalesAppointments,
+    assistedAppts:             Q.countAssistedSalesAppointments, // canonical: AI-assisted (CRM), secondary
     actionItems:               Q.getActionItems,
     conversationCounts:        Q.getConversationCounts,
     inboundConversationCounts: Q.getInboundConversationCounts,
@@ -204,6 +205,7 @@ async function runDigest(adapter, enterpriseId, teamId, options = {}) {
         inboundApptsYesterday, inboundAptsMtd,
         outboundStatsYesterday, outboundStatsMtd,
         outboundApptsYesterday, outboundAptsMtd,
+        assistedApptsYesterday, assistedApptsMtd,
         actionItems, activeCampaigns,
         conversationsYesterday, inboundConversationsYesterday,
         transferStatsYesterday, transferStatsMtd,
@@ -221,6 +223,9 @@ async function runDigest(adapter, enterpriseId, teamId, options = {}) {
         adapter.outboundStats(enterpriseId, teamId, mStart, mEnd),
         adapter.outboundAppts(enterpriseId, teamId, yStart, yEnd),
         adapter.outboundAppts(enterpriseId, teamId, mStart, mEnd),
+        // canonical: AI-assisted (CRM) appts — secondary metric (sales only; service adapter has no method → 0)
+        adapter.assistedAppts ? adapter.assistedAppts(enterpriseId, teamId, yStart, yEnd) : Promise.resolve(0),
+        adapter.assistedAppts ? adapter.assistedAppts(enterpriseId, teamId, mStart, mEnd) : Promise.resolve(0),
         adapter.actionItems(enterpriseId, teamId, yStart, yEnd, department),
         adapter.activeCampaigns(enterpriseId, teamId),
         adapter.conversationCounts(enterpriseId, teamId, yStart, yEnd),
@@ -260,6 +265,7 @@ async function runDigest(adapter, enterpriseId, teamId, options = {}) {
         allApptsYesterday, allAptsMtd,
         inboundApptsYesterday, inboundAptsMtd,
         outboundApptsYesterday, outboundAptsMtd,
+        assistedApptsYesterday, assistedApptsMtd, // canonical: AI-assisted (CRM), secondary
         inboundUniqueLeadsYesterday, inboundUniqueLeadsMtd,
         outboundStatsYesterday, outboundStatsMtd,
         actionItems, campaigns, campaignsExtra,

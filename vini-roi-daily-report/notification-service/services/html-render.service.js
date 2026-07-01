@@ -123,8 +123,12 @@ function renderDigestHtml(t = {}, opts = {}) {
   <!-- Hero KPIs -->
   <tr><td style="padding:8px 22px 0;">
     <table width="100%"><tr>
-      ${heroCard('Appointments yesterday', n(t.appointmentsYesterday), '', `<div style="font-size:12px;color:#6B7280;margin-top:6px;">${n(t.appointmentsYesterdayMTD)} month to date</div>`)}
-      ${heroCard('Conversations handled', n(t.conversationsHandled), '', channelBar(convCall, convSms, convChat) + legend(convCall, convSms, convChat))}
+      ${/* canonical: PRIMARY headline = AI-booked; AI-assisted (CRM) shown smaller/muted beneath, never folded in */ ''}
+      ${heroCard('Appointments — AI-booked', n(t.appointmentsYesterday), '', `<div style="font-size:12px;color:#6B7280;margin-top:6px;">${n(t.appointmentsYesterdayMTD)} month to date</div>`
+        + (n(t.assistedAppointments) > 0 || n(t.assistedAppointmentsMTD) > 0
+            ? `<div style="font-size:11px;color:#9CA3AF;margin-top:4px;">+${n(t.assistedAppointments)} AI-assisted (CRM) · ${n(t.assistedAppointmentsMTD)} MTD</div>`
+            : ''))}
+      ${heroCard('Real conversations', n(t.conversationsHandled), '', channelBar(convCall, convSms, convChat) + legend(convCall, convSms, convChat))}
     </tr></table>
   </td></tr>
 
@@ -144,8 +148,9 @@ function renderDigestHtml(t = {}, opts = {}) {
   <tr><td style="padding:4px 22px;">
     <div style="padding:0 6px;">${divider()}${sectionTitle('Inbound activity')}</div>
     <table width="100%"><tr>
-      ${miniCard('Appointments', n(t.appointmentsYesterday), `Yesterday · ${n(t.appointmentsYesterdayMTD)} MTD`)}
-      ${miniCard('Unique leads', n(t.inboundUniqueLeads), `Yesterday · ${n(t.inboundUniqueLeadsMTD)} MTD`)}
+      ${/* canonical wordings: "Appointments — AI-booked", "Leads reached" (inbound) */ ''}
+      ${miniCard('Appointments — AI-booked', n(t.appointmentsYesterday), `Yesterday · ${n(t.appointmentsYesterdayMTD)} MTD`)}
+      ${miniCard('Leads reached', n(t.inboundUniqueLeads), `Yesterday · ${n(t.inboundUniqueLeadsMTD)} MTD`)}
       ${isService ? miniCard('Transfer rate', esc(t.transferRate || '0%'), `${esc(t.transferRateMTD || '0%')} MTD`)
                   : miniCard('Avg response time', esc(t.avgResponseTime || '—'), `${esc(t.avgResponseTimeMTD || '—')} MTD`)}
     </tr></table>
@@ -170,9 +175,10 @@ function renderDigestHtml(t = {}, opts = {}) {
   <tr><td style="padding:4px 22px;">
     <div style="padding:0 6px;">${divider()}${sectionTitle('Outbound activity')}</div>
     <table width="100%"><tr>
-      ${miniCard('Unique reached', n(t.outboundUniqueReached), `${n(t.outboundUniqueReachedMTD)} MTD`)}
+      ${/* canonical wordings: "Leads dialed" (outbound), "Appointments — AI-booked" */ ''}
+      ${miniCard('Leads dialed', n(t.outboundUniqueReached), `${n(t.outboundUniqueReachedMTD)} MTD`)}
       ${miniCard('Connect rate', esc(t.outboundConnectRate || '0%'), `${esc(t.outboundConnectRateMTD || '0%')} MTD`)}
-      ${miniCard('Appointments set', n(t.outboundAppointmentsSet), `${n(t.outboundAppointmentsSetMTD)} MTD`)}
+      ${miniCard('Appointments — AI-booked', n(t.outboundAppointmentsSet), `${n(t.outboundAppointmentsSetMTD)} MTD`)}
     </tr></table>
     ${Array.isArray(t.campaigns) && t.campaigns.length ? `<div style="padding:0 6px;">${sectionTitle('Active campaigns')}${campaigns(t.campaigns, n(t.campaignsExtra))}</div>` : ''}
   </td></tr>
@@ -181,6 +187,8 @@ function renderDigestHtml(t = {}, opts = {}) {
   <tr><td style="padding:18px 28px 26px;border-top:1px solid #E5E7EB;">
     <table width="100%"><tr>
       <td valign="top" style="font-size:11px;color:#9CA3AF;line-height:1.6;">
+        ${/* canonical: label the window — this email is daily + month-to-date, NOT the rolling-30d console view */ ''}
+        Window: Daily (yesterday) + month-to-date · dealer-local time<br/>
         Reporting period: ${esc(t.reportingPeriod)}<br/>Next report: ${esc(t.nextReport)}
       </td>
       <td valign="top" align="right" style="font-size:11px;color:#9CA3AF;">
