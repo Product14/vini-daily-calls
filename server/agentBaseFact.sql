@@ -180,11 +180,12 @@ ecr_events AS (
                 IN (SELECT intent FROM appointment_intent_set),
             1, 0
         ) AS has_appt_intent,
-        if(
-            ira.sourceId IS NOT NULL
-            AND positionCaseInsensitive(ifNull(ira.resolution_block, ''), 'transfer completed') > 0,
-            1, 0
-        ) AS has_transfer,
+        -- CANONICAL transfer (locked 2026-07-01): completed disposition hand-off to a human =
+        -- endedReason ∈ {'transferred','assistant-forwarded-call'} (matches Calls tab; counts AI-forwards).
+        -- NOT the IRA 'transfer completed' flag, which undercounts ~⅓.
+        if(lower(ifNull(ecr.callDetails_endedReason, '')) IN ('transferred','assistant-forwarded-call'), 1, 0) AS has_transfer,
+        -- failed transfer — reported separately, never folded into has_transfer.
+        if(lower(ifNull(ecr.callDetails_endedReason, '')) = 'transfer_failed', 1, 0) AS has_transfer_failed,
         if(
             ira.sourceId IS NOT NULL
             AND (
@@ -237,6 +238,7 @@ ecr_by_call AS (
         max(is_qualifying_call) AS qualified_via_call,
         max(has_appt_intent)    AS had_appt_intent,
         max(has_transfer)       AS had_transfer,
+        max(has_transfer_failed) AS had_transfer_failed,
         max(has_callback)       AS had_callback,
         max(is_query_resolved)  AS is_query_resolved,
         max(is_connected)       AS is_connected,
@@ -451,6 +453,7 @@ SELECT
     ifNull(ec.is_query_resolved, 0)         AS query_resolved,
     ifNull(ec.had_appt_intent, 0)           AS had_appt_intent,
     ifNull(ec.had_transfer, 0)              AS had_transfer,
+    ifNull(ec.had_transfer_failed, 0)       AS had_transfer_failed,
     ifNull(ec.had_callback, 0)              AS had_callback,
     ifNull(ec.talk_seconds, 0)              AS talk_seconds,
     q.score_percentage                      AS quality_score,

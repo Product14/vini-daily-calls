@@ -51,6 +51,7 @@ const METRIC_COLS = `
   uniqExactIf(lead_id, is_call = 1)           AS leads_with_calls,
   uniqExactIf(lead_id, is_sms = 1)            AS leads_with_sms,
   uniqExactIf(lead_id, had_transfer = 1)      AS transfer_leads,
+  uniqExactIf(lead_id, had_transfer_failed = 1) AS transfer_failed_leads,
   uniqExactIf(lead_id, had_callback = 1)      AS callback_leads`;
 
 const totalsSql = () => `SELECT ${DIM_COLS}, ${METRIC_COLS}
