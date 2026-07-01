@@ -153,6 +153,51 @@ const SalesInboundQuery = {
         );
         return parseInt(rows[0]?.cnt ?? 0, 10);
     },
+    // canonical: SECONDARY appointment metric — "AI-assisted (CRM)".
+    // A meeting booked in the CRM (source != 'spyne') on a lead the AI agent WORKED
+    // (the lead has an AI sales call OR an AI sales conversation in the window).
+    // Shown smaller in the email; NEVER folded into the AI-booked headline.
+    async countAssistedSalesAppointments(enterpriseId, teamId, start, end) {
+        const rows = await clickhouse.query(
+            `SELECT count() AS cnt
+             FROM meetings m
+             WHERE m.enterprise_id = {eid:String}
+               AND m.team_id       = {tid:String}
+               AND m.service_type  = 'sales'
+               AND m.source       != 'spyne'            -- canonical: CRM-booked, not AI-booked
+               AND m.created_at BETWEEN {start:DateTime} AND {end:DateTime}
+               AND m.__deleted     = 0
+               AND m.lead_id != ''
+               AND (
+                   -- lead was worked by the AI sales agent (call OR conversation) in the window
+                   EXISTS (
+                       SELECT 1 FROM endcallreports e
+                       WHERE e.leadId = m.lead_id
+                         AND e.enterpriseId = {eid:String}
+                         AND e.teamId       = {tid:String}
+                         AND e.isTestCall   = 0
+                         AND lower(e.callDetails_agentInfo_agentType) = 'sales'
+                         AND e.createdAt BETWEEN {start:DateTime} AND {end:DateTime}
+                         AND e.__deleted    = 0
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM conversations c
+                       INNER JOIN teamAgentMappings tam ON tam.teamAgentMappingId = c.teamAgentMappingId
+                       INNER JOIN agentTypes at ON at.agentTypeId = tam.agentTypeId
+                       WHERE c.leadId = m.lead_id
+                         AND c.enterpriseId = {eid:String}
+                         AND c.teamId       = {tid:String}
+                         AND at.agentType   = 'Sales'
+                         AND ifNull(c.isTest, 0) = 0
+                         AND c.createdAt BETWEEN {start:DateTime} AND {end:DateTime}
+                         AND c.__deleted    = 0
+                   )
+               )`,
+            { eid: enterpriseId, tid: teamId, start: fmt(start), end: fmt(end) },
+        );
+        return parseInt(rows[0]?.cnt ?? 0, 10);
+    },
+
     async getActionItems(enterpriseId, teamId, start, end, serviceType) {
         return clickhouse.query(
             `SELECT intent, count() AS cnt

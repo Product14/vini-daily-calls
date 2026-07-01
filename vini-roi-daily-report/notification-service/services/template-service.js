@@ -51,6 +51,8 @@ function buildTemplateData({
     inboundAptsMtd,
     outboundApptsYesterday,
     outboundAptsMtd,
+    assistedApptsYesterday,   // canonical: AI-assisted (CRM), secondary — never folded into headline
+    assistedApptsMtd,
     inboundUniqueLeadsYesterday,
     inboundUniqueLeadsMtd,
     outboundStatsYesterday,
@@ -86,6 +88,9 @@ function buildTemplateData({
     const inboundInMtd          = inboundAptsMtd          ?? 0;
     const outboundApptsY        = outboundApptsYesterday   ?? 0;
     const outboundApptsM        = outboundAptsMtd         ?? 0;
+    // canonical: AI-assisted (CRM) appts — kept SEPARATE from AI-booked headline.
+    const assistedApptsY        = assistedApptsYesterday   ?? 0;
+    const assistedApptsM        = assistedApptsMtd        ?? 0;
     const inboundLeadsY         = inboundUniqueLeadsYesterday ?? 0;
     const inboundLeadsM         = inboundUniqueLeadsMtd       ?? 0;
     const warmY                 = warmTransfersYesterday ?? 0;
@@ -118,11 +123,28 @@ function buildTemplateData({
             count: Number.parseInt(item.cnt, 10) || 0,
             label: formatActionItemIntent(item.intent),
         })),
-        // ── Appointments 
-        appointmentsYesterday:    totalApptsYesterday,
+        // ── Appointments
+        // canonical: PRIMARY headline = "Appointments — AI-booked" (meetings.source='spyne').
+        // SECONDARY (shown smaller) = "AI-assisted (CRM)" — never folded into the headline.
+        appointmentsYesterday:    totalApptsYesterday,        // AI-booked (headline)
         appointmentsYesterdayMTD: totalAptsMtd,
+        assistedAppointments:     assistedApptsY,             // AI-assisted (CRM) — secondary
+        assistedAppointmentsMTD:  assistedApptsM,
         inboundAppointments:      inboundIn,
         inboundAppointmentsMTD:   inboundInMtd,
+        // canonical wordings (verbatim, identical across all Vini systems)
+        canonicalLabels: {
+            leadsReached:        'Leads reached',          // inbound
+            leadsDialed:         'Leads dialed',           // outbound
+            realConversations:   'Real conversations',
+            qualifiedLeads:      'Qualified leads',
+            apptsAiBooked:       'Appointments — AI-booked',
+            apptsAiAssisted:     'AI-assisted (CRM)',
+            handOffs:            'Hand-offs to team',
+            turnRate:            'Turn rate',
+            closeRate:           'Close rate',
+            engaged:             'Engaged',                 // bare reply (not qualified)
+        },
         // ── Inbound unique leads
         inboundUniqueLeads:    inboundLeadsY,
         inboundUniqueLeadsMTD: inboundLeadsM,
@@ -202,6 +224,10 @@ function buildServiceTemplateData(params) {
         afterHoursLeadsEngaged:     base.afterHoursLeadsEngaged,
         appointmentsYesterday:      base.appointmentsYesterday,
         appointmentsYesterdayMTD:   base.appointmentsYesterdayMTD,
+        // canonical: carry AI-assisted (CRM) secondary metric + labels through service payload too
+        assistedAppointments:       base.assistedAppointments,
+        assistedAppointmentsMTD:    base.assistedAppointmentsMTD,
+        canonicalLabels:            base.canonicalLabels,
         campaigns: base.campaigns.map(c => ({
             name:       c.name,
             status:     String(c.status || 'active').toLowerCase(),

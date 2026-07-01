@@ -15,6 +15,26 @@ function pct(numerator, denominator) {
     if (!denominator) return '0%';
     return `${Math.round((numerator / denominator) * 100)}%`;
 }
+
+// canonical: rate display — never headline a rounded "0%". When the rounded percent
+// would read 0% (or 100% off a tiny base) we surface the raw fraction instead, e.g.
+// "1/32". Use this for turn/close rates so a real-but-small rate isn't shown as "0%".
+function pctOrFraction(numerator, denominator) {
+    if (!denominator) return '—';
+    const rounded = Math.round((numerator / denominator) * 100);
+    if (numerator > 0 && rounded === 0) return `${numerator}/${denominator}`;
+    return `${rounded}% (${numerator}/${denominator})`;
+}
+
+// canonical (locked denominators — identical across all Vini systems):
+//   Turn rate  = qualified leads ÷ real conversations (connected)   — NOT ÷ leads-touched.
+//   Close rate = appointments    ÷ qualified leads                  — NOT ÷ leads-touched.
+function turnRate(qualified, conversationsConnected) {
+    return pctOrFraction(qualified || 0, conversationsConnected || 0);
+}
+function closeRate(appointments, qualified) {
+    return pctOrFraction(appointments || 0, qualified || 0);
+}
 /** Milliseconds → human duration, e.g. 95000 -> "1 min 35 sec". Used for response-time KPIs. */
 function msToSec(ms) {
     if (!ms) return '0 sec';
@@ -99,10 +119,16 @@ function getTimeWindows(tz = 'UTC') {
     const yStart   = localToUTC(year, month, day - 1, 0, 0, 0, tz);
     const yEnd     = new Date(localToUTC(year, month, day, 0, 0, 0, tz).getTime() - 1);
     const mtdStart = localToUTC(year, month, 1, 0, 0, 0, tz);
+    // canonical: comparable window = rolling last-30-days [today-30, today) in DEALER-LOCAL tz.
+    // This is the window the console (reporting-vini) headlines; expose it here for parity.
+    // The daily email keeps `yesterday`/`mtd` but those views must be LABELLED as such.
+    const last30Start = localToUTC(year, month, day - 30, 0, 0, 0, tz);
+    const last30End   = new Date(localToUTC(year, month, day, 0, 0, 0, tz).getTime() - 1);
 
     return {
         yesterday: { start: yStart, end: yEnd },
         mtd:       { start: mtdStart, end: yEnd },
+        last30:    { start: last30Start, end: last30End },
     };
 }
 
@@ -170,6 +196,9 @@ function conversationInboundWhereClause() {
 module.exports = {
     fmt,
     pct,
+    pctOrFraction,   // canonical: fraction-aware rate display (never headline a rounded 0%)
+    turnRate,        // canonical: qualified ÷ connected
+    closeRate,       // canonical: appointments ÷ qualified
     msToSec,
     mtdDelta,
     formatActionItemIntent,
