@@ -2653,7 +2653,7 @@ app.get("/api/email/track-open", async (req, res) => {
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
 app.post("/api/recipients", async (req, res) => {
   try {
-    const { teamId, department, email, name, emailEnabled } = req.body ?? {};
+    const { teamId, department, email, name, emailEnabled, phone, smsEnabled } = req.body ?? {};
     const dept = department === "service" ? "service" : "sales";
     const addr = String(email || "").trim();
     if (!teamId || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId + valid email required" });
@@ -2671,6 +2671,12 @@ app.post("/api/recipients", async (req, res) => {
       // email_enabled: honor explicit flag; else new rows default ON, existing rows keep their state.
       email_enabled: typeof emailEnabled === "boolean" ? emailEnabled : (existing ? existing.email_enabled : true),
     };
+    // SMS channel (optional): phone accepts common formats; "" clears it. Turning SMS on requires a phone.
+    if (phone !== undefined) patch.phone = phone ? String(phone).trim() : null;
+    if (typeof smsEnabled === "boolean") {
+      if (smsEnabled && !patch.phone && phone === undefined) return res.status(400).json({ error: "add a phone before enabling SMS" });
+      patch.sms_enabled = smsEnabled;
+    }
     const q = existing
       ? sb.from("roi_recipients").update(patch).eq("id", existing.id)
       : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: name || null, ...patch });
@@ -2686,16 +2692,22 @@ app.post("/api/recipients", async (req, res) => {
 // ── Toggle a recipient's email_enabled (store state, no send) ────────────────
 app.post("/api/recipients/toggle", async (req, res) => {
   try {
-    const { teamId, email, enabled } = req.body ?? {};
+    const { teamId, email, enabled, channel } = req.body ?? {};
     const addr = String(email || "").trim();
     if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
+    const col = channel === "sms" ? "sms_enabled" : "email_enabled";
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
-    const { error } = await sb.from("roi_recipients").update({ email_enabled: !!enabled }).eq("team_id", teamId).ilike("email", addr);
+    // Enabling SMS requires a phone on file — guard so we never flag a phoneless recipient as SMS-on.
+    if (col === "sms_enabled" && enabled) {
+      const { data: r } = await sb.from("roi_recipients").select("phone").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+      if (!r?.phone) return res.status(400).json({ error: "add a phone before enabling SMS" });
+    }
+    const { error } = await sb.from("roi_recipients").update({ [col]: !!enabled }).eq("team_id", teamId).ilike("email", addr);
     if (error) return res.status(500).json({ error: error.message });
-    return res.json({ ok: true, teamId, email: addr, email_enabled: !!enabled });
+    return res.json({ ok: true, teamId, email: addr, [col]: !!enabled });
   } catch (err) {
     console.error("POST /api/recipients/toggle error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "toggle failed" });
@@ -2709,6 +2721,7 @@ const ROOFTOP_BOOL_COLS = new Set([
   "daily_enabled", "weekly_enabled", "monthly_enabled",
   "post_appointment_enabled", "post_conversation_enabled",
   "action_item_enabled", "action_item_overdue_enabled",
+  "sms_enabled",
 ]);
 app.post("/api/rooftop-config", async (req, res) => {
   try {

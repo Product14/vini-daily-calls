@@ -16,15 +16,17 @@ export type SendDigestOpts = {
   recipients: string[];
 };
 
-/** Add a recipient to roi_recipients for a rooftop+department (email_enabled + receives_<dept>=true). */
-export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; email: string; name?: string; emailEnabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+/** Add a recipient to roi_recipients for a rooftop+department (email_enabled + receives_<dept>=true).
+ *  Also carries the SMS-channel fields (phone / smsEnabled) — this same endpoint updates an existing
+ *  recipient by email, so it doubles as "set this person's phone / flip their SMS opt-in". */
+export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; email: string; name?: string; emailEnabled?: boolean; phone?: string; smsEnabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
   const email = String(opts.email || "").trim();
   if (!/\S+@\S+\.\S+/.test(email)) return { ok: false, error: "Enter a valid email." };
   try {
     const res = await fetch("/api/recipients", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled }),
+      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled, phone: opts.phone, smsEnabled: opts.smsEnabled }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Add failed (HTTP ${res.status})` };
@@ -67,12 +69,16 @@ async function sendWithOverridePrompt(doPost: (override?: string) => Promise<Res
   return { ok: false, blocked: b?.blocked === true, error: (b?.error as string) || `Request failed (HTTP ${status})`, body: b };
 }
 
-/** Toggle a recipient's email_enabled (persist; does NOT send). */
-export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabled: boolean }) =>
-  postJson("/api/recipients/toggle", { teamId: opts.teamId, email: opts.email, enabled: opts.enabled });
+/** Toggle a recipient's email_enabled (default) or sms_enabled (channel:'sms'). Persist; does NOT send. */
+export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabled: boolean; channel?: "email" | "sms" }) =>
+  postJson("/api/recipients/toggle", { teamId: opts.teamId, email: opts.email, enabled: opts.enabled, channel: opts.channel });
 
-/** Update a rooftop's send hour / minute / timezone. */
-export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string }) =>
+/** Set (or clear) a recipient's phone number for the SMS channel. */
+export const setRecipientPhoneNow = (opts: { teamId?: string; dept?: DeptKind; email: string; phone: string }) =>
+  addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, phone: opts.phone });
+
+/** Update a rooftop's send hour / minute / timezone, or the SMS master switch (sms_enabled). */
+export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean }) =>
   postJson("/api/rooftop-config", opts);
 
 /** Assign a CSM (name + email both required) → enables both departments. */

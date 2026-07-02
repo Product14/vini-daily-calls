@@ -767,8 +767,10 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
   // daily honors the requested template (falls back to the rooftop's config); weekly/monthly always v2.
   const chosen = cad === "daily" ? (tpl === "v1" || tpl === "v2" ? tpl : pickTemplate(cfg, cad)) : "v2";
   const html = renderDigest(chosen, name, dept, dateLabel, row.enterprise_id, teamId, localDate, tz, m, camps, cad);
-  // strip the no-value marker — this is an on-screen preview, never a send
-  return { html: emailValue.stripMarker(html), template: chosen };
+  // strip the no-value marker AND the 1×1 open-tracking pixel — this is an on-screen preview, never a
+  // send; leaving the pixel in fires the track-open Edge Function and inflates open_count on every preview.
+  const preview = emailValue.stripMarker(html).replace(/<img[^>]*\/functions\/v1\/track-open[^>]*>/gi, "");
+  return { html: preview, template: chosen };
 }
 
 // ── WEEKLY / MONTHLY cadence generation ─────────────────────────────────────

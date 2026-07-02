@@ -102,18 +102,24 @@ const AI_IDENTITY =
   " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON a.leadId=l.lead_id" +
   " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
 // One deduped row per OPEN action item, optionally scoped to a team / dept / single lead, and to a
-// createdAt window. scope: 'open' (is_completed=0) | 'overdue' (open AND due_date in the past).
+// createdAt window. scope: 'open' (is_completed=0) | 'overdue' (open AND real past due date).
 function aiBaseSql({ teamId = null, dept = null, scope = "open", leadKey = null, since = null } = {}) {
+  const overdue = scope === "overdue";
   return (
     "SELECT _id, lead_id leadId, team_id, service_type, description, toString(due_date) dueAt, intent, priority," +
     " " + aiVehicle("meta") + " vehicle, createdAt" + // raw DateTime — aliasing toString here would shadow the WHERE/ORDER column
     " FROM dealer_leads.actionItems" +
     " WHERE is_active=1 AND is_completed=0 AND __deleted=0" +
-    (scope === "overdue" ? " AND due_date < now()" : "") +
+    // Overdue = real past due date. Exclude epoch/zero due_date ("no due date recorded" → not truly
+    // overdue; counting those inflated overdue to ~= open).
+    (overdue ? " AND due_date < now() AND due_date > '2000-01-01'" : "") +
     (teamId ? " AND team_id=" + lit(teamId) : "") +
     (dept ? " AND " + AI_DEPT + "=" + lit(dept) : "") +
     (leadKey ? " AND lead_id=" + lit(leadKey) : "") +
-    (since ? " AND createdAt >= " + since : "") +
+    // Recency window bounds OPEN items; for OVERDUE the bound is the (past) due_date above, NOT
+    // createdAt. Overdue items are created long ago, so gating on createdAt silently dropped ~22% of
+    // them (the worst, longest-overdue offenders) — the overdue-undercount bug.
+    (since && !overdue ? " AND createdAt >= " + since : "") +
     " ORDER BY _version DESC LIMIT 1 BY _id"
   );
 }

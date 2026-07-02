@@ -11,7 +11,7 @@ import {
 } from "./mockData";
 import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
-import { sendDigestNow, generateAndSendNow, generatePreviewNow, renderStoredPreview, addRecipientNow, toggleRecipientNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
+import { sendDigestNow, generateAndSendNow, generatePreviewNow, renderStoredPreview, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
 
 /**
  * Cell-action drawer.
@@ -83,9 +83,18 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   // the real v1 so the preview body matches what the cron sends. Derives from `cell` to keep hook order.
   useEffect(() => {
     if (!open || !rooftop || !cell || cell.cadence !== "daily") return;
+    // Preview must equal what the cron SENDS. The client renderer (renderDigestEmail) drifts from the
+    // cron on several inputs — campaign images (gated on DIGEST_ASSET_BASE), deep links, content focus,
+    // period wording — and can't render Classic (v1) at all (it lives server-side). So server-render the
+    // EXACT template the cron will use via renderStoredDigest, for BOTH v1 and v2. The template the cron
+    // will send = the rooftop's CURRENT config (pickTemplate reads the same roi_rooftop_config
+    // .daily_template → rooftop.config.daily_template); fall back to the stored run's metric when config
+    // is absent (mock). Sent cells already show exact stored bytes; no-run cells fall back to the client render.
     const r = (cell.runs ?? []).find((x) => x.status === cell.status) ?? (cell.runs ?? [])[0] ?? null;
     const usedTpl = (r?.metrics as { daily_template?: string } | undefined)?.daily_template;
-    if (cell.status !== "sent" && usedTpl === "v1") void showTemplate("v1");
+    const cfgTpl = rooftop.config?.daily_template;
+    const willSendTpl: "v1" | "v2" = cfgTpl === "v2" ? "v2" : cfgTpl === "v1" ? "v1" : usedTpl === "v2" ? "v2" : "v1";
+    if (cell.status !== "sent") void showTemplate(willSendTpl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rooftop?.rooftop_id, cell?.date, cell?.cadence, cell?.status]);
 
@@ -132,9 +141,15 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   const isPeriodic = cell.cadence !== "daily";
   // Department for the generate/send call: the cell's run dept, else the rooftop's first department.
   const effDept = (dept ?? rooftop.departments?.[0]?.kind) as DeptKind | undefined;
-  // The template/focus this cell ACTUALLY used (stored on the run's metrics by the cron) — the
-  // authoritative source for the label, so the preview can't claim a different email than was sent.
-  const effTpl: "v1" | "v2" = (metrics as { daily_template?: string } | undefined)?.daily_template === "v2" ? "v2" : "v1";
+  // The label must match the previewed/sent BODY. SENT cells: the template actually sent (stored on
+  // the run's metrics). NOT-yet-sent cells: the template the cron WILL use = current config — using
+  // the stored metric here would default to "Classic" on runs that never stamped it while the body
+  // renders v2, so label and body disagreed.
+  const storedTpl = (metrics as { daily_template?: string } | undefined)?.daily_template;
+  const cfgTpl = rooftop.config?.daily_template;
+  const effTpl: "v1" | "v2" = isSent
+    ? (storedTpl === "v2" ? "v2" : "v1")
+    : (cfgTpl === "v2" ? "v2" : cfgTpl === "v1" ? "v1" : storedTpl === "v2" ? "v2" : "v1");
   const effTplName = effTpl === "v2" ? "New" : "Classic";
   const effFocusRaw = (metrics as { digest_focus?: string } | undefined)?.digest_focus;
   const effFocusName = effFocusRaw === "appointment" ? "Appointment-led" : effFocusRaw === "conversation" ? "Conversation-led" : "";
@@ -600,6 +615,16 @@ function RecipientManager({
   });
   const [bulk, setBulk] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [bulkMsg, setBulkMsg] = useState("");
+  // Rooftop-level SMS master switch (roi_rooftop_config.sms_enabled). SMS only sends when this is ON.
+  const [smsRooftopOn, setSmsRooftopOn] = useState<boolean>(rooftop.smsEnabled === true);
+  const [smsRooftopBusy, setSmsRooftopBusy] = useState(false);
+  const toggleSmsRooftop = async () => {
+    const next = !smsRooftopOn;
+    setSmsRooftopOn(next); setSmsRooftopBusy(true);
+    const r = await updateRooftopConfigNow({ teamId: rooftop.team_id, sms_enabled: next });
+    setSmsRooftopBusy(false);
+    if (!r.ok) { setSmsRooftopOn(!next); setBulkMsg(r.error || "SMS switch failed"); }
+  };
 
   const toggle = (email: string) => {
     const key = email.toLowerCase();
@@ -621,6 +646,22 @@ function RecipientManager({
     setSelected((prev) => { const n = new Set(prev); next ? n.add(email.toLowerCase()) : n.delete(email.toLowerCase()); return n; });
     const r = await toggleRecipientNow({ teamId: rooftop.team_id, email, enabled: next });
     if (!r.ok) setEnabledLocal(deptKind, idx, !next); // revert
+  };
+
+  // ── SMS channel (per recipient) — mirror the email toggle, plus a phone editor ──
+  const patchRecip = (deptKind: DeptKind, idx: number, patch: Partial<Recipient>) =>
+    setDepts((prev) => prev.map((d) => (d.kind === deptKind ? { ...d, recipients: d.recipients.map((r, i) => (i === idx ? { ...r, ...patch } : r)) } : d)));
+  const toggleSms = async (deptKind: DeptKind, idx: number, email: string, next: boolean) => {
+    patchRecip(deptKind, idx, { smsEnabled: next });
+    const r = await toggleRecipientNow({ teamId: rooftop.team_id, email, enabled: next, channel: "sms" });
+    if (!r.ok) { patchRecip(deptKind, idx, { smsEnabled: !next }); setBulkMsg(r.error || "SMS toggle failed"); }
+  };
+  const savePhone = async (deptKind: DeptKind, idx: number, email: string, phone: string): Promise<{ ok: boolean; error?: string }> => {
+    const prev = depts.find((d) => d.kind === deptKind)?.recipients[idx]?.phone;
+    patchRecip(deptKind, idx, { phone });
+    const r = await setRecipientPhoneNow({ teamId: rooftop.team_id, dept: deptKind, email, phone });
+    if (!r.ok) patchRecip(deptKind, idx, { phone: prev }); // revert
+    return r;
   };
 
   // the REAL send — to a specific set of emails for a department
@@ -655,6 +696,23 @@ function RecipientManager({
 
   return (
     <div className="space-y-4">
+      {/* SMS channel master switch — texts action-item + appointment alerts to recipients with a phone + SMS on */}
+      <div className="flex items-center justify-between rounded-md border border-border-subtle bg-surface-background px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold text-text-primary">SMS notifications</div>
+          <div className="text-[10px] text-text-muted">Text appointment & action-item alerts to recipients below who have a phone + SMS on.</div>
+        </div>
+        <button
+          type="button"
+          onClick={() => void toggleSmsRooftop()}
+          disabled={smsRooftopBusy}
+          title={smsRooftopOn ? "SMS ON for this rooftop — click to disable" : "SMS OFF — click to enable the SMS channel for this rooftop"}
+          className={`shrink-0 rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${smsRooftopOn ? "bg-positive/10 text-positive" : "bg-surface-subtle text-text-muted"} disabled:opacity-60`}
+        >
+          <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${smsRooftopOn ? "bg-positive" : "bg-text-muted"}`} />
+          {smsRooftopOn ? "On" : "Off"}
+        </button>
+      </div>
       {noData ? (
         <p className="rounded-md border border-warning/40 bg-warning-soft px-3 py-1.5 text-[11px] leading-snug text-warning">
           No data for this day — there’s nothing to send, so sending is disabled. You can still add/enable recipients; they’ll receive on the next day with activity.
@@ -697,6 +755,9 @@ function RecipientManager({
                       checked={validEmail(rec.email) && selected.has(rec.email.toLowerCase())}
                       onToggle={() => toggle(rec.email)}
                       onToggleEnabled={validEmail(rec.email) ? (next: boolean) => void toggleEnabled(d.kind, idx, rec.email, next) : undefined}
+                      smsRooftopOn={smsRooftopOn}
+                      onToggleSms={validEmail(rec.email) ? (next: boolean) => void toggleSms(d.kind, idx, rec.email, next) : undefined}
+                      onSavePhone={validEmail(rec.email) ? (phone: string) => savePhone(d.kind, idx, rec.email, phone) : undefined}
                       onSend={async (email) => {
                         // commit the typed address into the list + select it, THEN send
                         setEmail(d.kind, idx, email);
@@ -751,6 +812,9 @@ function RecipientRow({
   onToggle,
   onSend,
   onToggleEnabled,
+  smsRooftopOn = false,
+  onToggleSms,
+  onSavePhone,
   disabled = false,
 }: {
   recipient: Recipient;
@@ -759,6 +823,9 @@ function RecipientRow({
   onToggle: () => void;
   onSend: (email: string) => Promise<SendResult>;
   onToggleEnabled?: (next: boolean) => void;
+  smsRooftopOn?: boolean;
+  onToggleSms?: (next: boolean) => void;
+  onSavePhone?: (phone: string) => Promise<{ ok: boolean; error?: string }>;
   disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(recipient.email);
@@ -767,6 +834,21 @@ function RecipientRow({
   const hasEmail = validEmail(recipient.email);
   const valid = validEmail(draft);
   const enabled = recipient.enabled !== false; // undefined (e.g. sent-run recipients) → treat as on
+  // SMS sub-row state
+  const [phoneDraft, setPhoneDraft] = useState(recipient.phone ?? "");
+  const [phoneState, setPhoneState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const smsOn = recipient.smsEnabled === true;
+  const hasPhone = !!(recipient.phone && recipient.phone.trim());
+  const phoneValid = /\+?[\d][\d\s().-]{6,}/.test(phoneDraft.trim());
+  const savePhone = async () => {
+    const p = phoneDraft.trim();
+    if (!onSavePhone || p === (recipient.phone ?? "")) return;
+    if (p && !phoneValid) { setPhoneState("error"); return; }
+    setPhoneState("saving");
+    const r = await onSavePhone(p);
+    setPhoneState(r.ok ? "saved" : "error");
+    if (r.ok) setTimeout(() => setPhoneState("idle"), 1500);
+  };
 
   const fire = async (email: string) => {
     setState("sending"); setMsg("");
@@ -817,50 +899,82 @@ function RecipientRow({
     : "Send";
 
   return (
-    <li className={`flex items-center gap-2 rounded-md border border-border-subtle px-3 py-2 ${recipient.received ? "bg-positive/5" : "bg-surface-background"}`}>
-      {/* choose-to-receive checkbox */}
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={onToggle}
-        title="Include this recipient when sending to selected"
-        className="h-3.5 w-3.5 shrink-0 accent-brand-primary"
-      />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[12px] text-text-primary">{recipient.email}{recipient.name ? <span className="ml-1 text-text-muted">· {recipient.name}</span> : null}</div>
-        <div className={`text-[10px] ${recipient.received ? "text-positive" : isSent ? "text-negative" : "text-text-muted"}`}>
-          {recipient.received ? "✓ Received" : isSent ? "Didn't receive" : "Not sent yet"}
+    <li className={`rounded-md border border-border-subtle px-3 py-2 ${recipient.received ? "bg-positive/5" : "bg-surface-background"}`}>
+      <div className="flex items-center gap-2">
+        {/* choose-to-receive checkbox */}
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          title="Include this recipient when sending to selected"
+          className="h-3.5 w-3.5 shrink-0 accent-brand-primary"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[12px] text-text-primary">{recipient.email}{recipient.name ? <span className="ml-1 text-text-muted">· {recipient.name}</span> : null}</div>
+          <div className={`text-[10px] ${recipient.received ? "text-positive" : isSent ? "text-negative" : "text-text-muted"}`}>
+            {recipient.received ? "✓ Received" : isSent ? "Didn't receive" : "Not sent yet"}
+          </div>
         </div>
-      </div>
-      {/* email_enabled status + toggle (persists; never sends) */}
-      {onToggleEnabled ? (
+        {/* email_enabled status + toggle (persists; never sends) */}
+        {onToggleEnabled ? (
+          <button
+            type="button"
+            onClick={() => onToggleEnabled(!enabled)}
+            title={enabled ? "Email ON — click to disable (won’t receive sends)" : "Email OFF — click to enable (no send, just enable)"}
+            className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-positive/10 text-positive" : "bg-surface-subtle text-text-muted"}`}
+          >
+            <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${enabled ? "bg-positive" : "bg-text-muted"}`} />
+            {enabled ? "On" : "Off"}
+          </button>
+        ) : null}
         <button
           type="button"
-          onClick={() => onToggleEnabled(!enabled)}
-          title={enabled ? "Email ON — click to disable (won’t receive sends)" : "Email OFF — click to enable (no send, just enable)"}
-          className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${enabled ? "bg-positive/10 text-positive" : "bg-surface-subtle text-text-muted"}`}
+          onClick={() => !disabled && void fire(recipient.email)}
+          disabled={disabled || state === "sending"}
+          title={disabled ? "No data for this day — nothing to send" : recipient.received ? "Resend individually to this recipient" : "Send individually to this recipient"}
+          className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold ${
+            disabled
+              ? "cursor-not-allowed bg-surface-subtle text-text-muted"
+              : state === "sent"
+              ? "bg-positive/10 text-positive"
+              : state === "error"
+              ? "bg-negative-soft text-negative"
+              : "bg-brand-primary text-white hover:bg-brand-primary-hover"
+          }`}
         >
-          <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${enabled ? "bg-positive" : "bg-text-muted"}`} />
-          {enabled ? "On" : "Off"}
+          {sendLabel}
         </button>
+      </div>
+      {/* SMS sub-row: phone editor + SMS on/off. Shown once the rooftop SMS switch is on. */}
+      {smsRooftopOn && (onToggleSms || onSavePhone) ? (
+        <div className="mt-1.5 flex items-center gap-1.5 border-t border-border-subtle pt-1.5">
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted">SMS</span>
+          <input
+            type="tel"
+            value={phoneDraft}
+            onChange={(e) => { setPhoneDraft(e.target.value); if (phoneState === "error") setPhoneState("idle"); }}
+            onKeyDown={(e) => { if (e.key === "Enter") void savePhone(); }}
+            onBlur={() => void savePhone()}
+            placeholder="+1 555 123 4567"
+            className={`min-w-0 flex-1 rounded-md border bg-surface-card px-2 py-1 text-[11px] placeholder:text-text-muted focus:outline-none ${phoneState === "error" ? "border-negative" : "border-border-subtle focus:border-brand-primary"}`}
+          />
+          <span className="shrink-0 text-[9px] text-text-muted">
+            {phoneState === "saving" ? "Saving…" : phoneState === "saved" ? "Saved ✓" : phoneState === "error" ? "Invalid" : ""}
+          </span>
+          {onToggleSms ? (
+            <button
+              type="button"
+              onClick={() => hasPhone ? onToggleSms(!smsOn) : setPhoneState("error")}
+              disabled={!hasPhone}
+              title={!hasPhone ? "Add a phone first" : smsOn ? "SMS ON — click to disable" : "SMS OFF — click to enable"}
+              className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold disabled:opacity-50 ${smsOn ? "bg-positive/10 text-positive" : "bg-surface-subtle text-text-muted"}`}
+            >
+              <span className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${smsOn ? "bg-positive" : "bg-text-muted"}`} />
+              {smsOn ? "On" : "Off"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
-      <button
-        type="button"
-        onClick={() => !disabled && void fire(recipient.email)}
-        disabled={disabled || state === "sending"}
-        title={disabled ? "No data for this day — nothing to send" : recipient.received ? "Resend individually to this recipient" : "Send individually to this recipient"}
-        className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold ${
-          disabled
-            ? "cursor-not-allowed bg-surface-subtle text-text-muted"
-            : state === "sent"
-            ? "bg-positive/10 text-positive"
-            : state === "error"
-            ? "bg-negative-soft text-negative"
-            : "bg-brand-primary text-white hover:bg-brand-primary-hover"
-        }`}
-      >
-        {sendLabel}
-      </button>
     </li>
   );
 }

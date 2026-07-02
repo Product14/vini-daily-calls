@@ -41,6 +41,10 @@ export type Recipient = {
   received: boolean;
   /** roi_recipients.email_enabled — whether this recipient currently receives sends. */
   enabled?: boolean;
+  /** roi_recipients.phone — E.164-ish phone for the SMS channel (undefined = none on file). */
+  phone?: string;
+  /** roi_recipients.sms_enabled — whether this recipient receives SMS notifications. */
+  smsEnabled?: boolean;
 };
 
 export type Department = {
@@ -110,6 +114,8 @@ export type RooftopRow = {
   monthly: SendCell[];
   /** Per-rooftop email-type enable/disable (roi_rooftop_config). Shared across the rooftop's dept rows. */
   config?: RooftopConfig;
+  /** roi_rooftop_config.sms_enabled — rooftop-level master switch for the SMS channel. */
+  smsEnabled?: boolean;
 };
 
 /** The 7 configurable email types, in display order. */

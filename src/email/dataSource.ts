@@ -55,7 +55,7 @@ type RunRow = {
 type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null; cs_poc: string | null; digest_send_hour: number | null; digest_send_minute: number | null;
   daily_enabled: boolean | null; weekly_enabled: boolean | null; monthly_enabled: boolean | null;
   post_appointment_enabled: boolean | null; post_conversation_enabled: boolean | null; action_item_enabled: boolean | null; action_item_overdue_enabled: boolean | null;
-  daily_template: string | null; digest_focus: string | null };
+  daily_template: string | null; digest_focus: string | null; sms_enabled: boolean | null };
 // Unfurl a corp email local-part into a display name: "ankur.batra@spyne.ai" →
 // "Ankur Batra". Trailing dedup digits ("vishal.singh1") are stripped. Returns
 // "" for blank/non-email input so callers can fall back.
@@ -71,6 +71,7 @@ function nameFromEmail(email: string | null | undefined): string {
 type RecipientRow = {
   team_id: string; email: string; name: string | null;
   receives_sales: boolean; receives_service: boolean; email_enabled: boolean;
+  phone: string | null; sms_enabled: boolean | null; role: string | null;
 };
 type LiveRow = { team_id: string; department: DeptKind; is_live: boolean; dry_run?: boolean };
 
@@ -101,7 +102,16 @@ function shift(anchor: string, unit: Cadence, n: number): string {
   const dt = new Date(Date.UTC(y, m - 1, d));
   if (unit === "daily") dt.setUTCDate(dt.getUTCDate() - n);
   else if (unit === "weekly") dt.setUTCDate(dt.getUTCDate() - n * 7);
-  else dt.setUTCMonth(dt.getUTCMonth() - n);
+  else {
+    // Subtract n months WITHOUT day-overflow: setUTCMonth on a day the target month
+    // lacks (e.g. Mar 31 − 1mo) silently rolls into the next month. Clamp to the
+    // target month's last valid day instead.
+    const day = dt.getUTCDate();
+    dt.setUTCDate(1);
+    dt.setUTCMonth(dt.getUTCMonth() - n);
+    const lastDay = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 0)).getUTCDate();
+    dt.setUTCDate(Math.min(day, lastDay));
+  }
   return dt.toISOString().slice(0, 10);
 }
 
@@ -135,19 +145,25 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
   return cell("not_sent", normReason(ns?.reason ?? null));
 }
 
-export async function loadRooftops(): Promise<LoadResult> {
+export async function loadRooftops(opts: { anchor?: string } = {}): Promise<LoadResult> {
   const todayIso = new Date().toISOString().slice(0, 10);
+  // Optional history anchor (YYYY-MM-DD) — becomes the right-most column, so the tracker can jump to
+  // ANY past date instead of only the fixed window ending "today".
+  const anchorReq = opts.anchor && /^\d{4}-\d{2}-\d{2}$/.test(opts.anchor) ? opts.anchor : null;
   if (!isSupabaseConfigured || !supabase) {
     // No mock fallback — surface an explicit unconfigured state so the UI shows a message, not fake data.
     return { rooftops: [], source: "unconfigured", today: todayIso, lastSynced: new Date() };
   }
 
+  // When browsing history, fetch the 5000 rows AT/BEFORE the anchor so an older window isn't crowded
+  // out by the newest rows (the 5000-row cap otherwise only covers the most recent ~3 weeks).
+  const runsBase = supabase.from("roi_digest_runs")
+    .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
+    .order("local_date", { ascending: false });
   const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
-    supabase.from("roi_digest_runs")
-      .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
-      .order("local_date", { ascending: false }).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus"),
-    supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled"),
+    (anchorReq ? runsBase.lte("local_date", anchorReq) : runsBase).limit(5000),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled"),
+    supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
 
@@ -190,7 +206,8 @@ export async function loadRooftops(): Promise<LoadResult> {
   const isoYesterday = (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); })();
   const dailyDates = runs.filter(r => r.cadence === "daily").map(r => r.local_date).sort();
   const latestRun = dailyDates.length ? dailyDates[dailyDates.length - 1] : "";
-  const today = latestRun > isoYesterday ? latestRun : isoYesterday;
+  // Explicit history anchor wins (user jumped to a past date); else the live anchor (latest run / yesterday).
+  const today = anchorReq ?? (latestRun > isoYesterday ? latestRun : isoYesterday);
 
   // anchor recomputed above; build cells for ONE department's runs
   function buildCells(deptRuns: RunRow[], cadence: Cadence): SendCell[] {
@@ -226,7 +243,7 @@ export async function loadRooftops(): Promise<LoadResult> {
     // every recipient routed to this department (incl. disabled) → view + toggle
     const recipsAll: Recipient[] = (recByTeam.get(teamId) ?? [])
       .filter(r => (dept === "sales" ? r.receives_sales : r.receives_service))
-      .map(r => ({ email: r.email, name: r.name ?? undefined, received: recvMap.get(r.email.toLowerCase()) ?? false, enabled: r.email_enabled }));
+      .map(r => ({ email: r.email, name: r.name ?? undefined, received: recvMap.get(r.email.toLowerCase()) ?? false, enabled: r.email_enabled, phone: r.phone ?? undefined, smsEnabled: r.sms_enabled === true }));
     // ENABLED subset → used for sending
     const recips: Recipient[] = recipsAll.filter(r => r.enabled);
 
@@ -271,6 +288,7 @@ export async function loadRooftops(): Promise<LoadResult> {
         daily_template: (cfg?.daily_template === "v2" ? "v2" : "v1") as DailyTemplate,   // default classic
         digest_focus: ((cfg?.digest_focus === "conversation" || cfg?.digest_focus === "appointment") ? cfg.digest_focus : "auto") as DigestFocus,   // default auto (→ conversation)
       },
+      smsEnabled: cfg?.sms_enabled === true, // rooftop-level SMS master switch (default off)
     };
   })
   // GROUP BY ROOFTOP — both departments of a rooftop sit together (sales above service),
@@ -341,6 +359,22 @@ export async function loadEventCounts(): Promise<EventCounts> {
     }
   } catch { /* CH endpoint unavailable → keep view-only counts */ }
   return m;
+}
+
+/** One recipient of a team, with BOTH department memberships + the global enabled flag. */
+export type TeamRecipient = { email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean };
+
+/** All recipients for a team (both departments) — powers the ConfigDrawer's side-by-side Sales /
+ * Service recipient lists. Each RooftopRow only carries its own department's recipients, so the
+ * drawer fetches the full set here (roi_recipients; RLS off so the browser anon key can read). */
+export async function loadTeamRecipients(teamId: string): Promise<TeamRecipient[]> {
+  if (!isSupabaseConfigured || !supabase || !teamId) return [];
+  const { data, error } = await supabase
+    .from("roi_recipients")
+    .select("email,name,receives_sales,receives_service,email_enabled")
+    .eq("team_id", teamId);
+  if (error) { console.warn("[tracker] team recipients read failed:", error.message); return []; }
+  return (data ?? []) as TeamRecipient[];
 }
 
 export type EventEmailPage = { rows: EventEmailRow[]; hasMore: boolean };

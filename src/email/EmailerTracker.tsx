@@ -14,9 +14,8 @@ import {
   type RooftopConfig,
   type EmailTypeKey,
   type SendCell,
-  type Recipient,
 } from "./mockData";
-import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, type EventCounts, type EventEmailRow } from "./dataSource";
+import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, loadTeamRecipients, type EventCounts, type EventEmailRow, type TeamRecipient } from "./dataSource";
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
@@ -29,7 +28,7 @@ export function EmailerTracker() {
   const [eventCounts, setEventCounts] = useState<EventCounts>(new Map());
   const [eventList, setEventList] = useState<{ rooftop: RooftopRow; type: string; label: string; direction?: "inbound" | "outbound" | null } | null>(null);
   const [search, setSearch] = useState("");
-  const [csmFilter, setCsmFilter] = useState("all");
+  const [csmFilter, setCsmFilter] = useState<Set<string>>(new Set()); // empty = all CSMs
   // Agent-product filter — Sales/Service × Inbound/Outbound. Digests are stored per dept, so
   // IB/OB map onto their dept's rows (they share one digest); the picker still reads as products.
   const [productFilter, setProductFilter] = useState<"all" | "sales_ib" | "sales_ob" | "service_ib" | "service_ob">("all");
@@ -38,6 +37,11 @@ export function EmailerTracker() {
   const [sentNow, setSentNow] = useState<Record<string, true>>({});
   const [activeCell, setActiveCell] = useState<{ rooftop: RooftopRow; cell: SendCell } | null>(null);
   const [configRooftop, setConfigRooftop] = useState<RooftopRow | null>(null);
+  // History anchor = the right-most column date. null → live (latest run / yesterday). Set to jump to
+  // any past date; the window shows that date and the (colCount-1) days/weeks/months before it.
+  const [anchor, setAnchor] = useState<string | null>(null);
+  // Which KPI chip's analytics modal is open (null = closed).
+  const [analyticsMetric, setAnalyticsMetric] = useState<AnalyticsMetric | null>(null);
 
   // Live data from roi_digest_runs (+ mailservice engagement). No mock fallback — empty until loaded.
   const [rooftops, setRooftops] = useState<RooftopRow[]>([]);
@@ -56,7 +60,7 @@ export function EmailerTracker() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [res, counts] = await Promise.all([loadRooftops(), loadEventCounts()]);
+      const [res, counts] = await Promise.all([loadRooftops({ anchor: anchor ?? undefined }), loadEventCounts()]);
       setEventCounts(counts);
       setRooftops(res.rooftops);
       setToday(res.today);
@@ -70,7 +74,7 @@ export function EmailerTracker() {
       setLoading(false);
       setLoadedOnce(true);
     }
-  }, []);
+  }, [anchor]);
 
   useEffect(() => {
     void reload();
@@ -177,12 +181,40 @@ export function EmailerTracker() {
   const csms = useMemo(() => Array.from(new Set(rooftops.map((r) => r.csm))), [rooftops]);
   const syncedMinAgo = Math.max(0, Math.round((Date.now() - lastSynced.getTime()) / 60000));
 
+  // History window navigation. `today` is the effective right-most date (= anchor when set, else the
+  // live anchor). Stepping moves the window by a full page (colCount) of the current cadence; stepping
+  // forward past the live anchor snaps back to live (anchor=null).
+  const isoToday = new Date().toISOString().slice(0, 10);
+  const stepAnchor = (dir: -1 | 1) => {
+    const base = anchor ?? today;
+    if (!base) return;
+    const [y, m, d] = base.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    const n = colCount * dir;
+    if (cadence === "daily") dt.setUTCDate(dt.getUTCDate() + n);
+    else if (cadence === "weekly") dt.setUTCDate(dt.getUTCDate() + n * 7);
+    else dt.setUTCMonth(dt.getUTCMonth() + n);
+    const next = dt.toISOString().slice(0, 10);
+    setAnchor(dir === 1 && next >= isoToday ? null : next);
+  };
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const prodDept = productFilter === "all" ? null : productFilter.startsWith("sales") ? "sales" : "service";
     return rooftops.filter((r) => {
-      if (q && !r.name.toLowerCase().includes(q) && !r.csm.toLowerCase().includes(q)) return false;
-      if (csmFilter !== "all" && r.csm !== csmFilter) return false;
+      // Match rooftop name, CSM, team_id, enterprise_id, or the enterprise group label — so a whole
+      // dealer group is findable by its enterprise_id even when its rooftops share no name token
+      // (e.g. "Corn Husker Nissan" / "Corn Hukser Auto Center" / "Courtesy Ford" under one enterprise).
+      if (
+        q &&
+        !r.name.toLowerCase().includes(q) &&
+        !r.csm.toLowerCase().includes(q) &&
+        !(r.team_id ?? "").toLowerCase().includes(q) &&
+        !(r.enterprise_id ?? "").toLowerCase().includes(q) &&
+        !(r.group ?? "").toLowerCase().includes(q)
+      )
+        return false;
+      if (csmFilter.size && !csmFilter.has(r.csm)) return false;
       if (prodDept && r.department !== prodDept) return false;
       if (reasonFilter !== "all" && r.current_block !== reasonFilter) return false;
       return true;
@@ -207,6 +239,33 @@ export function EmailerTracker() {
     }
     return arr;
   }, [filtered, cadence, colCount]);
+
+  // Per-column history for the analytics modal: sent / not-sent / opened + the rooftop lists behind
+  // each, over the currently-loaded window (move the date window to see older history). Newest first.
+  const trend = useMemo<TrendPoint[]>(() => {
+    const cellsOf = (r: RooftopRow) => (cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly);
+    const isOpened = (c: SendCell) => (c.runs ?? []).some((run) => run.openedAt || (run.openCount ?? 0) > 0 || (run.recipients ?? []).some((x) => x.opened));
+    return Array.from({ length: colCount }, (_, i) => {
+      const sent: RooftopRow[] = [], notSent: RooftopRow[] = [], opened: RooftopRow[] = [];
+      let date = "";
+      for (const r of filtered) {
+        const c = cellsOf(r)[i];
+        if (!c) continue;
+        date = c.date;
+        if (c.status === "sent") { sent.push(r); if (isOpened(c)) opened.push(r); }
+        else if (c.status === "not_subscribed" || c.status === "scheduled") { /* not eligible */ }
+        else notSent.push(r);
+      }
+      const eligible = sent.length + notSent.length;
+      return {
+        date,
+        label: formatColLabel(cadence, i, today),
+        sent, notSent, opened, eligible,
+        sentRate: eligible ? Math.round((sent.length / eligible) * 100) : 0,
+        openRate: sent.length ? Math.round((opened.length / sent.length) * 100) : 0,
+      };
+    });
+  }, [filtered, cadence, colCount, today]);
 
   // Group-by-CSM clusters a CSM's rooftops together (CSM → rooftop → dept rows). Rooftop
   // grouping (the default) keeps a rooftop's two dept rows adjacent.
@@ -418,14 +477,10 @@ export function EmailerTracker() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search rooftop or CSM…"
+            placeholder="Search rooftop, CSM, team / enterprise id…"
             className="w-[240px] rounded-md border border-border-subtle bg-surface-card px-3 py-1.5 text-[12px] placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
           />
-          <Select
-            value={csmFilter}
-            onChange={setCsmFilter}
-            options={[{ value: "all", label: "All CSMs" }, ...csms.map((c) => ({ value: c, label: c }))]}
-          />
+          <MultiSelect allLabel="All CSMs" options={csms} selected={csmFilter} onChange={setCsmFilter} />
           <Select
             value={productFilter}
             onChange={(v) => setProductFilter(v as typeof productFilter)}
@@ -468,6 +523,24 @@ export function EmailerTracker() {
               ))}
             </div>
           ) : null}
+          {view === "digests" ? (
+            <div className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-1 py-0.5" title="Jump the date window to any past date. ◀ / ▶ page by a full window; pick a date to jump; Live returns to the latest.">
+              <button type="button" onClick={() => stepAnchor(-1)} className="px-1.5 text-[13px] font-bold text-text-secondary hover:text-brand-primary" aria-label="Older window">◀</button>
+              <input
+                type="date"
+                value={anchor ?? today ?? ""}
+                max={isoToday}
+                onChange={(e) => setAnchor(e.target.value && e.target.value < isoToday ? e.target.value : null)}
+                className="w-[128px] bg-transparent text-[12px] text-text-primary focus:outline-none"
+              />
+              <button type="button" onClick={() => stepAnchor(1)} disabled={!anchor} className={`px-1.5 text-[13px] font-bold ${anchor ? "text-text-secondary hover:text-brand-primary" : "text-border-subtle"}`} aria-label="Newer window">▶</button>
+              {anchor ? (
+                <button type="button" onClick={() => setAnchor(null)} className="ml-0.5 rounded bg-brand-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand-primary hover:bg-brand-primary/20">Live</button>
+              ) : (
+                <span className="ml-0.5 rounded bg-positive/10 px-1.5 py-0.5 text-[10px] font-semibold text-positive">Live</span>
+              )}
+            </div>
+          ) : null}
           <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
             {(["rooftop", "csm"] as const).map((g) => (
               <button
@@ -487,7 +560,7 @@ export function EmailerTracker() {
             type="button"
             onClick={() => {
               setSearch("");
-              setCsmFilter("all");
+              setCsmFilter(new Set());
               setProductFilter("all");
               setReasonFilter("all");
               setGroupBy("rooftop");
@@ -509,21 +582,21 @@ export function EmailerTracker() {
           <Stat label="Dept trackers" value={rooftops.length} />
           <Stat label="Sales / Service" value={`${salesRows} / ${serviceRows}`} />
           <span className="mx-1 w-px self-stretch bg-border-subtle" />
-          <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" />
-          <Stat label="Not sent" value={summary.emailStatus.notSent} tone="negative" />
+          <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} />
+          <Stat label="Not sent" value={summary.emailStatus.notSent} tone="negative" onClick={() => setAnalyticsMetric("notSent")} />
           <Stat
             label="Sent rate"
             value={`${summary.emailStatus.sentRatePct}%`}
             sub={`${summary.emailStatus.sent} of ${summary.emailStatus.sent + summary.emailStatus.notSent} eligible`}
-            title="Of eligible rooftops (sent + not-sent); not-subscribed and scheduled rooftops are excluded from the denominator."
             tone={summary.emailStatus.sentRatePct >= 50 ? "positive" : "negative"}
+            onClick={() => setAnalyticsMetric("sentRate")}
           />
           <Stat
             label="Rooftops opened"
             value={`${summary.emailStatus.openRatePct}%`}
             sub={`${summary.emailStatus.opened} of ${summary.emailStatus.sent} sent`}
-            title="Rooftop-level open rate: a rooftop counts as opened if ANY recipient opened. Denominator is sent rooftops only (suppressed runs excluded)."
             tone={summary.emailStatus.openRatePct >= 40 ? "positive" : summary.emailStatus.opened > 0 ? "neutral" : undefined}
+            onClick={() => setAnalyticsMetric("openRate")}
           />
         </div>
       </div>
@@ -675,6 +748,10 @@ export function EmailerTracker() {
       <ConfigDrawer rooftop={configRooftop} onClose={() => setConfigRooftop(null)} onSaved={() => void reload()} />
 
       <EventListDrawer entry={eventList} onClose={() => setEventList(null)} />
+
+      {analyticsMetric ? (
+        <AnalyticsModal metric={analyticsMetric} trend={trend} cadence={cadence} onClose={() => setAnalyticsMetric(null)} />
+      ) : null}
     </div>
   );
 }
@@ -956,7 +1033,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
                     <div className="flex shrink-0 items-center gap-2">
                       {r.opened_at ? (
                         <span title={openTitle(r)} className="rounded-full bg-positive/10 px-2 py-0.5 text-[10px] font-semibold text-positive">
-                          👁 Opened{r.open_count && r.open_count > 1 ? ` ·${r.open_count}` : ""}
+                          👁 Opened{r.open_count && r.open_count > 1 ? ` · ${r.open_count} views` : ""}
                         </span>
                       ) : r.status === "sent" ? (
                         <span title="Sent — no open detected yet" className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-muted">Not opened</span>
@@ -991,14 +1068,19 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   const [tplBusy, setTplBusy] = useState(false);
   const [focusBusy, setFocusBusy] = useState(false);
   const [err, setErr] = useState("");
-  // Recipients of this rooftop's department (roi_recipients) — view, enable/disable, add.
-  const [recips, setRecips] = useState<Recipient[]>([]);
+  // ALL recipients of this rooftop's team (both departments) — view, enable/disable, add. Each
+  // RooftopRow only carries its own dept, so fetch the full team set to manage Sales + Service together.
+  const [teamRecips, setTeamRecips] = useState<TeamRecipient[]>([]);
   const [recipBusy, setRecipBusy] = useState<string | null>(null);
+  const reloadRecips = useCallback(async () => {
+    if (!rooftop?.team_id) { setTeamRecips([]); return; }
+    setTeamRecips(await loadTeamRecipients(rooftop.team_id));
+  }, [rooftop?.team_id]);
   useEffect(() => {
     setCfg(rooftop?.config ?? null);
     setErr("");
-    setRecips(rooftop?.departments?.[0]?.allRecipients ?? rooftop?.departments?.[0]?.recipients ?? []);
-  }, [rooftop]);
+    void reloadRecips();
+  }, [rooftop, reloadRecips]);
   if (!rooftop || !cfg) return null;
 
   const toggle = async (key: EmailTypeKey) => {
@@ -1038,16 +1120,17 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     onSaved();
   };
 
-  // Enable/disable a recipient (email_enabled) — persists, never sends. Optimistic; reverts on failure.
-  const dept = rooftop.department;
+  // Enable/disable a recipient (email_enabled — GLOBAL per recipient, spans both depts). Optimistic.
   const toggleRecip = async (email: string, next: boolean) => {
-    setRecips((prev) => prev.map((r) => (r.email === email ? { ...r, enabled: next } : r)));
+    setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, email_enabled: next } : r)));
     setRecipBusy(email); setErr("");
     const res = await toggleRecipientNow({ teamId: rooftop.team_id, email, enabled: next });
     setRecipBusy(null);
-    if (!res.ok) { setRecips((prev) => prev.map((r) => (r.email === email ? { ...r, enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, email_enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
     onSaved();
   };
+  const salesRecips = teamRecips.filter((r) => r.receives_sales);
+  const serviceRecips = teamRecips.filter((r) => r.receives_service);
 
   // Portal + high z-index so this overlays the host shell's sidebar (see EventListDrawer).
   return createPortal(
@@ -1131,37 +1214,49 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
             Changes save immediately and gate the cron (digests + transactional sends). Daily/weekly/monthly also need a send-hour; transactional types fire on the poll.
           </div>
 
-          <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-widest text-text-muted">
-            Recipients · {dept === "service" ? "Service" : "Sales"}
-          </div>
-          {recips.length === 0 ? (
-            <p className="mb-2 text-[12px] text-warning">No recipients yet — add at least one below, then turn it on.</p>
-          ) : (
-            <ul className="mb-2">
-              {recips.map((r) => (
-                <li key={r.email} className="flex items-center justify-between gap-2 border-b border-border-subtle py-2.5">
-                  <div className="min-w-0">
-                    {r.name ? <div className="truncate text-[13px] text-text-primary">{r.name}</div> : null}
-                    <div className="truncate text-[12px] text-text-muted">{r.email}</div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={r.enabled}
-                    disabled={recipBusy === r.email}
-                    onClick={() => void toggleRecip(r.email, !r.enabled)}
-                    title={r.enabled ? "Receiving — click to pause" : "Paused — click to start receiving"}
-                    className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
-                  >
-                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.enabled ? "left-[18px]" : "left-0.5"}`} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <AddRecipientRow teamId={rooftop.team_id} dept={dept} onAdded={onSaved} />
+          {/* Sales AND Service recipient lists, side by side — different people can receive each. */}
+          {([
+            { dept: "sales" as DeptKind, label: "Sales", list: salesRecips },
+            { dept: "service" as DeptKind, label: "Service", list: serviceRecips },
+          ]).map(({ dept: d, label, list }) => (
+            <div key={d}>
+              <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-widest text-text-muted">
+                Recipients · {label}
+              </div>
+              {list.length === 0 ? (
+                <p className="mb-2 text-[12px] text-warning">No {label.toLowerCase()} recipients yet — add at least one below, then turn it on.</p>
+              ) : (
+                <ul className="mb-2">
+                  {list.map((r) => (
+                    <li key={r.email} className="flex items-center justify-between gap-2 border-b border-border-subtle py-2.5">
+                      <div className="min-w-0">
+                        {r.name ? <div className="truncate text-[13px] text-text-primary">{r.name}</div> : null}
+                        <div className="truncate text-[12px] text-text-muted">{r.email}</div>
+                        {r.receives_sales && r.receives_service ? (
+                          <div className="text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={r.email_enabled}
+                        disabled={recipBusy === r.email}
+                        onClick={() => void toggleRecip(r.email, !r.email_enabled)}
+                        title={r.email_enabled ? "Receiving — click to pause (pauses ALL emails to this person)" : "Paused — click to start receiving"}
+                        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.email_enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
+                      >
+                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.email_enabled ? "left-[18px]" : "left-0.5"}`} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <AddRecipientRow teamId={rooftop.team_id} dept={d} onAdded={() => { onSaved(); void reloadRecips(); }} />
+            </div>
+          ))}
           <div className="mt-3 text-[11px] leading-relaxed text-text-muted">
-            Recipients (and their on/off state) apply to every email this rooftop sends — daily digests and transactional “Send to customer”. New recipients are added paused; turn them on to start receiving.
+            Sales and Service lists are independent — add different people to each. The On/Off toggle is
+            per person and pauses ALL of their emails (both departments). New recipients are added paused.
           </div>
         </div>
       </div>
@@ -1225,6 +1320,7 @@ function Stat({
   tone = "neutral",
   sub,
   title,
+  onClick,
 }: {
   label: string;
   value: string | number;
@@ -1233,14 +1329,18 @@ function Stat({
   sub?: string;
   /** Hover tooltip — extra precision without crowding the strip. */
   title?: string;
+  /** When set, the chip is a button that opens the analytics modal. */
+  onClick?: () => void;
 }) {
   const c = tone === "positive" ? "text-positive" : tone === "negative" ? "text-negative" : "text-text-primary";
+  const clickable = onClick ? "cursor-pointer text-left hover:border-brand-primary hover:shadow-sm" : "";
+  const Tag = onClick ? "button" : "div";
   return (
-    <div title={title} className="rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[84px]">
+    <Tag type={onClick ? "button" : undefined} onClick={onClick} title={title ?? (onClick ? "Click for history + breakdown" : undefined)} className={`rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[84px] ${clickable}`}>
       <div className={`text-[19px] font-extrabold tabular leading-none ${c}`}>{value}</div>
-      <div className="mt-1 text-[9px] font-semibold uppercase tracking-widest text-text-muted">{label}</div>
+      <div className="mt-1 text-[9px] font-semibold uppercase tracking-widest text-text-muted">{label}{onClick ? " ›" : ""}</div>
       {sub ? <div className="mt-0.5 text-[9px] font-medium tabular text-text-muted">{sub}</div> : null}
-    </div>
+    </Tag>
   );
 }
 
@@ -1526,6 +1626,137 @@ function Select({
         </option>
       ))}
     </select>
+  );
+}
+
+/** KPI chips that open the analytics modal. */
+type AnalyticsMetric = "sent" | "notSent" | "sentRate" | "openRate";
+type TrendPoint = { date: string; label: string; sent: RooftopRow[]; notSent: RooftopRow[]; opened: RooftopRow[]; eligible: number; sentRate: number; openRate: number };
+
+const METRIC_META: Record<AnalyticsMetric, { title: string; kind: "count" | "rate"; pick: (p: TrendPoint) => number; drill: (p: TrendPoint) => { title: string; rooftops: RooftopRow[] }[] }> = {
+  sent: { title: "Sent", kind: "count", pick: (p) => p.sent.length, drill: (p) => [{ title: "Sent", rooftops: p.sent }, { title: "Not sent", rooftops: p.notSent }] },
+  notSent: { title: "Not sent", kind: "count", pick: (p) => p.notSent.length, drill: (p) => [{ title: "Not sent", rooftops: p.notSent }, { title: "Sent", rooftops: p.sent }] },
+  sentRate: { title: "Sent rate", kind: "rate", pick: (p) => p.sentRate, drill: (p) => [{ title: "Sent", rooftops: p.sent }, { title: "Not sent", rooftops: p.notSent }] },
+  openRate: { title: "Open rate", kind: "rate", pick: (p) => p.openRate, drill: (p) => [{ title: "Opened", rooftops: p.opened }, { title: "Sent, not opened", rooftops: p.sent.filter((r) => !p.opened.includes(r)) }] },
+};
+
+/** Analytics modal for a KPI chip: a trend of the metric over the loaded window + the drill-down
+ * list of rooftops behind the latest (right-most) column. Uses ONLY already-loaded cell data. */
+function AnalyticsModal({ metric, trend, cadence, onClose }: { metric: AnalyticsMetric; trend: TrendPoint[]; cadence: Cadence; onClose: () => void }) {
+  const meta = METRIC_META[metric];
+  // Oldest → newest for the chart (trend is newest-first).
+  const series = useMemo(() => [...trend].reverse(), [trend]);
+  const maxVal = Math.max(1, ...series.map((p) => meta.pick(p)));
+  const latest = trend[0];
+  const suffix = meta.kind === "rate" ? "%" : "";
+  const drill = latest ? meta.drill(latest) : [];
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
+      <div className="flex max-h-[85vh] w-[720px] max-w-full flex-col overflow-hidden rounded-xl bg-surface-card shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
+          <div>
+            <div className="text-[14px] font-semibold text-text-primary">{meta.title} · history</div>
+            <div className="text-[11px] text-text-muted">Per {cadence === "daily" ? "day" : cadence === "weekly" ? "week" : "month"} over the loaded window · move the date window for older history</div>
+          </div>
+          <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary">✕</button>
+        </div>
+        <div className="overflow-auto px-5 py-4">
+          {/* Trend bars */}
+          <div className="flex items-end gap-2" style={{ height: 160 }}>
+            {series.map((p) => {
+              const v = meta.pick(p);
+              const h = Math.round((v / maxVal) * 130);
+              return (
+                <div key={p.date || p.label} className="flex flex-1 flex-col items-center justify-end gap-1" title={`${p.label}: ${v}${suffix}`}>
+                  <div className="text-[10px] font-bold tabular text-text-secondary">{v}{suffix}</div>
+                  <div className="w-full rounded-t bg-brand-primary/70" style={{ height: Math.max(2, h) }} />
+                  <div className="mt-0.5 w-full truncate text-center text-[9px] text-text-muted">{p.label}</div>
+                </div>
+              );
+            })}
+          </div>
+          {/* Drill-down for the latest column */}
+          <div className="mt-5 border-t border-border-subtle pt-3">
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-muted">
+              {latest ? `Breakdown · ${latest.label}` : "Breakdown"}
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              {drill.map((col) => (
+                <div key={col.title}>
+                  <div className="mb-1 text-[12px] font-semibold text-text-primary">{col.title} <span className="text-text-muted">({col.rooftops.length})</span></div>
+                  {col.rooftops.length === 0 ? (
+                    <div className="text-[11px] text-text-muted">None</div>
+                  ) : (
+                    <ul className="max-h-[220px] space-y-0.5 overflow-auto">
+                      {col.rooftops.map((r) => (
+                        <li key={r.rooftop_id} className="truncate text-[12px] text-text-secondary" title={`${r.name} · ${r.department ?? ""}`}>
+                          {r.name} <span className="text-text-muted">· {r.department}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** Compact multi-select popover (checkbox list). Empty selection = "all". */
+function MultiSelect({
+  allLabel,
+  options,
+  selected,
+  onChange,
+}: {
+  allLabel: string;
+  options: string[];
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const label = selected.size === 0 ? allLabel : selected.size === 1 ? Array.from(selected)[0] : `${selected.size} selected`;
+  const toggle = (v: string) => {
+    const next = new Set(selected);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    onChange(next);
+  };
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1 rounded-md border border-border-subtle bg-surface-card px-2.5 py-1.5 text-[12px] font-medium text-text-secondary hover:bg-surface-subtle focus:border-brand-primary focus:outline-none"
+        title={selected.size ? Array.from(selected).join(", ") : allLabel}
+      >
+        <span className="max-w-[160px] truncate">{label}</span>
+        <span className="text-[9px] text-text-muted">▼</span>
+      </button>
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-[60]" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 z-[61] mt-1 max-h-[300px] w-[240px] overflow-auto rounded-md border border-border-subtle bg-surface-card p-1 shadow-xl">
+            <button
+              type="button"
+              onClick={() => onChange(new Set())}
+              className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-surface-subtle ${selected.size === 0 ? "font-semibold text-brand-primary" : "text-text-secondary"}`}
+            >
+              {allLabel}
+            </button>
+            {options.map((o) => (
+              <label key={o} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[12px] text-text-primary hover:bg-surface-subtle">
+                <input type="checkbox" checked={selected.has(o)} onChange={() => toggle(o)} className="accent-brand-primary" />
+                <span className="truncate">{o}</span>
+              </label>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
   );
 }
 
