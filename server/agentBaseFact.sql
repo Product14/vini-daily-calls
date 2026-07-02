@@ -76,10 +76,15 @@ service_intents AS (
 
 sales_intents AS (
     SELECT arrayJoin([
-        'Appointment Booking/inquiry','Test Drive Booking','Schedule Test Drive','Vehicle Inquiry',
-        'Pricing Inquiry','Trade-in Inquiry','Financing Inquiry','Inventory Availability Inquiry',
-        'Sales person/Manager Request','Sales department transfer completed','Lease Inquiry',
-        'New Vehicle Inquiry','Used Vehicle Inquiry'
+        -- canonical (LOCKED 2026-06-30): CONCRETE buying-intent IRA intents, using the ACTUAL prod
+        -- vocabulary (the old list used non-matching strings, so inbound buying-intent calls never
+        -- matched → IB qualified undercounted). Routing intents ('Sales person/Manager Request',
+        -- 'Sales department transfer completed') are NOT buying-intent → excluded.
+        'Vehicle Availability Inquiry','Vehicle Price Inquiry','Trade in value inquiry',
+        'Test drive Booking','Appointment Booking/inquiry','Finance Inquiry','Lease Inquiry',
+        'Vehicle condition or history inquiry','Vehicle Feature Request','Sales appointment re-scheduled',
+        'Test Drive Booking','Schedule Test Drive','Vehicle Inquiry','New Vehicle Inquiry',
+        'Used Vehicle Inquiry','Pricing Inquiry','Inventory Availability Inquiry','Trade-in Inquiry','Financing Inquiry'
     ]) AS intent
 ),
 
@@ -150,23 +155,29 @@ ecr_events AS (
             ifNull(co.opt_out_call, 0) = 0
             AND ifNull(co.opt_out_sms, 0) = 0
             AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%voicemail%'
+            AND lower(ifNull(ecr.callDetails_endedReason, '')) NOT LIKE '%machine%'
+            -- canonical: the call must have actually connected (customer spoke), not just have an IRA row.
+            AND arrayExists(
+                x -> JSONExtractString(x, 'role') = 'user',
+                JSONExtractArrayRaw(ifNull(ecr.callDetails_messages, '[]'))
+            )
             AND (
-                (
+                -- canonical: qualified-on-call = a concrete buying-intent action item on the lead (hia)
+                -- OR an IRA buying-intent match. Same buying-intent bar as SMS. The hia branch lets
+                -- OUTBOUND calls (which have no IRA rows today) qualify via the lead's action items.
+                hia.lead_id IS NOT NULL
+                OR (
                     ira.sourceId IS NOT NULL
                     AND (
-                        (lower(ecr.callDetails_agentInfo_agentType) = 'service'
-                         AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
-                             IN (SELECT intent FROM service_intents))
-                        OR
                         (lower(ecr.callDetails_agentInfo_agentType) = 'sales'
                          AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
                              IN (SELECT intent FROM sales_intents))
+                        OR
+                        (lower(ecr.callDetails_agentInfo_agentType) = 'service'
+                         AND trimBoth(coalesce(JSONExtractString(ira.qualification_block, 'primary_intent'), ''))
+                             IN (SELECT intent FROM service_intents))
                     )
                 )
-                -- Call-qualified = IRA buying-intent only. Outbound calls have no
-                -- IRA records today, so qualified_via_call is structurally 0 for
-                -- outbound (upstream pipeline gap — outbound qualification comes
-                -- from the SMS-engagement rule + the booking guard, not here).
             ),
             1, 0
         ) AS is_qualifying_call,
@@ -218,6 +229,8 @@ ecr_events AS (
     FROM dealer_leads.endcallreports AS ecr FINAL
     JOIN lead_canonical lc ON lc.lead_id = ecr.leadId AND lc.team_id = ecr.teamId
     LEFT JOIN customer_opt_out co ON co.customer_id = lc.customer_id AND co.team_id = lc.team_id
+    LEFT JOIN lead_high_intent_action hia
+        ON hia.lead_id = lc.lead_id AND hia.team_id = lc.team_id
     LEFT JOIN dealer_leads.intentResolutionAnalysis AS ira FINAL
         ON ira.sourceId = ecr.callId AND ira.sourceType = 'call' AND ira.isActive = 1
     WHERE ecr.__deleted = 0 AND ecr.isTestCall = false
@@ -244,6 +257,32 @@ ecr_by_call AS (
     GROUP BY callId, team_id
 ),
 
+-- canonical (LOCKED 2026-06-30): SMS "Qualified" requires CONCRETE BUYING INTENT, same bar as the
+-- call side — NOT any reply. smsMessages carries no intent field, so the only buying-intent signal at
+-- the SMS grain is a high-intent action item logged on the lead (dealer_leads.actionItems.intent).
+-- A bare reply with no such signal = "Engaged", not Qualified. These are the actionItems buying-intent
+-- labels (they differ from the IRA primary_intent vocabulary in sales_intents).
+sms_buying_intent_actions AS (
+    SELECT arrayJoin([
+        'ScheduleAppointment','RescheduleAppointment','SALES_SCHEDULE_SHOWROOM_VISIT',
+        'CheckVehicleAvailability','CheckVehiclePrice','InquireFinanceStatus',
+        'SALES_CONNECT_TO_FINANCE','InquireTradeInValue','SALES_TRADE_IN_FOLLOW_UP',
+        'ScheduleTestDrive','SALES_SCHEDULE_TEST_DRIVE','InquireLeaseOptions',
+        'SALES_FOLLOW_UP_WITH_QUOTE','SERVICE_SCHEDULE_APPOINTMENT','SERVICE_SEND_ESTIMATE'
+    ]) AS intent
+),
+
+-- canonical: distinct leads that logged a concrete buying-intent action item within the window. Used
+-- as the SMS qualification gate. actionItems is lead-scoped (no conversationId/channel), so this
+-- credits buying intent at the LEAD level. Windowed to {START} to avoid all-time inflation.
+lead_high_intent_action AS (
+    SELECT DISTINCT ai.lead_id AS lead_id, ai.team_id AS team_id
+    FROM dealer_leads.actionItems AS ai FINAL
+    WHERE ai.__deleted = 0
+      AND ifNull(ai.intent, '') IN (SELECT intent FROM sms_buying_intent_actions)
+      AND toDate(ai.createdAt) >= {START}
+),
+
 sms_by_conv AS (
     SELECT
         c.conversationId AS conversationId,
@@ -251,9 +290,12 @@ sms_by_conv AS (
         count()          AS n_sms_messages,
         sum(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in', 1, 0)) AS n_human_inbound,
         sum(if(lower(sm.direction) = 'out', 1, 0)) AS n_sms_outbound,
+        -- canonical: SMS qualified = human inbound reply AND not opted-out AND a concrete buying-intent
+        -- signal on the lead (hia.lead_id IS NOT NULL). A bare reply is "Engaged", not Qualified.
         max(if(lower(sm.authorType) = 'human' AND lower(sm.direction) = 'in'
                AND ifNull(co.opt_out_call, 0) = 0
-               AND ifNull(co.opt_out_sms, 0) = 0, 1, 0)) AS qualified_via_sms
+               AND ifNull(co.opt_out_sms, 0) = 0
+               AND hia.lead_id IS NOT NULL, 1, 0)) AS qualified_via_sms
     FROM dealer_leads.smsMessages AS sm FINAL
     JOIN dealer_leads.conversations AS c FINAL
         ON sm.conversationId = c.conversationId
@@ -261,6 +303,7 @@ sms_by_conv AS (
        AND c.status != 'failed' AND lower(c.type) = 'sms'
     JOIN lead_canonical lc ON lc.lead_id = c.leadId AND lc.team_id = c.teamId
     LEFT JOIN customer_opt_out co ON co.customer_id = lc.customer_id AND co.team_id = lc.team_id
+    LEFT JOIN lead_high_intent_action hia ON hia.lead_id = lc.lead_id AND hia.team_id = lc.team_id
     WHERE sm.__deleted = 0
       AND c.conversationId IN (SELECT conversationId FROM conversation_spine)
     GROUP BY c.conversationId, c.teamId
@@ -468,15 +511,14 @@ SELECT
     ifNull(sb.n_sms_outbound, 0)            AS n_sms_outbound,
 
     ifNull(ec.qualified_via_call, 0)        AS qualified_via_call,
-    -- SMS-qualified = responded + not opted out (from sb) AND not exited campaign.
-    if(ifNull(sb.qualified_via_sms, 0) = 1 AND ifNull(cst.campaign_exited, 0) = 0, 1, 0) AS qualified_via_sms,
-    -- Overall qualified. The appointment guard (appointment_booked) keeps every
-    -- booked lead qualified so appts ⊆ qualified holds and ABR can't exceed 100%
-    -- even when a converted lead's campaign has closed / has no IRA call intent.
+    -- canonical: SMS-qualified already carries the buying-intent + opt-out gate in sms_by_conv.
+    ifNull(sb.qualified_via_sms, 0)         AS qualified_via_sms,
+    -- canonical (matches reporting-vini): overall qualified = qualified on call OR on SMS.
+    -- No appointment guard — a booked lead with neither a buying-intent call nor SMS is not
+    -- counted as qualified (identical to the console).
     greatest(
         ifNull(ec.qualified_via_call, 0),
-        if(ifNull(sb.qualified_via_sms, 0) = 1 AND ifNull(cst.campaign_exited, 0) = 0, 1, 0),
-        if(ifNull(ad.n_appts, 0) > 0, 1, 0)
+        ifNull(sb.qualified_via_sms, 0)
     ) AS qualified,
 
     if(ifNull(ad.n_appts, 0) > 0, 1, 0)     AS appointment_booked,
