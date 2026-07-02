@@ -24,6 +24,9 @@ const T = require("../../src/email/transactionalTemplates.cjs");
 // Anti-churn value gate (shared with the digest runner) — never email a no-value
 // transactional unless overridden (DANGER).
 const emailValue = require("./emailValue.cjs");
+// SMS channel — the Twilio companion to sendMail(). Gated per rooftop by roi_rooftop_config.sms_enabled
+// and per recipient by roi_recipients.sms_enabled + phone. Its own dedupe ledger (roi_event_sms).
+const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -143,6 +146,17 @@ async function claim(base, eventKey) {
 }
 const finish = (id, patch) => sb.from("roi_event_emails").update(patch).eq("id", id);
 
+// SMS ledger equivalents (roi_event_sms) — same claim-first dedupe, independent of the email row
+// so an event can be both emailed and texted without either blocking the other.
+async function claimSms(base, eventKey) {
+  const { data, error } = await sb.from("roi_event_sms")
+    .insert({ ...base, event_key: eventKey, status: "queued" })
+    .select("id");
+  if (error) { if ((error.code || "") === "23505" || /duplicate|unique/i.test(error.message || "")) return null; throw error; }
+  return data && data[0] ? data[0].id : null;
+}
+const finishSms = (id, patch) => sb.from("roi_event_sms").update(patch).eq("id", id);
+
 async function runOnce() {
   console.log(`\n── ROI EVENT pass @ ${new Date().toISOString()} · DRY_RUN=${DRY_RUN} · window=${POLL_MINUTES}m ──`);
   _feedDegraded = false;
@@ -150,14 +164,14 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0 };
+  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0 };
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
@@ -167,7 +181,13 @@ async function runOnce() {
     const name = c.rooftop_name || L.team_id;
     const tz = c.timezone || "America/New_York"; // dealer-local zone for windows + displayed times
     const dept = L.department; // 'sales' | 'service'
-    const emails = (recOf.get(L.team_id) ?? []).filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+    const recs = recOf.get(L.team_id) ?? [];
+    const emails = recs.filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+    // SMS recipients: opted-in, has a phone, and receives this dept. Dept targeting reuses the
+    // same receives_sales / receives_service flags as email. Gated overall by rooftop sms_enabled.
+    const smsRecipients = c.sms_enabled
+      ? recs.filter((r) => r.sms_enabled && r.phone && (dept === "sales" ? r.receives_sales : r.receives_service)).map((r) => ({ phone: r.phone, role: r.role }))
+      : [];
     const base = { team_id: L.team_id, enterprise_id: c.enterprise_id, department: dept };
     const dry = DRY_RUN || L.dry_run === true;
     const L_ = links(L.team_id, c.enterprise_id, dept);
@@ -186,13 +206,15 @@ async function runOnce() {
           // (When the feed doesn't report source yet, keep firing with a generic label.)
           if (m.source && m.source !== "spyne") continue;
           const byVini = m.source === "spyne";
+          const apptData = {
+            customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
+            type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
+            transportation: m.transportation || m.transportationOption, status: m.status, byVini, recordingUrl: m.recordingUrl,
+          };
           jobs.push({ type: "post_appointment", key: m.id,
             subject: `${byVini ? "Vini booked an appointment" : "New appointment"} — ${name}`,
-            html: T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: {
-              customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
-              type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
-              transportation: m.transportation || m.transportationOption, status: m.status, byVini, recordingUrl: m.recordingUrl,
-            } }) });
+            html: T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: apptData }),
+            smsBody: T.renderPostAppointmentSms({ rooftopName: name, dept, links: L_, appointment: apptData }) });
         }
       }
       if (c.post_conversation_enabled) {
@@ -261,7 +283,8 @@ async function runOnce() {
           const newestId = arrived.map((x) => x.id).filter(Boolean).sort().slice(-1)[0] || k;
           jobs.push({ type: "action_item", key: `lead:${k}:${newestId}`,
             subject: `Action items — ${lead.customer || name}`,
-            html: T.renderActionItem({ rooftopName: name, dept, tz, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, mtdOpen: open.total, links: L_ }) });
+            html: T.renderActionItem({ rooftopName: name, dept, tz, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, mtdOpen: open.total, links: L_ }),
+            smsBody: T.renderActionItemSms({ rooftopName: name, dept, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, links: L_ }) });
         }
       }
       if (c.action_item_overdue_enabled) {
@@ -284,7 +307,8 @@ async function runOnce() {
           const oldest = items.map((x) => x.dueAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
           jobs.push({ type: "action_item_overdue", key: `lead:${k}:overdue:${dayKey}`,
             subject: `Overdue — ${lead.customer || name}`,
-            html: T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }) });
+            html: T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
+            smsBody: T.renderActionItemOverdueSms({ rooftopName: name, dept, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }) });
         }
       }
     } catch (e) { out.errors++; console.log(`  ✗ ${name} [${dept}] feed error: ${String(e).slice(0, 140)}`); continue; }
@@ -307,12 +331,44 @@ async function runOnce() {
         out.sent++;
       } catch (e) { out.errors++; if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
     }
+
+    // ── SMS channel — same events, texted to the rooftop's opted-in phones ──────
+    // Only SMS-able job types (those carrying smsBody: post_appointment, action_item,
+    // action_item_overdue). Independent dedupe (roi_event_sms). We claim ONLY when a real
+    // send will happen — a dry-run neither claims nor sends, so enabling SMS later isn't
+    // pre-empted by a suppressed row.
+    if (c.sms_enabled && smsRecipients.length) {
+      // SMS is its OWN channel — gated by SMS_DRY_RUN, NOT the email pipeline's global DRY_RUN
+      // (emails may be deliberately held in dry-run while SMS is live). Per-dealer dry_run still
+      // holds both channels for that rooftop.
+      const smsDry = SMS_DRY_RUN || L.dry_run === true;
+      for (const job of jobs) {
+        if (!job.smsBody) continue; // email-only types (post_conversation)
+        if (smsDry) { out.sms_suppressed++; continue; }
+        let sid;
+        try {
+          sid = await claimSms({ ...base, email_type: job.type }, job.key);
+          if (!sid) { out.sms_dupe++; continue; } // already texted in a prior pass
+          const sentAt = new Date().toISOString();
+          const results = [];
+          for (const r of smsRecipients) {
+            try { const msid = await sendSms(r.phone, job.smsBody, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
+            catch (e) { results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) }); }
+          }
+          const firstSid = (results.find((x) => x.sid) || {}).sid || null;
+          const anySent = results.some((x) => x.sent);
+          await finishSms(sid, { status: anySent ? "sent" : "error", reason: anySent ? null : "all_recipients_failed", body: job.smsBody, message_sid: firstSid, sent_at: anySent ? sentAt : null, recipients: results });
+          if (anySent) out.sms_sent++; else out.sms_errors++;
+        } catch (e) { out.sms_errors++; if (sid) { try { await finishSms(sid, { status: "error", reason: String(e).slice(0, 300), body: job.smsBody }); } catch { /* ignore */ } } }
+      }
+    }
   }
   if (_feedDegraded) {
     out.feed_degraded = true;
     console.error("  ⚠️  reporting-vini feed DEGRADED (clickhouse not configured) — transactional emails are DISABLED until CLICKHOUSE_HOST/CLICKHOUSE_PASSWORD are set on the reporting-vini deployment. No events were sent this pass.");
   }
   console.log("  events summary:", JSON.stringify(out));
+  console.log(`  sms summary: sent=${out.sms_sent} suppressed=${out.sms_suppressed} dupe=${out.sms_dupe} no_recipients=${out.sms_no_recipients} errors=${out.sms_errors}`);
   return out;
 }
 

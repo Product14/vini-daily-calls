@@ -452,10 +452,94 @@ function renderActionItemOverdue(opts) {
   return stampValue(shell(opts, "Overdue · by lead", title, body), count > 0);
 }
 
+// ── SMS renderers ────────────────────────────────────────────────────────────
+// Plain-text companions to the HTML emails above, for the Twilio SMS channel
+// (sendSms.cjs). Same data shapes as the email renderers so the runner can build
+// one job and deliver it either way. Kept short (a few segments): who, what to do,
+// and a link back to the console. No HTML, no entities — GSM-7-friendly text.
+
+// A concise one-line label for an action item: humanized intent, else its description.
+function smsItemLabel(it) {
+  it = it || {};
+  var base = (it.intent && humanizeIntent(it.intent)) || it.description || "Follow-up";
+  var pr = it.priority ? " (" + String(it.priority).toLowerCase() + ")" : "";
+  return String(base).replace(/\s+/g, " ").trim() + pr;
+}
+
+/**
+ * Action-item SMS — "N things to do for <customer>", top items + a link to work the lead.
+ * opts: { rooftopName, dept, lead:{customer,vehicle}, items:[{intent,description,priority}],
+ *   totalOpen, justArrived, links }
+ */
+function renderActionItemSms(opts) {
+  opts = opts || {};
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  var lead = opts.lead || {};
+  var items = (Array.isArray(opts.items) ? opts.items : []).filter(Boolean);
+  var totalOpen = Number(opts.totalOpen) || items.length;
+  var who = lead.customer || "a customer";
+  var lines = [];
+  lines.push("Vini" + (opts.rooftopName ? " · " + opts.rooftopName : ""));
+  lines.push(totalOpen + " open action item" + (totalOpen === 1 ? "" : "s") + " for " + who +
+    (lead.vehicle ? " (" + lead.vehicle + ")" : "") + ":");
+  items.slice(0, 3).forEach(function (it) { lines.push("- " + smsItemLabel(it)); });
+  if (totalOpen > 3) lines.push("+" + (totalOpen - 3) + " more");
+  lines.push("Work this lead: " + url);
+  return lines.join("\n");
+}
+
+/**
+ * Appointment SMS — "Vini booked an appointment", who / when / vehicle + a link.
+ * opts: { rooftopName, dept, appointment:{customer,when,vehicle,type,byVini}, links }
+ */
+function renderPostAppointmentSms(opts) {
+  opts = opts || {};
+  var L = opts.links || {};
+  var url = L.appointment || L.console || "https://console.spyne.ai/converse-ai";
+  var a = opts.appointment || {};
+  var byVini = a.byVini !== false; // default to the Vini-booked headline
+  var who = a.customer || "a customer";
+  var lines = [];
+  lines.push((byVini ? "Vini booked an appointment" : "New appointment") + (opts.rooftopName ? " · " + opts.rooftopName : ""));
+  lines.push(who + (a.type ? " — " + a.type : (opts.dept === "service" ? " — Service" : " — Sales")));
+  if (a.when) lines.push(a.when);
+  if (a.vehicle) lines.push("Vehicle: " + a.vehicle);
+  if (a.intent) lines.push(humanizeIntent(a.intent));
+  lines.push("Details: " + url);
+  return lines.join("\n");
+}
+
+/**
+ * Overdue action-item SMS — urgent "past SLA" nudge. Same data shape as renderActionItemOverdue.
+ * opts: { rooftopName, lead:{customer,vehicle}, items:[{intent,description,priority}],
+ *   oldestDueAt, totalOverdue, links }
+ */
+function renderActionItemOverdueSms(opts) {
+  opts = opts || {};
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  var lead = opts.lead || {};
+  var items = (Array.isArray(opts.items) ? opts.items : []).filter(Boolean);
+  var count = Number(opts.totalOverdue) || items.length;
+  var age = overdueAge(opts.oldestDueAt || (items[0] && items[0].dueAt));
+  var who = lead.customer || "a customer";
+  var lines = [];
+  lines.push("OVERDUE" + (opts.rooftopName ? " · " + opts.rooftopName : ""));
+  lines.push(count + " action item" + (count === 1 ? "" : "s") + " past SLA for " + who +
+    (age ? " (oldest " + age + ")" : "") + ":");
+  items.slice(0, 3).forEach(function (it) { lines.push("- " + smsItemLabel(it)); });
+  lines.push("Resolve now: " + url);
+  return lines.join("\n");
+}
+
 module.exports = {
   renderPostAppointment: renderPostAppointment,
   renderPostConversation: renderPostConversation,
   renderActionItem: renderActionItem,
   renderActionItemOverdue: renderActionItemOverdue,
+  renderActionItemSms: renderActionItemSms,
+  renderPostAppointmentSms: renderPostAppointmentSms,
+  renderActionItemOverdueSms: renderActionItemOverdueSms,
   _shell: shell,
 };
