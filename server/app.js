@@ -1429,6 +1429,15 @@ async function refreshRooftopCache() {
 app.get("/api/agents", async (req, res) => {
   try {
     const force = req.query.refresh === "1";
+    // Edge-cache the (small, brotli'd ~200 KB) payload at Vercel's CDN. The data
+    // is daily-grain and the cron refreshes every 30 min, so a stale copy is
+    // harmless: `stale-while-revalidate` lets the edge serve the last good bundle
+    // INSTANTLY (~10 ms) while it revalidates in the background — the first
+    // visitor after a scale-to-zero never waits on a cold lambda + Postgres read,
+    // let alone a live ClickHouse scan. `?refresh=1` is uncacheable by design.
+    if (!force) {
+      res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=3600");
+    }
     if (!force && agentsCache.daily && agentsCache.totals
         && (Date.now() - agentsCache.fetchedAt) < AGENTS_TTL_MS) {
       return res.json(serializeAgents(agentsCache));
@@ -1449,6 +1458,9 @@ app.get("/api/agents", async (req, res) => {
     return res.json(serializeAgents(agentsCache));
   } catch (err) {
     console.error("GET /api/agents error:", err?.message);
+    // Never let the edge cache a failure — a transient ClickHouse blip would
+    // otherwise be pinned for the whole s-maxage window.
+    res.setHeader("Cache-Control", "no-store");
     return res.status(500).json({ error: err?.message ?? "Failed to load agents data" });
   }
 });

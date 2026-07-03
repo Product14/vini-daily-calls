@@ -44,6 +44,7 @@ const DIM_COLS = `
 const METRIC_COLS = `
   uniqExact(lead_id)                          AS touched_leads,
   uniqExactIf(lead_id, qualified = 1)         AS qualified_leads,
+  uniqExactIf(lead_id, had_appt_intent = 1)   AS appointment_intent_leads,
   sum(appointments_count)                     AS appointments,
   toInt32(0)                                  AS appointment_value,
   sum(is_call)                                AS total_calls,
@@ -54,23 +55,41 @@ const METRIC_COLS = `
   uniqExactIf(lead_id, had_transfer_failed = 1) AS transfer_failed_leads,
   uniqExactIf(lead_id, had_callback = 1)      AS callback_leads`;
 
-const totalsSql = () => `SELECT ${DIM_COLS}, ${METRIC_COLS}
+// ONE query, BOTH grains. The base_fact scan (the entire ~17s / OOM-prone cost —
+// the aggregation itself is nearly free) used to run TWICE: once for the totals
+// query, once for the daily query. GROUPING SETS scans the subquery a single time
+// and emits both grains — the (team_id, agent_type) rows are the window-deduped
+// totals, the (team_id, agent_type, activity_day) rows are the per-day daily set.
+// `GROUPING(activity_day)` is 1 on the totals-grain rows (activity_day rolled up),
+// 0 on the daily-grain rows — we split on it below. Halves ClickHouse work and,
+// more importantly, halves peak memory so the cron stops tripping the 57.6 GiB
+// ceiling (Code 241) and the precompute cache stays reliably warm.
+const combinedSql = () => `SELECT ${DIM_COLS}, toString(activity_day) AS day,
+  GROUPING(activity_day) AS is_totals, ${METRIC_COLS}
 FROM ( ${baseSql()} ) AS b
 WHERE team_id != ''
-GROUP BY team_id, agent_type`;
-
-const dailySql = () => `SELECT ${DIM_COLS}, toString(activity_day) AS day, ${METRIC_COLS}
-FROM ( ${baseSql()} ) AS b
-WHERE team_id != ''
-GROUP BY team_id, agent_type, activity_day`;
+GROUP BY GROUPING SETS (
+  (team_id, agent_type),
+  (team_id, agent_type, activity_day)
+)`;
 
 // Returns { daily, totals } in the exact shape /api/agents already serves.
 // GROUP BY yields one row per key, so no client-side dedup is needed.
 export async function runAgentRooftops() {
-  const [totals, daily] = await Promise.all([
-    runClickhouse(totalsSql()),
-    runClickhouse(dailySql()),
-  ]);
+  const rows = await runClickhouse(combinedSql());
+  const totals = [];
+  const daily = [];
+  for (const r of rows) {
+    const { is_totals, ...rest } = r;
+    if (Number(is_totals) === 1) {
+      // Totals grain: activity_day is rolled up (epoch default) — drop `day` so
+      // the row shape matches the old totals query exactly.
+      const { day, ...totalsRow } = rest;
+      totals.push(totalsRow);
+    } else {
+      daily.push(rest);
+    }
+  }
   return { totals, daily };
 }
 
