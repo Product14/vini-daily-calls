@@ -19,7 +19,7 @@ import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, lo
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
-import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow } from "./sendDigest";
 
 export function EmailerTracker() {
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -1072,12 +1072,16 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   // RooftopRow only carries its own dept, so fetch the full team set to manage Sales + Service together.
   const [teamRecips, setTeamRecips] = useState<TeamRecipient[]>([]);
   const [recipBusy, setRecipBusy] = useState<string | null>(null);
+  // Rooftop-level SMS master switch (roi_rooftop_config.sms_enabled) — SMS only sends when ON.
+  const [smsMaster, setSmsMaster] = useState(false);
+  const [smsBusy, setSmsBusy] = useState(false);
   const reloadRecips = useCallback(async () => {
     if (!rooftop?.team_id) { setTeamRecips([]); return; }
     setTeamRecips(await loadTeamRecipients(rooftop.team_id));
   }, [rooftop?.team_id]);
   useEffect(() => {
     setCfg(rooftop?.config ?? null);
+    setSmsMaster(rooftop?.smsEnabled === true);
     setErr("");
     void reloadRecips();
   }, [rooftop, reloadRecips]);
@@ -1128,6 +1132,34 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     setRecipBusy(null);
     if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, email_enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
     onSaved();
+  };
+  // Rooftop SMS master switch.
+  const toggleSmsMaster = async () => {
+    if (!rooftop?.team_id || smsBusy) return;
+    const next = !smsMaster;
+    setSmsMaster(next); setSmsBusy(true); setErr("");
+    const res = await updateRooftopConfig(rooftop.team_id, { sms_enabled: next });
+    setSmsBusy(false);
+    if (!res.ok) { setSmsMaster(!next); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+  // Toggle a recipient's sms_enabled (channel:'sms'). Optimistic.
+  const toggleRecipSms = async (email: string, next: boolean) => {
+    setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, sms_enabled: next } : r)));
+    setRecipBusy(email); setErr("");
+    const res = await toggleRecipientNow({ teamId: rooftop?.team_id, email, enabled: next, channel: "sms" });
+    setRecipBusy(null);
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, sms_enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+  // Save/clear a recipient's phone. Optimistic; reverts on failure.
+  const saveRecipPhone = async (email: string, d: DeptKind, phone: string): Promise<{ ok: boolean; error?: string }> => {
+    const prevPhone = teamRecips.find((r) => r.email === email)?.phone ?? null;
+    setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, phone } : r)));
+    const res = await setRecipientPhoneNow({ teamId: rooftop?.team_id, dept: d, email, phone });
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, phone: prevPhone } : r))); setErr(res.error || "Save failed"); }
+    else onSaved();
+    return res;
   };
   const salesRecips = teamRecips.filter((r) => r.receives_sales);
   const serviceRecips = teamRecips.filter((r) => r.receives_service);
@@ -1209,6 +1241,20 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
               </button>
             </label>
           ))}
+          {/* SMS channel master switch — texts appointment + action-item alerts to recipients with a phone + SMS on. */}
+          <label className="flex items-center justify-between border-b border-border-subtle py-2.5 cursor-pointer">
+            <span className="text-[13px] text-text-primary">SMS notifications <span className="text-[10px] text-text-muted">· texts appointment & action-item alerts</span></span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={smsMaster}
+              disabled={smsBusy}
+              onClick={() => void toggleSmsMaster()}
+              className={`relative h-5 w-9 rounded-full transition-colors ${smsMaster ? "bg-brand-primary" : "bg-border-subtle"} ${smsBusy ? "opacity-60" : ""}`}
+            >
+              <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${smsMaster ? "left-[18px]" : "left-0.5"}`} />
+            </button>
+          </label>
           {err ? <div className="mt-3 text-[12px] text-[#DC2626]">{err}</div> : null}
           <div className="mt-4 text-[11px] leading-relaxed text-text-muted">
             Changes save immediately and gate the cron (digests + transactional sends). Daily/weekly/monthly also need a send-hour; transactional types fire on the poll.
@@ -1228,25 +1274,35 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
               ) : (
                 <ul className="mb-2">
                   {list.map((r) => (
-                    <li key={r.email} className="flex items-center justify-between gap-2 border-b border-border-subtle py-2.5">
-                      <div className="min-w-0">
-                        {r.name ? <div className="truncate text-[13px] text-text-primary">{r.name}</div> : null}
-                        <div className="truncate text-[12px] text-text-muted">{r.email}</div>
-                        {r.receives_sales && r.receives_service ? (
-                          <div className="text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
-                        ) : null}
+                    <li key={r.email} className="border-b border-border-subtle py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          {r.name ? <div className="truncate text-[13px] text-text-primary">{r.name}</div> : null}
+                          <div className="truncate text-[12px] text-text-muted">{r.email}</div>
+                          {r.receives_sales && r.receives_service ? (
+                            <div className="text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={r.email_enabled}
+                          disabled={recipBusy === r.email}
+                          onClick={() => void toggleRecip(r.email, !r.email_enabled)}
+                          title={r.email_enabled ? "Receiving — click to pause (pauses ALL emails to this person)" : "Paused — click to start receiving"}
+                          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.email_enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
+                        >
+                          <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.email_enabled ? "left-[18px]" : "left-0.5"}`} />
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={r.email_enabled}
-                        disabled={recipBusy === r.email}
-                        onClick={() => void toggleRecip(r.email, !r.email_enabled)}
-                        title={r.email_enabled ? "Receiving — click to pause (pauses ALL emails to this person)" : "Paused — click to start receiving"}
-                        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.email_enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
-                      >
-                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.email_enabled ? "left-[18px]" : "left-0.5"}`} />
-                      </button>
+                      {smsMaster ? (
+                        <RecipientSmsControls
+                          recip={r}
+                          busy={recipBusy === r.email}
+                          onSavePhone={(phone) => saveRecipPhone(r.email, d, phone)}
+                          onToggleSms={(next) => void toggleRecipSms(r.email, next)}
+                        />
+                      ) : null}
                     </li>
                   ))}
                 </ul>
@@ -1267,6 +1323,56 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
 
 /* Add a recipient (name + email) to roi_recipients for this rooftop+department.
  * Added paused (email_enabled=false) — the user flips the On toggle to start sending. */
+/* SMS sub-row for a recipient: phone editor (saves on blur/Enter) + an SMS On/Off toggle.
+ * Shown only when the rooftop SMS master switch is on. Enabling SMS requires a saved phone. */
+function RecipientSmsControls({ recip, busy, onSavePhone, onToggleSms }: {
+  recip: TeamRecipient;
+  busy: boolean;
+  onSavePhone: (phone: string) => Promise<{ ok: boolean; error?: string }>;
+  onToggleSms: (next: boolean) => void;
+}) {
+  const [phone, setPhone] = useState(recip.phone ?? "");
+  const [pState, setPState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const smsOn = recip.sms_enabled === true;
+  const hasPhone = !!(recip.phone && recip.phone.trim());
+  const phoneValid = /\+?[\d][\d\s().-]{6,}/.test(phone.trim());
+  const save = async () => {
+    const p = phone.trim();
+    if (p === (recip.phone ?? "")) return; // unchanged
+    if (p && !phoneValid) { setPState("error"); return; }
+    setPState("saving");
+    const r = await onSavePhone(p);
+    setPState(r.ok ? "saved" : "error");
+    if (r.ok) setTimeout(() => setPState("idle"), 1500);
+  };
+  return (
+    <div className="mt-1.5 flex items-center gap-2 pl-0.5">
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted">SMS</span>
+      <input
+        type="tel"
+        value={phone}
+        onChange={(e) => { setPhone(e.target.value); if (pState === "error") setPState("idle"); }}
+        onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
+        onBlur={() => void save()}
+        placeholder="+1 555 123 4567"
+        className={`min-w-0 flex-1 rounded-md border bg-surface-background px-2 py-1 text-[12px] placeholder:text-text-muted focus:outline-none ${pState === "error" ? "border-[#DC2626]" : "border-border-subtle focus:border-brand-primary"}`}
+      />
+      <span className="w-8 shrink-0 text-right text-[10px] text-text-muted">{pState === "saving" ? "…" : pState === "saved" ? "✓" : pState === "error" ? "bad" : ""}</span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={smsOn}
+        disabled={busy || !hasPhone}
+        onClick={() => (hasPhone ? onToggleSms(!smsOn) : setPState("error"))}
+        title={!hasPhone ? "Add a phone first" : smsOn ? "SMS on — click to pause" : "SMS off — click to enable"}
+        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-40 ${smsOn ? "bg-brand-primary" : "bg-border-subtle"}`}
+      >
+        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${smsOn ? "left-[18px]" : "left-0.5"}`} />
+      </button>
+    </div>
+  );
+}
+
 function AddRecipientRow({ teamId, dept, onAdded }: { teamId?: string; dept: DeptKind; onAdded: () => void }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
