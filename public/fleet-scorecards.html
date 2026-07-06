@@ -313,33 +313,39 @@
   }
   function inbTable(d){
     if(!d || !d.intent || !d.intent.length) return "";
-    var tot=d.intent.reduce(function(a,x){return a+x[1];},0)||1;
+    // report.intent is a call-level, top-N distribution — a share breakdown, NOT the lead-distinct
+    // conversation count. Share is taken over the shown intents; "Resolved" is the per-intent
+    // resolution rate (resolved ÷ tagged), exactly as the console's query bars present it.
+    var shown=d.intent.reduce(function(a,x){return a+x[1];},0)||1;
     var body=d.intent.map(function(it){
-      var res=Math.min(it[1], it[2]);
-      return '<tr><td>'+it[0]+'</td><td>'+n(it[1])+'</td><td>'+Math.round(100*it[1]/tot)+'%</td>'+
-        (res>0?'<td class="hd">'+n(res)+'</td>':'<td class="z">–</td>')+'</tr>';
+      var total=it[1], res=Math.min(it[1], it[2]), rate=total?Math.round(100*res/total):0;
+      return '<tr><td>'+it[0]+'</td><td>'+n(total)+'</td><td>'+Math.round(100*total/shown)+'%</td>'+
+        '<td'+(res>0?' class="hd"':' class="z"')+'>'+(total?rate+'%':'–')+
+        '<span style="color:var(--faint);font-weight:400"> ('+res+'/'+total+')</span></td></tr>';
     }).join("");
     var cf=d.callFlow||{};
     return '<div class="h2">📲 '+(STATE.dept==="sales"?"Inbound · call intents &amp; how the AI handles them":"Inbound · service call intents")+' · <span class="win">'+WINLBL[STATE.win]+'</span></div>'+
-      '<div class="card"><table class="mtx"><thead><tr><th>What the customer wanted</th><th>Convos</th><th>Share</th><th>Resolved</th></tr></thead>'+
-      '<tbody>'+body+'</tbody></table>'+
-      '<div class="defs">Intent mix of the <b>'+n(d.conv)+'</b> real inbound conversations. This window the inbound agent also completed <b>'+n(cf.transferred||0)+' transfers</b> to a human'+((cf.transfersFailed)?' (+'+cf.transfersFailed+' failed)':'')+', <b>'+n(cf.callbacks||0)+' callbacks</b>, and <b>'+n(d.booked)+' AI-booked appointments</b>. Resolved = query answered without a human.</div></div>';
+      '<div class="card"><table class="mtx"><thead><tr><th>What the customer wanted</th><th>Conversations</th><th>Share</th><th>Resolved</th></tr></thead>'+
+      '<tbody>'+body+'</tbody>'+
+      '<tfoot><tr><td>Top intents shown</td><td>'+n(shown)+'</td><td>100%</td><td></td></tr></tfoot></table>'+
+      '<div class="defs">Distribution of the <b>top inbound intents</b> and how often the AI resolved each without a live agent (call-level — a share breakdown, so it doesn’t sum to the lead-distinct conversation count). Across this window: <b>'+n(d.conv)+'</b> real conversations · <b>'+n(cf.transferred||0)+'</b> transfers'+((cf.transfersFailed)?' (+'+cf.transfersFailed+' failed)':'')+' · <b>'+n(cf.callbacks||0)+'</b> callbacks · <b>'+n(d.booked)+'</b> AI-booked. <b>Share</b> = of the intents shown; <b>Resolved</b> = handled without a human (resolved ÷ tagged).</div></div>';
   }
   function obTable(d){
     if(!d || (!d.conv && !(d.outcomes&&d.outcomes.length))) return "";
-    var conv=d.conv||1;
-    var pc=function(x){return (Math.round(1000*x/conv)/10)+'%';};
-    // canonical outcome buckets from campaignLeadMappings
+    // report.outcomes = current state of the ENROLLED/worked outbound lead list (campaignLeadMappings),
+    // not a per-conversation split — so share is taken over the worked-lead total, not conversations.
+    var worked=(d.outcomes||[]).reduce(function(a,x){return a+x[1];},0)||1;
+    var pc=function(x){return (Math.round(1000*x/worked)/10)+'%';};
     var rows=(d.outcomes||[]).map(function(o){
       var lbl=o[0], v=o[1];
       var cls = /book/i.test(lbl)?"g": /warm/i.test(lbl)?"v": /transfer/i.test(lbl)?"b": /callback/i.test(lbl)?"v":"";
       return '<tr><td>'+lbl+'</td><td'+(cls?' class="'+cls+'"':'')+'>'+n(v)+'</td><td>'+pc(v)+'</td></tr>';
     }).join("");
-    return '<div class="h2">🚀 Outbound · what happened to the conversations · <span class="win">'+WINLBL[STATE.win]+'</span></div>'+
-      '<div class="card"><table class="mtx"><thead><tr><th>Outcome</th><th>Leads</th><th>Share of convos</th></tr></thead>'+
-      '<tbody>'+(rows||'<tr><td class="z" colspan="3">No outbound outcome data in this window.</td></tr>')+'</tbody>'+
-      '<tfoot><tr><td>Real conversations (spoke / replied)</td><td>'+n(d.conv)+'</td><td>100%</td></tr></tfoot></table>'+
-      '<div class="defs">Outbound = voice + SMS (no per-call intent tag) → shown by <b>outcome</b>. Qualified '+n(d.qual)+' · AI-booked '+n(d.booked)+(d.assisted?' · +'+d.assisted+' AI-assisted (CRM)':'')+'. Buckets from campaign lead outcomes; ties to the funnel.</div></div>';
+    return '<div class="h2">🚀 Outbound · outcome of the worked lead list</div>'+
+      '<div class="card"><table class="mtx"><thead><tr><th>Outcome</th><th>Leads</th><th>Share of worked</th></tr></thead>'+
+      '<tbody>'+(rows||'<tr><td class="z" colspan="3">No outbound outcome data.</td></tr>')+'</tbody>'+
+      '<tfoot><tr><td>Worked / enrolled leads</td><td>'+n(worked)+'</td><td>100%</td></tr></tfoot></table>'+
+      '<div class="defs">Current state of the outbound lead list (campaign outcomes) — totals the worked leads, not just conversations. In the <b>'+WINLBL[STATE.win]+'</b> window this agent had <b>'+n(d.conv)+'</b> real conversations · <b>'+n(d.qual)+'</b> qualified · <b>'+n(d.booked)+'</b> AI-booked'+(d.assisted?' · +'+d.assisted+' AI-assisted (CRM)':'')+'.</div></div>';
   }
   function followUps(ib, ob){
     var all=[];
