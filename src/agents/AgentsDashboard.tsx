@@ -479,6 +479,9 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   const [sheetEntries, setSheetEntries] = useState<SheetEntry[]>([]);
   const [search, setSearch] = useState("");
   const [selectedRooftops, setSelectedRooftops] = useState<Set<string>>(new Set());
+  // Rooftop scorecard modal — opens the canonical Vini scorecard (public/fleet-scorecards.html)
+  // for one rooftop (by team_id) in an overlay. null = closed; team "" = open on the switcher.
+  const [scorecard, setScorecard] = useState<{ team: string; name: string } | null>(null);
   // MRR range filter (inclusive). null on either side means unbounded.
   const [mrrRange, setMrrRange] = useState<{ min: number | null; max: number | null }>({ min: null, max: null });
   // Data-mode toggle. The Vini funnel sheet is the source of truth, so we
@@ -1159,6 +1162,10 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
             </button>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button onClick={() => setScorecard({ team: "", name: "" })}
+               style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #15803d", background: "#15803d", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff" }}>
+              📊 Scorecards →
+            </button>
             <a href="/email-tracker"
                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #4600F2", background: "#4600F2", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
               ✉ Email tracker →
@@ -1398,10 +1405,33 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
             onSort={onSort}
             showRoi={showRoi}
             periodMonths={periodMonths}
+            onOpenScorecard={(team, name) => setScorecard({ team, name })}
           />
         </div>
       </div>
       </>
+      )}
+
+      {scorecard && (
+        <div onClick={() => setScorecard(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: "3vh 2vw" }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ width: "min(1080px,96vw)", height: "94vh", background: "#eef1f4", borderRadius: 14, overflow: "hidden", boxShadow: "0 30px 80px rgba(0,0,0,.4)", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "#111827", color: "#fff", flexShrink: 0 }}>
+              <span style={{ fontWeight: 800, fontSize: 14 }}>📊 {scorecard.name || "Fleet Scorecards"}</span>
+              <span style={{ fontSize: 11, color: "#9ca3af" }}>canonical · matches the Vini console</span>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <a href={"/fleet-scorecards.html" + (scorecard.team ? `?team=${encodeURIComponent(scorecard.team)}` : "")} target="_blank" rel="noopener"
+                  style={{ color: "#fff", fontSize: 12, fontWeight: 600, textDecoration: "none", border: "1px solid #374151", borderRadius: 7, padding: "5px 10px" }}>Open in new tab ↗</a>
+                <button onClick={() => setScorecard(null)}
+                  style={{ background: "transparent", border: "1px solid #374151", color: "#fff", borderRadius: 7, padding: "5px 11px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>✕</button>
+              </div>
+            </div>
+            <iframe title="Rooftop scorecard"
+              src={"/fleet-scorecards.html" + (scorecard.team ? `?team=${encodeURIComponent(scorecard.team)}` : "")}
+              style={{ flex: 1, width: "100%", border: 0 }} />
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1563,7 +1593,7 @@ type RooftopRowData = {
   daily: ({ day: string } & Bucket)[]; total: Bucket;
 };
 
-function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, showRoi, periodMonths }: {
+function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, showRoi, periodMonths, onOpenScorecard }: {
   agent: ActiveAgent;
   rows: RooftopRowData[];
   expanded: Set<string>;
@@ -1573,6 +1603,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, 
   onSort: (label: string) => void;
   showRoi: boolean;       // ROI column hidden in no-sheet mode (no MRR available)
   periodMonths: number;   // pro-rate factor for the ROI denominator
+  onOpenScorecard: (team: string, name: string) => void; // open the rooftop scorecard overlay
 }) {
   const cols = columnsFor(agent);
   // arrow + rooftop label + MRR (+ ROI when shown) + metrics
@@ -1652,7 +1683,11 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, 
                 </td>
                 <td style={{ ...tdStyle, whiteSpace: "normal" }} title={`team_id: ${row.key}`}>
                   <div style={{ fontWeight: 700, color: "#111827" }}>
-                    {row.rooftop}
+                    <span onClick={e => { e.stopPropagation(); onOpenScorecard(row.key, row.rooftop); }}
+                      title="Open rooftop scorecard"
+                      style={{ color: "#1d4ed8", cursor: "pointer", borderBottom: "1px dashed #93c5fd" }}>
+                      {row.rooftop} 📊
+                    </span>
                     <StagePill stage={row.stage} />
                     <span style={{ marginLeft: 8, fontSize: 11, color: "#6b7280", fontWeight: 500 }}>
                       ({row.daily.length} day{row.daily.length === 1 ? "" : "s"})
