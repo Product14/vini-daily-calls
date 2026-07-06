@@ -44,6 +44,7 @@ function fmtInt(v) { return Math.round(num(v)).toLocaleString("en-US"); }
 function money(v) { var x = num(v); if (x >= 1e6) return "$" + (x / 1e6).toFixed(x >= 1e7 ? 0 : 1) + "M"; if (x >= 1e3) return "$" + (x / 1e3).toFixed(0) + "K"; return "$" + Math.round(x).toLocaleString("en-US"); }
 function initial(name) { var s = String(name || "").trim(); return (s ? s[0] : "A").toUpperCase(); }
 function plural(n, one, many) { return num(n) === 1 ? one : (many || one + "s"); }
+function joinAnd(a) { return a.length <= 1 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
 
 // signed "▲27% vs prior" chip
 function deltaChip(pct, opts) {
@@ -78,30 +79,43 @@ function barRow(label, value, maxVal, color) {
     "</tr></table></td></tr></table></td></tr>";
 }
 
+// Bordered white container for a section body — gives every subheading's content a consistent card
+// (feedback #1). The eyebrow heading sits ABOVE it, matching the fleet-scorecard reference.
+function panel(inner, pad) { return '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:' + (pad || "18px 20px") + ';">' + inner + "</td></tr></table>"; }
+
 function eyebrow(title, href, linkLabel) {
   var right = href ? '<td align="right" valign="bottom"><a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" style="font-size:11px;font-weight:700;color:' + BRAND + ';text-decoration:none;">' + esc(linkLabel || "View more") + ' &nbsp;&#8599;</a></td>' : "";
   return '<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 14px;"><tr>' +
     '<td style="font-size:12px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:' + MUTE + ';">' + esc(title) + "</td>" + right + "</tr></table>";
 }
 function btnPrimary(label, href) { return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:' + VIOLET + ';color:#fff;text-decoration:none;font-size:13px;font-weight:700;padding:12px 22px;border-radius:10px;">' + esc(label) + " &nbsp;&#8599;</a>"; }
+// Compact primary button — used in the hero so the CTA never crowds the headline metric on narrow
+// widths (feedback #2); on mobile the hero row stacks it below via the .hero-cta rule.
+function btnPrimarySm(label, href) { return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:' + VIOLET + ';color:#fff;text-decoration:none;font-size:12px;font-weight:700;padding:9px 15px;border-radius:9px;white-space:nowrap;">' + esc(label) + " &nbsp;&#8599;</a>"; }
 function btnLight(label, href) { return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#fff;color:' + BRAND + ';text-decoration:none;font-size:13px;font-weight:800;padding:11px 18px;border-radius:10px;">' + esc(label) + " &nbsp;&#8599;</a>"; }
 
 // clean KPI card (Figma glance tier) — label · big number (+unit) · delta · sub
 function kpiCard(label, big, unit, deltaPct, sub) {
+  // Suppress the "vs prior" chip on a zero metric — a delta off zero is noise (Jul-2026 feedback #3).
+  var isZero = num(String(big).replace(/[^0-9.\-]/g, "")) === 0;
+  var showDelta = !isZero && deltaPct != null && deltaPct !== "";
   return '<td class="col" width="25%" valign="top" style="padding:6px;">' +
     '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:16px 16px;">' +
     '<div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:800;">' + esc(label) + "</div>" +
     '<div style="margin-top:9px;line-height:1;"><span style="font-size:26px;font-weight:900;color:' + INK + ';">' + esc(big) + "</span>" + (unit ? ' <span style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(unit) + "</span>" : "") + "</div>" +
-    (deltaPct != null && deltaPct !== "" ? '<div style="margin-top:11px;">' + deltaChip(deltaPct, { tail: " vs prior" }) + "</div>" : (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:11px;">' + esc(sub) + "</div>" : "")) +
+    (showDelta ? '<div style="margin-top:11px;">' + deltaChip(deltaPct, { tail: " vs prior" }) + "</div>" : (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:11px;">' + esc(sub) + "</div>" : "")) +
     "</td></tr></table></td>";
 }
 
 // one inline "secondary metric" (used in the inbound/outbound big-number rows)
 function miniMetric(label, value, deltaPct, w) {
+  // Same zero-value rule as kpiCard — no "vs prior" chip when the number itself is 0 (feedback #3).
+  var isZero = num(String(value).replace(/[^0-9.\-]/g, "")) === 0;
+  var showDelta = !isZero && deltaPct != null && deltaPct !== "";
   return '<td class="col" width="' + (w || "33%") + '" valign="top" style="padding-right:14px;">' +
     '<div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + esc(label) + "</div>" +
     '<div style="margin-top:6px;line-height:1.1;"><span style="font-size:20px;font-weight:800;color:' + INK + ';">' + esc(value) + "</span></div>" +
-    (deltaPct != null && deltaPct !== "" ? '<div style="margin-top:6px;">' + deltaChip(deltaPct, { tail: "" }) + "</div>" : "") +
+    (showDelta ? '<div style="margin-top:6px;">' + deltaChip(deltaPct, { tail: "" }) + "</div>" : "") +
     "</td>";
 }
 
@@ -264,8 +278,8 @@ function renderDigestHtml(metrics, opts) {
   var heroNum = focus === "conversation" ? convHero : primary.n;
   var heroLabel = focus === "conversation" ? "Conversations handled " + pn : primary.label;
   var heroBtn = focus === "conversation"
-    ? btnPrimary("View conversations", L.conversations || consoleUrl)
-    : btnPrimary("View appointments", L.appointments || consoleUrl);
+    ? btnPrimarySm("View conversations", L.conversations || consoleUrl)
+    : btnPrimarySm("View appointments", L.appointments || consoleUrl);
   // MTD pop-out. appointment-focus → appts this month. conversation-focus → conversations this month
   // (falls back to leads worked), with any appointments shown as a small, demoted secondary so the
   // booking still surfaces without being the headline.
@@ -282,9 +296,9 @@ function renderDigestHtml(metrics, opts) {
     '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:18px;overflow:hidden;"><tr><td style="' + heroBg + 'padding:20px;">' +
     '<table width="100%" cellpadding="0" cellspacing="0"><tr><td style="background:' + CARD + ';border-radius:14px;padding:22px 24px;">' +
     '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
-    '<td valign="middle"><span style="font-size:52px;line-height:1;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(heroNum) + "</span>" +
+    '<td class="col" valign="middle"><span style="font-size:52px;line-height:1;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(heroNum) + "</span>" +
     '<span style="font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';">&nbsp;&nbsp;' + esc(heroLabel) + "</span></td>" +
-    '<td align="right" valign="middle">' + heroBtn + "</td>" +
+    '<td class="col hero-cta" align="right" valign="middle" style="white-space:nowrap;">' + heroBtn + "</td>" +
     "</tr></table>" +
     (heroMTD ? '<div style="margin-top:16px;border-top:1px solid ' + LINE + ';padding-top:14px;">' + heroMTD + "</div>" : "") +
     "</td></tr></table></td></tr></table></td></tr>";
@@ -293,25 +307,33 @@ function renderDigestHtml(metrics, opts) {
   // Secondary metrics: Total leads · Calls handled · Qualified · Booking rate.
   // Spec edge: no appointments → drop the booking-rate (ABR) card, show 3.
   // Three cards: Engaged leads · Calls handled · Qualified. (Booking-rate card removed per Jun-2026 review.)
-  var cards, kpiRow;
+  // "Due action items" glance card — the open (pending) items the team owes a follow-up on; overdue
+  // (past-due) shown as context WHEN available. Elevated to the KPI row per Jul-2026 feedback. Headlines
+  // the OPEN count (actionItemsTotal — always populated) rather than overdue (actionItemsOverdue is not
+  // yet wired in the digest pipeline, so it would read 0), so the card is real, not a hardcoded zero.
+  var openAI = num(m.actionItemsTotal), overdueAI = num(m.actionItemsOverdue);
+  var dueCard = kpiCard("Due action items", fmtInt(openAI), "", null, overdueAI > 0 ? fmtInt(overdueAI) + " overdue" : "");
+  var cards, kpiRow, cardList;
   if (focus === "conversation") {
-    // The funnel as a glance row: Conversations → Leads worked → Qualified → Appointments.
-    // Appointments stay on the card (so a booking still shows) but as the LAST, smallest tier — not the hero.
-    cards =
-      kpiCard("Conversations", fmtInt(convHero), "", d.totalCalls, "") +
-      kpiCard("Leads Worked", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : "") +
-      kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, "") +
-      kpiCard("Appointments", fmtInt(apptsAny), "", null, apptMTD ? fmtInt(apptMTD) + " MTD" : "");
-    kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
+    // Glance funnel: Conversations → Qualified → Appointments → Due action items. ("Leads worked" moves off
+    // the KPI row — it still shows in the inbound section minis — to make room for the due-items card.)
+    cardList = [
+      kpiCard("Conversations", fmtInt(convHero), "", d.totalCalls, ""),
+      kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, ""),
+      kpiCard("Appointments", fmtInt(apptsAny), "", null, apptMTD ? fmtInt(apptMTD) + " MTD" : ""),
+      dueCard,
+    ];
   } else {
-    cards =
-      kpiCard("Leads Attempted", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : "") +
-      kpiCard("Calls", fmtInt(callsHandled), "", d.totalCalls, "") +
-      kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, "");
-    // kpiCard hardcodes width 25% (4-up); 3 cards → widen each to 33%
-    cards = cards.replace(/width="25%"/g, 'width="33%"');
-    kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
+    cardList = [
+      kpiCard("Leads Attempted", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : ""),
+      kpiCard("Calls", fmtInt(callsHandled), "", d.totalCalls, ""),
+      kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, ""),
+      dueCard,
+    ];
   }
+  // kpiCard hardcodes width 25% (4-up); rewrite to an even split for the actual card count.
+  cards = cardList.join("").replace(/width="25%"/g, 'width="' + Math.floor(100 / cardList.length) + '%"');
+  kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
 
   // ── UPSELL banner — WEEKLY/MONTHLY ONLY. The daily report is "just the day's work":
   // no marketing (per the Jun-2026 review). The upsell funnel is handled on the weekly cadence.
@@ -438,7 +460,8 @@ function renderDigestHtml(metrics, opts) {
   // card was removed; booking-rate mini metric dropped along with the KPI card.
   var inChannel = (callIn + smsIn + chatIn) > 0 ? eyebrow("Channel engaged") + channelBar(callIn, smsIn, chatIn) : "";
   var hourCard = function (label, val, mtd) {
-    return '<div style="border:1px solid ' + LINE + ';border-radius:12px;padding:14px 16px;"><div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + label + '</div><div style="font-size:22px;font-weight:800;color:' + INK + ';margin-top:6px;">' + fmtInt(val) + (mtd ? ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + fmtInt(mtd) + " MTD</span>" : "") + "</div></div>";
+    // Borderless (WASH fill) — these tiles sit inside the section panel, so a border would double up.
+    return '<div style="background:' + WASH + ';border-radius:12px;padding:14px 16px;"><div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + label + '</div><div style="font-size:22px;font-weight:800;color:' + INK + ';margin-top:6px;">' + fmtInt(val) + (mtd ? ' <span style="font-size:11px;font-weight:600;color:' + MUTE + ';">' + fmtInt(mtd) + " MTD</span>" : "") + "</div></div>";
   };
   var inHours = (during + after) > 0 ? '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:' + (inChannel ? "18px" : "0") + ';"><tr>' +
     '<td width="50%" valign="top" style="padding-right:6px;">' + hourCard("During Hours", during, duringMTD) + "</td>" +
@@ -461,7 +484,7 @@ function renderDigestHtml(metrics, opts) {
   var qResPct = qTot > 0 ? Math.round((qRes / qTot) * 100) : 0;
   var outCard = function (label, valStr, sub) {
     return '<td class="col" width="33%" valign="top" style="padding:0 6px;">' +
-      '<div style="border:1px solid ' + LINE + ';border-radius:12px;padding:14px 16px;background:' + WASH + ';">' +
+      '<div style="border-radius:12px;padding:14px 16px;background:' + WASH + ';">' +
       '<div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + esc(label) + "</div>" +
       '<div style="font-size:24px;font-weight:900;color:' + INK + ';margin-top:6px;line-height:1;">' + esc(valStr) + "</div>" +
       (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:5px;">' + esc(sub) + "</div>" : "") +
@@ -469,25 +492,61 @@ function renderDigestHtml(metrics, opts) {
   };
   var hasInOutputs = inTransfers > 0 || callbacksArranged > 0 || qTot > 0;
   var inboundOutputs = hasInOutputs ? '<div style="margin-top:22px;">' + eyebrow("What the agent did") +
-    '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
     outCard("Transfers to team", fmtInt(inTransfers), "warm hand-offs") +
     outCard("Callbacks arranged", fmtInt(callbacksArranged), "from requests") +
     outCard("Queries resolved", qTot > 0 ? qResPct + "%" : "—", qTot > 0 ? "of " + fmtInt(qTot) + " asked" : "") +
-    "</tr></table></div>" : "";
+    "</tr></table>", "14px 8px") + "</div>" : "";
+
+  // ── INBOUND INTENTS & OUTCOMES (feedback #6) — the intent mix behind inbound conversations plus a
+  // one-line outcome summary (transfers · callbacks · AI-booked appts · resolution). Mirrors the fleet
+  // scorecard's "call intents & how the AI handles them" table. This was missing for sales inbound: the
+  // resolution story only rendered as a callout on weekly/conversation-focus, so daily appointment-focus
+  // sales showed no intent breakdown at all. Renders whenever we have queries[].
+  var inboundIntents = "";
+  if (queries.length) {
+    var qSorted = queries.slice().sort(function (a, b) { return num(b.total) - num(a.total); });
+    var qSum = qSorted.reduce(function (s, q) { return s + num(q.total); }, 0) || 1;
+    var qh = function (label, align) { return '<td ' + (align ? 'align="' + align + '" ' : "") + 'style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + esc(label) + "</td>"; };
+    var qRows = qSorted.slice(0, 8).map(function (q) {
+      var tot = num(q.total), res = Math.min(num(q.resolved), tot), share = Math.round((tot / qSum) * 100);
+      return '<tr>' +
+        '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:600;color:' + INK + ';">' + esc(q.label) + "</td>" +
+        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:800;color:' + INK + ';white-space:nowrap;">' + fmtInt(tot) + "</td>" +
+        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;color:' + MUTE + ';white-space:nowrap;">' + share + "%</td>" +
+        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:800;color:' + (res > 0 ? POS : FAINT) + ';white-space:nowrap;">' + (res > 0 ? fmtInt(res) : "&#8211;") + "</td></tr>";
+    }).join("");
+    var handledBits = [];
+    if (inTransfers > 0) handledBits.push("<b>" + fmtInt(inTransfers) + " " + plural(inTransfers, "transfer") + "</b> to a human");
+    if (callbacksArranged > 0) handledBits.push("<b>" + fmtInt(callbacksArranged) + " " + plural(callbacksArranged, "callback") + "</b>");
+    if (inAppts > 0) handledBits.push("<b>" + fmtInt(inAppts) + " AI-booked " + plural(inAppts, "appointment") + "</b>");
+    var qDefs = "Intent mix of the <b>" + fmtInt(inboundConv) + "</b> real inbound conversations." +
+      (handledBits.length ? " The agent also completed " + joinAnd(handledBits) + "." : "") +
+      " Resolved = query answered without a human.";
+    inboundIntents = '<div style="margin-top:22px;">' + eyebrow(dept === "sales" ? "Inbound intents · how the AI handled them" : "Inbound service intents") +
+      panel('<table width="100%" cellpadding="0" cellspacing="0">' +
+        "<tr>" + qh("What the customer wanted") + qh("Convos", "right") + qh("Share", "right") + qh("Resolved", "right") + "</tr>" +
+        qRows + "</table>" +
+        '<div style="margin-top:12px;font-size:11px;line-height:1.6;color:' + MUTE + ';">' + qDefs + "</div>", "8px 10px 14px") + "</div>";
+    // The intents table now carries the resolution story, so drop the redundant resolution callout.
+    resCallout = "";
+  }
+
   var inboundSection =
     '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Inbound " + Dept.toLowerCase() + " performance") +
-    '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
     // LEFT — appointment-booked numbers
     '<td class="col" width="50%" valign="top" style="padding-right:16px;">' +
     '<div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(inboundBig.label) + (hasInAppts ? " " + pn : "") + "</div>" +
-    '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(inboundBig.n) + "</span> &nbsp;" + (hasInAppts ? deltaChip(d.appointments) : (focus === "conversation" ? deltaChip(d.totalCalls) : "")) + "</div>" +
+    '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(inboundBig.n) + "</span> &nbsp;" + (inboundBig.n > 0 ? (hasInAppts ? deltaChip(d.appointments) : (focus === "conversation" ? deltaChip(d.totalCalls) : "")) : "") + "</div>" +
     '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
     inboundMinis +
     "</tr></table></td>" +
     // RIGHT — channel engaged + during/after hours
     '<td class="col" width="50%" valign="top">' + (inChannel || inHours ? inChannel + inHours : "&nbsp;") + "</td>" +
-    "</tr></table>" +
+    "</tr></table>") +
     inboundOutputs +
+    inboundIntents +
     resCallout +
     "</td></tr>";
 
@@ -508,10 +567,10 @@ function renderDigestHtml(metrics, opts) {
     var outcomes = arr(m.outcomes).filter(function (o) { return num(o.value) > 0; }), funnel = m.leadFunnel || null, outcomesHtml = "";
     if (outcomes.length) {
       var maxO = outcomes.reduce(function (mx, o) { return Math.max(mx, num(o.value)); }, 0);
-      outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes") + '<div style="font-size:11px;color:' + MUTE + ';margin:-8px 0 8px;">How outbound conversations ended</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table></div>";
+      outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes") + panel('<div style="font-size:11px;color:' + MUTE + ';margin:0 0 10px;">How outbound conversations ended</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
     } else if (funnel) {
       var fr = [["Leads Attempted", funnel.contacted], ["Conversations", funnel.connected], ["Leads Qualified", funnel.qualified], ["Appointments", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
-      outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + '<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table></div>";
+      outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + panel('<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
     }
     // AI-handle callout — share of conversations the agent closed without a transfer
     var transfers = num(m.warmTransfers), transferTotal = num(m.transferTotalCalls);
@@ -522,9 +581,9 @@ function renderDigestHtml(metrics, opts) {
     var handleCallout = calloutBox("✦", "AI handle rate", handleMsg, "lavender");
 
     outboundSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Outbound " + Dept.toLowerCase() + " performance") +
-      '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+      panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       '<td valign="top"><div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(obBig.label) + "</div>" +
-      '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(obBig.n) + "</span> &nbsp;" + deltaChip(d.appointments) + "</div>" +
+      '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(obBig.n) + "</span> &nbsp;" + (obBig.n > 0 ? deltaChip(d.appointments) : "") + "</div>" +
       '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
       miniMetric("Unique reached", fmtInt(m.outboundUniqueReached), d.totalCalls, "34%") +
       miniMetric("Connect rate", Math.round(num(m.outboundConnectRate)) + "%", null, "33%") +
@@ -532,7 +591,7 @@ function renderDigestHtml(metrics, opts) {
       "</tr></table></td>" +
       // VINI agent device card removed per Jun-2026 review.
       "</tr></table>" +
-      ((callOut + smsOut + chatOut) > 0 ? '<div style="margin-top:24px;">' + eyebrow("Channel engaged") + channelBar(callOut, smsOut, chatOut) + "</div>" : "") +
+      ((callOut + smsOut + chatOut) > 0 ? '<div style="margin-top:18px;">' + eyebrow("Channel engaged") + channelBar(callOut, smsOut, chatOut) + "</div>" : "")) +
       outcomesHtml + handleCallout + "</td></tr>";
   }
 
@@ -564,7 +623,7 @@ function renderDigestHtml(metrics, opts) {
 
   // ── document ────────────────────────────────────────────────────────────────
   var __html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    "<style>body{margin:0;}@media only screen and (max-width:600px){.wrap{width:100%!important;border-radius:0!important;}.col{display:block!important;width:100%!important;}.device{padding-left:0!important;padding-top:14px!important;}.upsell-cta{margin-top:16px;}.pad{padding-left:18px!important;padding-right:18px!important;}}</style></head>" +
+    "<style>body{margin:0;}@media only screen and (max-width:600px){.wrap{width:100%!important;border-radius:0!important;}.col{display:block!important;width:100%!important;}.device{padding-left:0!important;padding-top:14px!important;}.upsell-cta{margin-top:16px;}.hero-cta{text-align:left!important;padding-top:16px!important;}.pad{padding-left:18px!important;padding-right:18px!important;}}</style></head>" +
     '<body style="margin:0;background:' + PAGE + ";font-family:" + FONT + ";color:" + INK + ';">' +
     '<table width="100%" cellpadding="0" cellspacing="0" style="background:' + PAGE + ';padding:28px 0;"><tr><td align="center">' +
     '<table class="wrap" width="640" cellpadding="0" cellspacing="0" style="width:640px;max-width:640px;background:' + CARD + ';border-radius:20px;border:1px solid ' + LINE + ';overflow:hidden;">' +
