@@ -571,18 +571,30 @@ function renderDigestSms(opts) {
   var m = opts.metrics || {};
   var url = opts.link || "https://console.spyne.ai/converse-ai/reports";
   var cad = opts.cadence === "weekly" ? "Weekly" : opts.cadence === "monthly" ? "Monthly" : "Daily";
-  var appts = Number(m.appointmentsYesterday) || 0;
-  var conv = Number(m.conversationsReached != null ? m.conversationsReached : m.conversationsHandled) || 0;
-  var qual = Number(m.qualifiedLeads) || 0;
-  var open = Number(m.actionItemsTotal) || 0;
-  var parts = [
-    appts + " appt" + (appts === 1 ? "" : "s"),
-    conv + " conversation" + (conv === 1 ? "" : "s"),
-    qual + " qualified",
-    open + " open action item" + (open === 1 ? "" : "s"),
-  ];
-  var head = (opts.rooftopName ? opts.rooftopName + " · " : "Vini · ") + cad + " report";
-  return head + ":\n" + parts.join(" · ") + "\n" + url;
+  var num = function (v) { return fmtInt(Number(v) || 0); };
+  var n = function (v) { return Number(v) || 0; };
+  // Uses the canonical Vini wordings; pulls the funnel from the same `m` the email reads.
+  var conv = m.conversationsReached != null ? m.conversationsReached : m.conversationsHandled;
+  var qual = n(m.qualifiedLeads);
+  var qualPct = (m.qualifiedPct != null && !isNaN(Number(m.qualifiedPct))) ? " (" + Math.round(Number(m.qualifiedPct)) + "%)" : "";
+  var appts = n(m.appointmentsYesterday);
+  var apptsMtd = n(m.appointmentsYesterdayMTD);
+  var lines = [];
+  lines.push((opts.rooftopName || "Vini") + " — " + cad + " Vini report");
+  lines.push("");
+  // Inbound + outbound reach on one line when we have both.
+  var reach = [];
+  if (m.inboundUniqueLeads != null) reach.push(num(m.inboundUniqueLeads) + " reached");
+  if (m.outboundUniqueReached != null) reach.push(num(m.outboundUniqueReached) + " OB reached");
+  if (reach.length) lines.push("Leads: " + reach.join(" · "));
+  lines.push("Real conversations: " + num(conv));
+  lines.push("Qualified leads: " + num(qual) + qualPct);
+  lines.push("Appointments (AI-booked): " + num(appts) + (apptsMtd ? " · " + num(apptsMtd) + " MTD" : ""));
+  if (m.warmTransfers != null) lines.push("Hand-offs to team: " + num(m.warmTransfers));
+  lines.push("Open action items: " + num(m.actionItemsTotal));
+  lines.push("");
+  lines.push("Full report: " + url);
+  return lines.join("\n");
 }
 
 module.exports = {
