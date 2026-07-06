@@ -27,6 +27,8 @@ const emailValue = require("./emailValue.cjs");
 // SMS channel — the Twilio companion to sendMail(). Gated per rooftop by roi_rooftop_config.sms_enabled
 // and per recipient by roi_recipients.sms_enabled + phone. Its own dedupe ledger (roi_event_sms).
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
+// Per-recipient subscription matrix + role-tiered ("assigned salesperson → parent") routing.
+const { isSubscribed, pickTieredRecipients } = require("./subscriptions.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -83,6 +85,22 @@ function fmtSched(iso, tz) {
     const tp = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: z }).format(d);
     return `${dp} · ${tp}`;
   } catch { return ""; }
+}
+// A customer-originated SMS (vs an AI/agent outbound) — the anchor for "the customer responded".
+const isInboundSms = (mm) => !!mm && (mm.direction === "in" || mm.direction === "inbound" || mm.authorType === "human");
+// Split a lead's SMS messages into SESSIONS: a new session begins after a lull of > gapMin minutes
+// of silence. Returns [{ startAt, _lastT, msgs, hasReply }] in order. Powers the 'session' cadence.
+function smsSessions(msgs, gapMin) {
+  const sorted = (msgs || []).filter((x) => x && x.at).slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const out = [];
+  for (const mm of sorted) {
+    const t = new Date(mm.at).getTime();
+    if (isNaN(t)) continue;
+    const cur = out[out.length - 1];
+    if (!cur || (t - cur._lastT) > gapMin * 60000) out.push({ startAt: mm.at, _lastT: t, msgs: [mm], hasReply: isInboundSms(mm) });
+    else { cur._lastT = t; cur.msgs.push(mm); cur.hasReply = cur.hasReply || isInboundSms(mm); }
+  }
+  return out;
 }
 // The reporting-vini read API now requires a credential (it returns per-customer PII). Forward the
 // trusted service secret (preferred) or the Spyne token so these server-to-server calls authorize;
@@ -164,7 +182,7 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -182,12 +200,16 @@ async function runOnce() {
     const tz = c.timezone || "America/New_York"; // dealer-local zone for windows + displayed times
     const dept = L.department; // 'sales' | 'service'
     const recs = recOf.get(L.team_id) ?? [];
-    const emails = recs.filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
-    // SMS recipients: opted-in, has a phone, and receives this dept. Dept targeting reuses the
-    // same receives_sales / receives_service flags as email. Gated overall by rooftop sms_enabled.
-    const smsRecipients = c.sms_enabled
-      ? recs.filter((r) => r.sms_enabled && r.phone && (dept === "sales" ? r.receives_sales : r.receives_service)).map((r) => ({ phone: r.phone, role: r.role }))
-      : [];
+    const deptOk = (r) => (dept === "sales" ? r.receives_sales : r.receives_service);
+    // Per-TYPE recipient selection: dept + per-channel master + the subscription matrix, then
+    // role-tiered (salesperson → bdc → gm; whole rooftop when no roles set). Transactional events
+    // are lead-ish, so they route to the tier; a rooftop with no roles behaves exactly as before.
+    const emailsForType = (type) =>
+      pickTieredRecipients(recs.filter((r) => deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
+    const smsForType = (type) =>
+      c.sms_enabled
+        ? pickTieredRecipients(recs.filter((r) => deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
+        : [];
     const base = { team_id: L.team_id, enterprise_id: c.enterprise_id, department: dept };
     const dry = DRY_RUN || L.dry_run === true;
     const L_ = links(L.team_id, c.enterprise_id, dept);
@@ -221,38 +243,96 @@ async function runOnce() {
         // CALLS → instant. One email per call as soon as the poll sees it (channel=call, the default).
         const actionableOnly = (c.post_conversation_mode || "actionable") === "actionable";
         const j = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&channel=call&minutes=${POLL_MINUTES}&limit=50${actionableOnly ? "&actionableOnly=1" : ""}`);
+        // Roll multiple same-day calls for ONE lead into a single email — a lead phoned three times
+        // in a day shouldn't generate three alerts (~30% of call emails were this redundancy). The
+        // dedupe key carries an outcome TIER (plain=0, actionItem=1, appointment=2), so the first
+        // real call fires once and a LATER call that books an appointment still re-fires as an
+        // upgrade — but repeat plain calls to the same lead/day are suppressed. Set
+        // EVENT_CALL_ROLLUP=false to fall back to one-email-per-conversation.
+        const callRollup = process.env.EVENT_CALL_ROLLUP !== "false";
+        const callDay = localDateISO(tz);
+        const bestByLead = new Map();
         for (const cv of j.conversations || []) {
           // outbound: only when the customer responded (config) — proxy: actionable signal present.
           if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
-          jobs.push({ type: "post_conversation", key: cv.id,
-            subject: `Conversation summary — ${name}`,
+          // spam gate — a call the model flagged as spam is never a real conversation. No-op until
+          // the conversations feed surfaces `spam`; harmless when absent.
+          if (cv.spam === true || cv.spam === "Yes") continue;
+          if (!callRollup) {
+            jobs.push({ type: "post_conversation", key: cv.id,
+              subject: `Conversation summary — ${name}`,
+              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
+            continue;
+          }
+          const k = cv.leadId || cv.id;
+          const rank = cv.appointmentScheduled ? 2 : cv.hasActionItem ? 1 : 0;
+          const prev = bestByLead.get(k);
+          // keep the highest-outcome call for the lead; tie-break on the most recent.
+          if (!prev || rank > prev.rank || (rank === prev.rank && String(cv.at || "") > String(prev.cv.at || ""))) bestByLead.set(k, { cv, rank });
+        }
+        for (const [k, { cv, rank }] of bestByLead) {
+          jobs.push({ type: "post_conversation", key: `call:lead:${k}:${callDay}:t${rank}`,
+            subject: `Conversation summary — ${cv.customer || name}`,
             html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
         }
-        // SMS → END OF DAY. The thread keeps growing all day, so we DON'T email per message. Once the
-        // dealer-local hour hits SMS_EOD_HOUR we pull the day's SMS (since local midnight) and send ONE
-        // summary per lead, carrying the full thread. SMS isn't dept-split, so this runs once per team
-        // and the dedupe key is dept-agnostic (`sms:lead:day`) — whichever dept-pass claims it wins.
+        // SMS post-conversation — CADENCE is per rooftop (roi_rooftop_config.sms_post_conversation_cadence):
+        //   'daily'  (default) — ONE end-of-day digest per lead/day; a late same-day reply folds in, the
+        //                        next day starts a fresh email. Cheapest, least immediate.
+        //   'session'          — split a lead's thread on lulls > EVENT_SMS_SESSION_GAP_MIN (default 180m);
+        //                        each SETTLED burst that had a customer reply is its own email. Timelier.
+        //   'first_plus_digest'— an instant push on the lead's FIRST reply of the day, plus the EOD digest.
+        // Every key is dept-agnostic + day-scoped, so multi-day flows always start a new email and
+        // roi_event_(emails|sms) dedupe holds across passes. SMS is processed once per team per pass.
+        const smsCadence = c.sms_post_conversation_cadence || "daily";
+        const gapMin = Number(process.env.EVENT_SMS_SESSION_GAP_MIN || 180);
         const { h, m } = localHourMin(tz);
-        if (h >= SMS_EOD_HOUR && !smsDoneTeams.has(L.team_id)) {
+        const isEod = h >= SMS_EOD_HOUR;
+        const day = localDateISO(tz);
+        // 'daily' only needs to work at EOD; the timelier modes run every pass (dedupe de-dups).
+        const runSmsNow = (smsCadence === "daily" ? isEod : true) && !smsDoneTeams.has(L.team_id);
+        if (runSmsNow) {
           smsDoneTeams.add(L.team_id);
-          const day = localDateISO(tz);
           const sinceMin = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
           const js = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=sms&minutes=${sinceMin}&limit=200`);
-          const byLead = new Map(); // group a lead's threads into ONE email
+          const byLead = new Map(); // one lead's SMS threads for the day
           for (const cv of js.conversations || []) {
-            // No customer reply all day → nothing to report (an all-AI outbound blast isn't a "conversation").
+            // No customer reply → nothing to report (an all-AI outbound blast isn't a "conversation").
             if (!cv.hasReply && c.post_conversation_outbound_requires_reply !== false) continue;
             const k = cv.leadId || cv.id;
             const g = byLead.get(k) || []; g.push(cv); byLead.set(k, g);
           }
+          const nowT = Date.now();
+          // Build one SMS post_conversation job from a slice of a lead's messages.
+          const pushSms = (seed, msgs, key, label) => {
+            const sms = msgs.slice(-12);
+            const cv = { ...seed, channel: "sms", sms, smsFailed: sms.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length };
+            jobs.push({ type: "post_conversation", key,
+              subject: `SMS ${label} — ${seed.customer || name}`,
+              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }),
+              smsBody: T.renderPostConversationSms({ rooftopName: name, dept, conversation: cv, links: L_ }) });
+          };
           for (const [k, threads] of byLead) {
             threads.sort((a, b) => String(a.at).localeCompare(String(b.at)));
             const seed = threads[threads.length - 1];
-            const sms = threads.flatMap((t) => t.sms || []).sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(-12);
-            const cv = { ...seed, channel: "sms", sms, smsFailed: sms.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length };
-            jobs.push({ type: "post_conversation", key: `sms:${k}:${day}`,
-              subject: `SMS summary — ${seed.customer || name}`,
-              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
+            const allMsgs = threads.flatMap((t) => t.sms || []).filter((x) => x && x.at).sort((a, b) => String(a.at).localeCompare(String(b.at)));
+            if (smsCadence === "session") {
+              // one email per SETTLED burst (quiet for > gapMin) that had a customer reply; at EOD,
+              // flush any still-open burst so nothing is dropped.
+              for (const s of smsSessions(allMsgs, gapMin)) {
+                if (!s.hasReply) continue;
+                if ((nowT - s._lastT) <= gapMin * 60000 && !isEod) continue; // still active → wait
+                pushSms(seed, s.msgs, `sms:${k}:${day}:s${s.startAt}`, "conversation");
+              }
+            } else if (smsCadence === "first_plus_digest") {
+              // instant: the lead's FIRST customer reply of the day (fires the pass we first see it).
+              const firstIdx = allMsgs.findIndex(isInboundSms);
+              if (firstIdx >= 0) pushSms(seed, allMsgs.slice(0, firstIdx + 1), `sms:${k}:${day}:first`, "reply");
+              // digest: the full day's thread, at EOD only.
+              if (isEod) pushSms(seed, allMsgs, `sms:${k}:${day}:digest`, "summary");
+            } else {
+              // 'daily' (default): one digest per lead/day.
+              pushSms(seed, allMsgs, `sms:${k}:${day}`, "summary");
+            }
           }
         }
       }
@@ -318,6 +398,8 @@ async function runOnce() {
       try {
         id = await claim({ ...base, email_type: job.type }, job.key);
         if (!id) { out.skipped_dupe++; continue; } // already handled in a prior pass
+        // Recipients are chosen PER TYPE (subscription matrix + role tier), not per rooftop.
+        const emails = emailsForType(job.type);
         // Inject the open-tracking pixel now that we have the row id, so the stored
         // HTML and the sent bytes both carry it (id keys the open back to this row).
         const html = withPixel(job.html, id);
@@ -332,18 +414,20 @@ async function runOnce() {
       } catch (e) { out.errors++; if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
     }
 
-    // ── SMS channel — same events, texted to the rooftop's opted-in phones ──────
-    // Only SMS-able job types (those carrying smsBody: post_appointment, action_item,
-    // action_item_overdue). Independent dedupe (roi_event_sms). We claim ONLY when a real
-    // send will happen — a dry-run neither claims nor sends, so enabling SMS later isn't
-    // pre-empted by a suppressed row.
-    if (c.sms_enabled && smsRecipients.length) {
+    // ── SMS channel — same events, texted to the type's subscribed + role-tiered phones ──
+    // Only SMS-able job types (those carrying smsBody). Recipients are chosen PER TYPE
+    // (subscription matrix + role tier). Independent dedupe (roi_event_sms). We claim ONLY when a
+    // real send will happen — a dry-run neither claims nor sends, so enabling SMS later isn't
+    // pre-empted by a suppressed row. post_conversation SMS rides its EOD batch (jobs only exist at EOD).
+    if (c.sms_enabled) {
       // SMS is its OWN channel — gated by SMS_DRY_RUN, NOT the email pipeline's global DRY_RUN
       // (emails may be deliberately held in dry-run while SMS is live). Per-dealer dry_run still
       // holds both channels for that rooftop.
       const smsDry = SMS_DRY_RUN || L.dry_run === true;
       for (const job of jobs) {
-        if (!job.smsBody) continue; // email-only types (post_conversation)
+        if (!job.smsBody) continue; // email-only jobs (e.g. instant call summaries)
+        const smsRecipients = smsForType(job.type);
+        if (!smsRecipients.length) continue; // nobody subscribed to this type on SMS
         if (smsDry) { out.sms_suppressed++; continue; }
         let sid;
         try {

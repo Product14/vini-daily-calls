@@ -533,6 +533,58 @@ function renderActionItemOverdueSms(opts) {
   return lines.join("\n");
 }
 
+/**
+ * Post-conversation SMS — one terse line about a call/text + the strongest outcome + a link.
+ * opts: { rooftopName, dept, conversation:{customer,channel,direction,summary,intent,
+ *   appointmentScheduled,actionItems}, links }
+ */
+function renderPostConversationSms(opts) {
+  opts = opts || {};
+  var c = opts.conversation || {};
+  var L = opts.links || {};
+  var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
+  var isSms = c.channel === "sms";
+  var who = c.customer || "a customer";
+  var dir = c.direction === "outbound" ? "Outbound" : "Inbound";
+  var summary = String(c.summary || "").replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").replace(/\s+/g, " ").trim();
+  var lines = [];
+  lines.push("Vini" + (opts.rooftopName ? " · " + opts.rooftopName : ""));
+  lines.push((isSms ? "Text" : "Call") + " · " + dir + " with " + who +
+    (c.intent ? " — " + humanizeIntent(c.intent) : ""));
+  // Lead with the strongest outcome; else a short summary snippet.
+  if (c.appointmentScheduled) lines.push("→ Appointment booked");
+  else if (c.actionItems && c.actionItems.length) lines.push("→ " + c.actionItems.length + " action item" + (c.actionItems.length === 1 ? "" : "s"));
+  if (summary) lines.push(summary.length > 140 ? summary.slice(0, 137) + "…" : summary);
+  lines.push((isSms ? "Open thread: " : "Review: ") + url);
+  return lines.join("\n");
+}
+
+/**
+ * Digest SMS — terse headline summary of the daily/weekly/monthly report + a link. The full
+ * report stays in the email; SMS is the at-a-glance nudge.
+ * opts: { cadence:'daily'|'weekly'|'monthly', rooftopName, dept, metrics, link }
+ * metrics uses the digest `m` field names (appointmentsYesterday, conversationsReached,
+ * qualifiedLeads, actionItemsTotal).
+ */
+function renderDigestSms(opts) {
+  opts = opts || {};
+  var m = opts.metrics || {};
+  var url = opts.link || "https://console.spyne.ai/converse-ai/reports";
+  var cad = opts.cadence === "weekly" ? "Weekly" : opts.cadence === "monthly" ? "Monthly" : "Daily";
+  var appts = Number(m.appointmentsYesterday) || 0;
+  var conv = Number(m.conversationsReached != null ? m.conversationsReached : m.conversationsHandled) || 0;
+  var qual = Number(m.qualifiedLeads) || 0;
+  var open = Number(m.actionItemsTotal) || 0;
+  var parts = [
+    appts + " appt" + (appts === 1 ? "" : "s"),
+    conv + " conversation" + (conv === 1 ? "" : "s"),
+    qual + " qualified",
+    open + " open action item" + (open === 1 ? "" : "s"),
+  ];
+  var head = (opts.rooftopName ? opts.rooftopName + " · " : "Vini · ") + cad + " report";
+  return head + ":\n" + parts.join(" · ") + "\n" + url;
+}
+
 module.exports = {
   renderPostAppointment: renderPostAppointment,
   renderPostConversation: renderPostConversation,
@@ -541,5 +593,7 @@ module.exports = {
   renderActionItemSms: renderActionItemSms,
   renderPostAppointmentSms: renderPostAppointmentSms,
   renderActionItemOverdueSms: renderActionItemOverdueSms,
+  renderPostConversationSms: renderPostConversationSms,
+  renderDigestSms: renderDigestSms,
   _shell: shell,
 };

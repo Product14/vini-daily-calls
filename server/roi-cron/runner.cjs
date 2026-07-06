@@ -24,6 +24,44 @@ const { createClient } = require("@supabase/supabase-js");
 const { renderDigestHtml } = require("../../src/email/digestTemplate.cjs");
 // Anti-churn value gate — never email a no-value digest unless overridden (DANGER).
 const emailValue = require("./emailValue.cjs");
+// Terse digest SMS renderer (companion to the rich email) + the Twilio sender.
+const T = require("../../src/email/transactionalTemplates.cjs");
+const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
+// Per-recipient subscription matrix (who gets which type on which channel).
+const { isSubscribed } = require("./subscriptions.cjs");
+
+// Digest recipients for a channel, filtered by dept + per-channel master + the subscription matrix.
+// Digests are rooftop summaries → NO role tiering (everyone subscribed gets them).
+function subscribedEmails(recips, dept, type) {
+  return (recips ?? [])
+    .filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
+    .map((r) => r.email);
+}
+function subscribedSmsRecips(recips, dept, type, rooftopSmsEnabled) {
+  if (!rooftopSmsEnabled) return [];
+  return (recips ?? [])
+    .filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))
+    .map((r) => ({ phone: r.phone, role: r.role }));
+}
+// Send a digest SMS with its own dedupe (roi_event_sms, one per team+dept+cadence+day). Never
+// throws to the caller — a digest SMS failure must not break the email path.
+async function sendDigestSms(sbc, base, cadence, localDate, smsRecips, body) {
+  const eventKey = `${cadence}:${base.department}:${localDate}`;
+  try {
+    const { data, error } = await sbc.from("roi_event_sms").insert({ ...base, email_type: cadence, event_key: eventKey, status: "queued" }).select("id");
+    if (error) { if ((error.code || "") === "23505") return { dupe: true }; throw error; }
+    const id = data && data[0] ? data[0].id : null;
+    const results = [];
+    for (const r of smsRecips) {
+      try { const msid = await sendSms(r.phone, body, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
+      catch (e) { results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) }); }
+    }
+    const anySent = results.some((x) => x.sent);
+    const firstSid = (results.find((x) => x.sid) || {}).sid || null;
+    await sbc.from("roi_event_sms").update({ status: anySent ? "sent" : "error", reason: anySent ? null : "all_recipients_failed", body, message_sid: firstSid, sent_at: anySent ? new Date().toISOString() : null, recipients: results }).eq("id", id);
+    return { sent: anySent };
+  } catch (e) { console.warn("[roi-cron] digest sms skipped:", String(e).slice(0, 140)); return { error: true }; }
+}
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -488,8 +526,8 @@ async function runOnce() {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
     const e = liveRes.error || cfgRes.error || recRes.error;
@@ -539,8 +577,8 @@ async function runOnce() {
       // already sent today?
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
       if (done && !FORCE_RESEND) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already sent for ${w.localDate}`); return; }
-      // recipients (step 1 finalized) for this dept
-      const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      // recipients (step 1 finalized) for this dept — email filtered by the subscription matrix.
+      const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); return; }
       // step 2 — fetch via embedding (daily window + MTD window) + action items, store queued
       const day = await getMetrics(L.team_id, L.department, w, "day");
@@ -590,6 +628,13 @@ async function runOnce() {
       // re-render (and the SPA preview) reproduce the exact email.
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, "daily");
+      // Digest SMS — terse headline + report link to subscribers with a phone (opt-in per type).
+      // Runs BEFORE the email dry gate so held emails don't block SMS; own SMS_DRY_RUN + dedupe.
+      const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, "daily", c && c.sms_enabled);
+      if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true)) {
+        const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
+        await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, "daily", w.localDate, smsRecips, T.renderDigestSms({ cadence: "daily", rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+      }
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
       // SEND
@@ -638,7 +683,7 @@ async function backfill(start, end) {
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template,digest_focus"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
@@ -652,7 +697,7 @@ async function backfill(start, end) {
   async function worker(L) {
     const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York";
     const name = c?.rooftop_name || L.team_id;
-    const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+    const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
     for (const day of days) {
       const w = windowsForDate(day, tz);
       const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: day, dealer_timezone: tz, trigger: "backfill" };
@@ -838,7 +883,7 @@ async function generateAndSendNow(opts) {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template,digest_focus"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
@@ -865,7 +910,7 @@ async function generateAndSendNow(opts) {
     };
     const note = (status, extra) => out.details.push({ team: L.team_id, dept: L.department, name, status, ...(extra || {}) });
     try {
-      const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing", subject }); out.no_recipients++; note("no_recipients"); return; }
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
@@ -948,8 +993,8 @@ async function runCadence(cadence) {
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,${enabledCol}`),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled"),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,${enabledCol}`),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
@@ -974,7 +1019,7 @@ async function runCadence(cadence) {
     try {
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
       if (done) { out.already_sent++; return; }
-      const emails = (recOf.get(L.team_id) ?? []).filter((r) => (L.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; return; }
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
@@ -994,6 +1039,13 @@ async function runCadence(cadence) {
       try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
+      // Digest SMS (weekly/monthly) — terse summary to subscribers with a phone. Before the email
+      // dry gate so held emails don't block SMS; own SMS_DRY_RUN + dedupe.
+      const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, cadence, c && c.sms_enabled);
+      if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true)) {
+        const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
+        await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+      }
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; return; }
       const sentAt = new Date().toISOString();

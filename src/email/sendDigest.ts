@@ -19,14 +19,14 @@ export type SendDigestOpts = {
 /** Add a recipient to roi_recipients for a rooftop+department (email_enabled + receives_<dept>=true).
  *  Also carries the SMS-channel fields (phone / smsEnabled) — this same endpoint updates an existing
  *  recipient by email, so it doubles as "set this person's phone / flip their SMS opt-in". */
-export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; email: string; name?: string; emailEnabled?: boolean; phone?: string; smsEnabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; email: string; name?: string; emailEnabled?: boolean; phone?: string; smsEnabled?: boolean; role?: "salesperson" | "bdc" | "gm" | null }): Promise<{ ok: boolean; error?: string }> {
   const email = String(opts.email || "").trim();
   if (!/\S+@\S+\.\S+/.test(email)) return { ok: false, error: "Enter a valid email." };
   try {
     const res = await fetch("/api/recipients", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled, phone: opts.phone, smsEnabled: opts.smsEnabled }),
+      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled, phone: opts.phone, smsEnabled: opts.smsEnabled, role: opts.role }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Add failed (HTTP ${res.status})` };
@@ -76,6 +76,14 @@ export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabl
 /** Set (or clear) a recipient's phone number for the SMS channel. */
 export const setRecipientPhoneNow = (opts: { teamId?: string; dept?: DeptKind; email: string; phone: string }) =>
   addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, phone: opts.phone });
+
+/** Set (or clear) a recipient's role (salesperson|bdc|gm|null) for role-tiered transactional routing. */
+export const setRecipientRoleNow = (opts: { teamId?: string; dept?: DeptKind; email: string; role: "salesperson" | "bdc" | "gm" | null }) =>
+  addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, role: opts.role });
+
+/** Set ONE cell of a recipient's subscription matrix (type × channel). */
+export const setRecipientSubscriptionNow = (opts: { teamId?: string; email: string; type: string; channel: "email" | "sms"; enabled: boolean }) =>
+  postJson("/api/recipients/subscription", { teamId: opts.teamId, email: opts.email, type: opts.type, channel: opts.channel, enabled: opts.enabled });
 
 /** Update a rooftop's send hour / minute / timezone, or the SMS master switch (sms_enabled). */
 export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean }) =>

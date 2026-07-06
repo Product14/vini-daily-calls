@@ -2665,10 +2665,11 @@ app.get("/api/email/track-open", async (req, res) => {
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
 app.post("/api/recipients", async (req, res) => {
   try {
-    const { teamId, department, email, name, emailEnabled, phone, smsEnabled } = req.body ?? {};
+    const { teamId, department, email, name, emailEnabled, phone, smsEnabled, role } = req.body ?? {};
     const dept = department === "service" ? "service" : "sales";
     const addr = String(email || "").trim();
     if (!teamId || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId + valid email required" });
+    if (role !== undefined && role !== null && !["salesperson", "bdc", "gm"].includes(role)) return res.status(400).json({ error: "role must be salesperson|bdc|gm|null" });
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
@@ -2689,6 +2690,7 @@ app.post("/api/recipients", async (req, res) => {
       if (smsEnabled && !patch.phone && phone === undefined) return res.status(400).json({ error: "add a phone before enabling SMS" });
       patch.sms_enabled = smsEnabled;
     }
+    if (role !== undefined) patch.role = role || null; // '' / null clears the role (rooftop-wide fallback)
     const q = existing
       ? sb.from("roi_recipients").update(patch).eq("id", existing.id)
       : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: name || null, ...patch });
@@ -2723,6 +2725,40 @@ app.post("/api/recipients/toggle", async (req, res) => {
   } catch (err) {
     console.error("POST /api/recipients/toggle error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "toggle failed" });
+  }
+});
+
+// ── Set ONE cell of a recipient's subscription matrix (type × channel) ───────
+// body { teamId, email, type, channel, enabled }. Merges into roi_recipients.subscriptions
+// (read-modify-write). Enabling SMS requires a phone on file (same guard as the master switch).
+const SUB_TYPES = new Set([
+  "daily", "weekly", "monthly",
+  "post_appointment", "post_conversation", "action_item", "action_item_overdue",
+]);
+app.post("/api/recipients/subscription", async (req, res) => {
+  try {
+    const { teamId, email, type, channel, enabled } = req.body ?? {};
+    const addr = String(email || "").trim();
+    if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
+    if (!SUB_TYPES.has(type)) return res.status(400).json({ error: "invalid type" });
+    if (channel !== "email" && channel !== "sms") return res.status(400).json({ error: "channel must be email|sms" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data: row, error: selErr } = await sb.from("roi_recipients")
+      .select("id,subscriptions,phone").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+    if (selErr) return res.status(500).json({ error: selErr.message });
+    if (!row) return res.status(404).json({ error: "recipient not found" });
+    if (channel === "sms" && enabled && !row.phone) return res.status(400).json({ error: "add a phone before enabling SMS" });
+    const subs = (row.subscriptions && typeof row.subscriptions === "object") ? { ...row.subscriptions } : {};
+    subs[type] = { ...(subs[type] || {}), [channel]: !!enabled };
+    const { error } = await sb.from("roi_recipients").update({ subscriptions: subs }).eq("id", row.id);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, email: addr, type, channel, enabled: !!enabled });
+  } catch (err) {
+    console.error("POST /api/recipients/subscription error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "subscription update failed" });
   }
 });
 

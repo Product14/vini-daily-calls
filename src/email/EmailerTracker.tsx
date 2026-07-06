@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   NOT_SENT_REASON_CTA,
@@ -7,19 +7,22 @@ import {
   reasonBreakdown,
   EMAIL_TYPES,
   TRANSACTIONAL_TYPES,
+  SUBSCRIPTION_TYPES,
+  isSubscribed,
   type Cadence,
   type DeptKind,
   type NotSentReason,
   type RooftopRow,
   type RooftopConfig,
   type EmailTypeKey,
+  type SubType,
   type SendCell,
 } from "./mockData";
 import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, loadTeamRecipients, type EventCounts, type EventEmailRow, type TeamRecipient } from "./dataSource";
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
-import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, setRecipientRoleNow, setRecipientSubscriptionNow } from "./sendDigest";
 
 export function EmailerTracker() {
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -1161,6 +1164,27 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     else onSaved();
     return res;
   };
+  // Set a recipient's role (salesperson|bdc|gm|null) — role-tiered transactional fallback. Optimistic.
+  const setRole = async (email: string, d: DeptKind, role: "salesperson" | "bdc" | "gm" | null) => {
+    const prev = teamRecips.find((r) => r.email === email)?.role ?? null;
+    setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, role } : r)));
+    setRecipBusy(email); setErr("");
+    const res = await setRecipientRoleNow({ teamId: rooftop?.team_id, dept: d, email, role });
+    setRecipBusy(null);
+    if (!res.ok) { setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, role: prev } : r))); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+  // Toggle one subscription cell (type × channel). Optimistic merge into the recipient's map.
+  const setSub = async (email: string, type: string, channel: "email" | "sms", enabled: boolean) => {
+    const before = teamRecips.find((r) => r.email === email)?.subscriptions ?? null;
+    setTeamRecips((p) => p.map((r) => (r.email === email
+      ? { ...r, subscriptions: { ...(r.subscriptions || {}), [type]: { ...((r.subscriptions || {})[type as keyof typeof r.subscriptions] || {}), [channel]: enabled } } }
+      : r)));
+    setErr("");
+    const res = await setRecipientSubscriptionNow({ teamId: rooftop?.team_id, email, type, channel, enabled });
+    if (!res.ok) { setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, subscriptions: before } : r))); setErr(res.error || "Save failed"); }
+    else onSaved();
+  };
   const salesRecips = teamRecips.filter((r) => r.receives_sales);
   const serviceRecips = teamRecips.filter((r) => r.receives_service);
 
@@ -1283,17 +1307,32 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                             <div className="text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
                           ) : null}
                         </div>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={r.email_enabled}
-                          disabled={recipBusy === r.email}
-                          onClick={() => void toggleRecip(r.email, !r.email_enabled)}
-                          title={r.email_enabled ? "Receiving — click to pause (pauses ALL emails to this person)" : "Paused — click to start receiving"}
-                          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.email_enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
-                        >
-                          <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.email_enabled ? "left-[18px]" : "left-0.5"}`} />
-                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {/* Role — drives the salesperson → BDC → GM fallback for transactional alerts. */}
+                          <select
+                            value={r.role ?? ""}
+                            disabled={recipBusy === r.email}
+                            onChange={(e) => void setRole(r.email, d, (e.target.value || null) as "salesperson" | "bdc" | "gm" | null)}
+                            title="Role for transactional routing (salesperson → BDC → GM fallback)"
+                            className="rounded-md border border-border-subtle bg-surface-background px-1.5 py-1 text-[10px] text-text-secondary focus:border-brand-primary focus:outline-none"
+                          >
+                            <option value="">No role</option>
+                            <option value="salesperson">Salesperson</option>
+                            <option value="bdc">BDC</option>
+                            <option value="gm">GM</option>
+                          </select>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={r.email_enabled}
+                            disabled={recipBusy === r.email}
+                            onClick={() => void toggleRecip(r.email, !r.email_enabled)}
+                            title={r.email_enabled ? "Receiving — click to pause (pauses ALL emails to this person)" : "Paused — click to start receiving"}
+                            className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${r.email_enabled ? "bg-brand-primary" : "bg-border-subtle"} ${recipBusy === r.email ? "opacity-60" : ""}`}
+                          >
+                            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${r.email_enabled ? "left-[18px]" : "left-0.5"}`} />
+                          </button>
+                        </div>
                       </div>
                       {smsMaster ? (
                         <RecipientSmsControls
@@ -1303,6 +1342,13 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                           onToggleSms={(next) => void toggleRecipSms(r.email, next)}
                         />
                       ) : null}
+                      {/* Per-type subscription matrix (email + optional SMS) — collapsible. */}
+                      <RecipientSubscriptions
+                        recip={r}
+                        smsMaster={smsMaster}
+                        disabled={recipBusy === r.email}
+                        onSetSub={(type, channel, enabled) => void setSub(r.email, type, channel, enabled)}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -1311,13 +1357,64 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
             </div>
           ))}
           <div className="mt-3 text-[11px] leading-relaxed text-text-muted">
-            Sales and Service lists are independent — add different people to each. The On/Off toggle is
-            per person and pauses ALL of their emails (both departments). New recipients are added paused.
+            Sales and Service lists are independent — add different people to each. The On/Off toggle is the
+            per-person email master (pauses ALL of their emails). Expand <span className="font-semibold text-text-primary">Notifications</span> to pick
+            which of the 7 types each person gets on email and SMS. <span className="font-semibold text-text-primary">Role</span> drives
+            transactional routing: alerts go to the Salesperson, falling back to BDC then GM when none is set. New recipients are added paused.
           </div>
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+/* Per-recipient subscription matrix — collapsible "Notifications" grid: 7 types × Email/SMS.
+ * Collapsed shows a summary (Email 7/7 · SMS 2/7). Effective value = explicit cell or default.
+ * SMS column is shown only when the rooftop SMS master switch is on. */
+function RecipientSubscriptions({ recip, smsMaster, disabled, onSetSub }: {
+  recip: TeamRecipient;
+  smsMaster: boolean;
+  disabled: boolean;
+  onSetSub: (type: SubType, channel: "email" | "sms", enabled: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const subs = recip.subscriptions;
+  const emailOn = SUBSCRIPTION_TYPES.filter((t) => isSubscribed(subs, t.key, "email")).length;
+  const smsOn = SUBSCRIPTION_TYPES.filter((t) => isSubscribed(subs, t.key, "sms")).length;
+  const n = SUBSCRIPTION_TYPES.length;
+  const Toggle = ({ on, onClick, title }: { on: boolean; onClick: () => void; title: string }) => (
+    <button type="button" role="switch" aria-checked={on} disabled={disabled} onClick={onClick} title={title}
+      className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${on ? "bg-brand-primary" : "bg-border-subtle"} ${disabled ? "opacity-60" : ""}`}>
+      <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${on ? "left-[14px]" : "left-0.5"}`} />
+    </button>
+  );
+  return (
+    <div className="mt-1.5">
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between rounded-md px-1 py-1 text-[10px] text-text-muted hover:bg-surface-subtle">
+        <span className="font-semibold uppercase tracking-wide">Notifications</span>
+        <span>{open ? "▲" : "▼"} Email {emailOn}/{n}{smsMaster ? ` · SMS ${smsOn}/${n}` : ""}</span>
+      </button>
+      {open ? (
+        <div className="mt-1 rounded-md border border-border-subtle p-1.5">
+          <div className={`grid ${smsMaster ? "grid-cols-[1fr_auto_auto]" : "grid-cols-[1fr_auto]"} items-center gap-x-3 gap-y-1.5`}>
+            <span className="text-[9px] font-semibold uppercase tracking-wide text-text-muted"> </span>
+            <span className="justify-self-center text-[9px] font-semibold uppercase tracking-wide text-text-muted">Email</span>
+            {smsMaster ? <span className="justify-self-center text-[9px] font-semibold uppercase tracking-wide text-text-muted">SMS</span> : null}
+            {SUBSCRIPTION_TYPES.map((t) => (
+              <Fragment key={t.key}>
+                <span className="text-[11px] text-text-primary">{t.label}</span>
+                <span className="justify-self-center"><Toggle on={isSubscribed(subs, t.key, "email")} onClick={() => onSetSub(t.key, "email", !isSubscribed(subs, t.key, "email"))} title={`${t.label} · email`} /></span>
+                {smsMaster ? (
+                  <span className="justify-self-center"><Toggle on={isSubscribed(subs, t.key, "sms")} onClick={() => onSetSub(t.key, "sms", !isSubscribed(subs, t.key, "sms"))} title={recip.phone ? `${t.label} · SMS` : "Add a phone first"} /></span>
+                ) : null}
+              </Fragment>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

@@ -129,6 +129,34 @@ export const EMAIL_TYPES = [
   { key: "action_item_overdue_enabled", label: "Action item overdue" },
 ] as const;
 export type EmailTypeKey = (typeof EMAIL_TYPES)[number]["key"];
+
+/** The 7 notification types as BARE keys (not the config "<type>_enabled" columns) — the keys used
+ * in the roi_recipients.subscriptions matrix. Order = display order in the subscription grid. */
+export const SUBSCRIPTION_TYPES = [
+  { key: "daily", label: "Daily digest" },
+  { key: "weekly", label: "Weekly digest" },
+  { key: "monthly", label: "Monthly digest" },
+  { key: "post_appointment", label: "Post-appointment" },
+  { key: "post_conversation", label: "Post-conversation" },
+  { key: "action_item", label: "Action item" },
+  { key: "action_item_overdue", label: "Action item overdue" },
+] as const;
+export type SubType = (typeof SUBSCRIPTION_TYPES)[number]["key"];
+export type Channel = "email" | "sms";
+export type Subscriptions = Partial<Record<SubType, { email?: boolean; sms?: boolean }>>;
+export type RecipientRole = "salesperson" | "bdc" | "gm";
+const DIGEST_SUB_TYPES = new Set<SubType>(["daily", "weekly", "monthly"]);
+/** Mirror of server/roi-cron/subscriptions.cjs — email: all on; sms: transactional on, digests off. */
+export function defaultSub(type: SubType, channel: Channel): boolean {
+  if (channel === "email") return true;
+  return !DIGEST_SUB_TYPES.has(type);
+}
+/** Effective subscription for a cell — explicit value wins, else the default. */
+export function isSubscribed(subs: Subscriptions | null | undefined, type: SubType, channel: Channel): boolean {
+  const cell = subs && subs[type];
+  const v = cell ? cell[channel] : undefined;
+  return typeof v === "boolean" ? v : defaultSub(type, channel);
+}
 /** Which DAILY-digest template a rooftop receives: 'v1' = classic (legacy, default), 'v2' = redesign. */
 export type DailyTemplate = "v1" | "v2";
 /** Content focus (the appointment/conversation checker). Orthogonal to DailyTemplate (the v1/v2 DESIGN):
