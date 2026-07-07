@@ -70,6 +70,10 @@ export function TrackerAuthGate({ children }: { children: ReactNode }) {
         >
           Sign in
         </button>
+        <div className="mt-5 border-t border-border-subtle pt-4 text-[12px] leading-relaxed text-text-muted">
+          Need access or having trouble? Reach out to <span className="font-semibold text-text-secondary">Devansh Hasija</span> on Slack or email{" "}
+          <a href="mailto:devansh.hasija@spyne.ai" className="font-medium text-brand-primary hover:underline">devansh.hasija@spyne.ai</a>.
+        </div>
       </form>
     </div>
   );
