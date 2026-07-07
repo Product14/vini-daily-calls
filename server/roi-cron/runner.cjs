@@ -674,13 +674,28 @@ async function runOnce() {
       }
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
-      // SEND
+      // ── ATOMIC SEND-CLAIM (idempotency: at-most-once per customer · dept · cadence · day) ──────────
+      // The "already sent?" read above is a cheap early-out but races. This conditional UPDATE is the real
+      // guarantee: it flips message_id from NULL → a per-row lock id in ONE atomic Postgres op, so exactly
+      // one racer wins — even if the hourly cron overlaps itself OR the cron4-send edge backstop runs at
+      // the same time. Lost the claim (0 rows) → someone else already owns this send → skip, never double.
+      // On a send FAILURE the lock is deliberately KEPT (no same-day auto-retry) so we never double-send an
+      // email that may have gone out; the failure surfaces as "Failed" + a Slack alert for manual retry.
       const sentAt = new Date().toISOString();
+      const lockId = `cron-${L.team_id}-${L.department}-daily-${w.localDate}`;
+      if (!FORCE_RESEND) {
+        const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
+          .update({ status: "sending", message_id: lockId })
+          .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate)
+          .is("message_id", null)
+          .select("id");
+        if (claimErr) throw new Error(`send-claim failed: ${claimErr.message}`);
+        if (!claim || !claim.length) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already sent/claimed for ${w.localDate}`); return; }
+      }
+      // SEND (we own the claim; message_id is now non-null so no other sender will re-send this row)
       const messageId = await sendMail(emails, subject, html);
-      // guarantee a non-null id so the "really emailed" lock (message_id IS NOT NULL) holds
-      // even when the mail provider returns no id in its response.
-      const lockId = messageId || `cron-${sentAt}`;
-      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: lockId, recipients: emails.map((e) => ({ email: e, received: true })) });
+      const finalId = messageId || lockId;
+      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: finalId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;
       console.log(`  ✓ SENT ${name} [${L.department}] → ${emails.join(", ")}`);
     } catch (e) {
@@ -1098,9 +1113,18 @@ async function runCadence(cadence) {
       }
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; return; }
+      // Atomic send-claim (at-most-once per customer · dept · cadence · period) — see runOnce for rationale.
       const sentAt = new Date().toISOString();
+      const lockId = `cron-${L.team_id}-${L.department}-${cadence}-${w.localDate}`;
+      const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
+        .update({ status: "sending", message_id: lockId })
+        .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate)
+        .is("message_id", null)
+        .select("id");
+      if (claimErr) throw new Error(`send-claim failed: ${claimErr.message}`);
+      if (!claim || !claim.length) { out.already_sent++; return; }
       const messageId = await sendMail(emails, subject, html);
-      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || `cron-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
+      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || lockId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;
       console.log(`  ✓ SENT ${cadence} ${name} [${L.department}]`);
     } catch (e) { out.errors++; console.log(`  ✗ ${cadence} ${name} [${L.department}] error: ${String(e).slice(0, 160)}`); }
