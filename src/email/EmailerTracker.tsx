@@ -22,7 +22,7 @@ import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, lo
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
-import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, setRecipientRoleNow, setRecipientSubscriptionNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow } from "./sendDigest";
 
 export function EmailerTracker() {
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -1137,6 +1137,19 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, email_enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
     onSaved();
   };
+  // Verify (or un-verify) a recipient for this rooftop. Unverified recipients are HELD — never emailed —
+  // so a wrong-rooftop address can't leak another rooftop's data. Optimistic.
+  const verifyRecip = async (email: string, next: boolean) => {
+    if (next && !window.confirm(`Confirm ${email} belongs to ${rooftop.name} and should receive its emails?\n\nOnly verify people you know are at THIS rooftop — this is the guard against sending one store's data to another.`)) return;
+    const stamp = next ? new Date().toISOString() : null;
+    const prevVals = teamRecips.filter((r) => r.email === email).map((r) => r.verified_at);
+    setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, verified_at: stamp } : r)));
+    setRecipBusy(email); setErr("");
+    const res = await verifyRecipientNow({ teamId: rooftop.team_id, email, verified: next });
+    setRecipBusy(null);
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, verified_at: prevVals[0] ?? null } : r))); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
   // Rooftop SMS master switch.
   const toggleSmsMaster = async () => {
     if (!rooftop?.team_id || smsBusy) return;
@@ -1307,8 +1320,29 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                           {r.receives_sales && r.receives_service ? (
                             <div className="text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
                           ) : null}
+                          {!r.verified_at ? (
+                            <div className="mt-0.5 text-[10px] font-semibold text-amber-600">⚠ Unverified — held, not emailed until verified</div>
+                          ) : null}
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
+                          {/* Verification gate — an unverified recipient is never emailed (cross-rooftop guard). */}
+                          {r.verified_at ? (
+                            <button
+                              type="button"
+                              disabled={recipBusy === r.email}
+                              onClick={() => void verifyRecip(r.email, false)}
+                              title={`Verified for ${rooftop.name} — click to un-verify (holds all their emails)`}
+                              className="shrink-0 rounded-md border border-emerald-300 px-1.5 py-1 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-50"
+                            >✓ Verified</button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={recipBusy === r.email}
+                              onClick={() => void verifyRecip(r.email, true)}
+                              title="Confirm this person belongs to this rooftop, then they can receive emails"
+                              className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-1.5 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-100"
+                            >Verify</button>
+                          )}
                           {/* Role — drives the salesperson → BDC → GM fallback for transactional alerts. */}
                           <select
                             value={r.role ?? ""}
