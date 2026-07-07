@@ -29,7 +29,7 @@ const emailValue = require("./emailValue.cjs");
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 // Per-recipient subscription matrix + role-tiered ("assigned salesperson → parent") routing.
 const { isSubscribed, pickTieredRecipients } = require("./subscriptions.cjs");
-const { postBreakageAlert } = require("./slackAlert.cjs");
+const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -193,6 +193,9 @@ async function runOnce() {
   const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0 };
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
+  const feedFailures = []; // upstream FEED errors (per rooftop/dept) — the pass couldn't even fetch events.
+                           // These used to be swallowed (out.errors++, continue) with no alert → the pipeline
+                           // failed silently for 13 days. Now they raise a Slack alert like send failures do.
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
@@ -394,7 +397,7 @@ async function runOnce() {
             smsBody: T.renderActionItemOverdueSms({ rooftopName: name, dept, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }) });
         }
       }
-    } catch (e) { out.errors++; console.log(`  ✗ ${name} [${dept}] feed error: ${String(e).slice(0, 140)}`); continue; }
+    } catch (e) { out.errors++; feedFailures.push({ rooftop: name, dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); console.log(`  ✗ ${name} [${dept}] feed error: ${String(e).slice(0, 140)}`); continue; }
 
     for (const job of jobs) {
       let id;
@@ -453,6 +456,13 @@ async function runOnce() {
   if (_feedDegraded) {
     out.feed_degraded = true;
     console.error("  ⚠️  reporting-vini feed DEGRADED (clickhouse not configured) — transactional emails are DISABLED until CLICKHOUSE_HOST/CLICKHOUSE_PASSWORD are set on the reporting-vini deployment. No events were sent this pass.");
+    // Loud, systemic alert — this disables the WHOLE pipeline and used to only console.error (invisible).
+    await postSystemicAlert({
+      source: "Transactional email",
+      title: "reporting-vini feed DEGRADED — transactional pipeline DISABLED",
+      detail: "The reporting-vini `/api/conversations` + `/api/action-items` feeds returned degraded (ClickHouse not configured / unauthorized). Set CLICKHOUSE_HOST / CLICKHOUSE_PASSWORD (and confirm CRON_SECRET auth) on the reporting-vini deployment.",
+      windowLabel: `event email pass (~${POLL_MINUTES}m)`,
+    }).catch((e) => console.warn("[roi-event] systemic alert skipped:", String(e).slice(0, 140)));
   }
   console.log("  events summary:", JSON.stringify(out));
   console.log(`  sms summary: sent=${out.sms_sent} suppressed=${out.sms_suppressed} dupe=${out.sms_dupe} no_recipients=${out.sms_no_recipients} errors=${out.sms_errors}`);
@@ -460,6 +470,10 @@ async function runOnce() {
   // warn/crit thresholds + channel as the digest alert). Best-effort; never throws.
   await postBreakageAlert({ source: "Transactional email", failures, sentOk: out.sent, windowLabel: `event email pass (~${POLL_MINUTES}m)` })
     .catch((e) => console.warn("[roi-event] slack alert skipped:", String(e).slice(0, 140)));
+  // FEED-level failures (couldn't fetch events for a rooftop) — previously swallowed. Alert on them too,
+  // so a broken/unauthorized upstream feed surfaces instead of silently producing zero emails.
+  await postBreakageAlert({ source: "Transactional feed", failures: feedFailures, sentOk: out.sent, windowLabel: `event feed fetch (~${POLL_MINUTES}m)` })
+    .catch((e) => console.warn("[roi-event] feed alert skipped:", String(e).slice(0, 140)));
   // Same tiered warn/crit alert for the SMS channel — a Twilio/render failure surfaces the same way.
   await postBreakageAlert({ source: "SMS", failures: smsFailures, sentOk: out.sms_sent, windowLabel: `event SMS pass (~${POLL_MINUTES}m)` })
     .catch((e) => console.warn("[roi-event] sms slack alert skipped:", String(e).slice(0, 140)));

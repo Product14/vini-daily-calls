@@ -59,4 +59,32 @@ async function postBreakageAlert({ source, failures, sentOk, windowLabel }) {
   console.log(`  🔔 Slack ${level} alert posted to #${channel} — ${source} (${failures.length} failed · warn≥${ALERT_WARN} crit≥${ALERT_CRIT})`);
 }
 
-module.exports = { postBreakageAlert, ALERT_WARN, ALERT_CRIT };
+// ── Systemic / outage alert ───────────────────────────────────────────────────
+// For breakage that isn't "N sends threw" but "the whole thing is down / didn't run":
+//   • the upstream feed came back DEGRADED (reporting-vini missing ClickHouse) → all events disabled
+//   • the cron endpoint itself CRASHED (runOnce threw) → nothing processed
+//   • the pipeline is STALE (a heartbeat saw no events in far too long) → cron likely not firing
+// Always CRITICAL with an @channel ping — a silent systemic failure (like the 13-day transactional
+// gap) is exactly what must never pass unnoticed. Best-effort: no token → log-only; never throws.
+async function postSystemicAlert({ source, title, detail, windowLabel }) {
+  const token = process.env.SLACK_BOT_TOKEN;
+  const channel = process.env.SLACK_ALERT_CHANNEL || "vini-alerts-and-monitoring";
+  const ranAt = new Date().toISOString();
+  const env = process.env.VERCEL_ENV || process.env.NODE_ENV || "production";
+  const text =
+    `:rotating_light: *[${source} · CRITICAL] ${title}*\n<!channel>\n\n` +
+    `*What:* ${detail}\n` +
+    `*Impact:* no ${source.toLowerCase()} sent this pass — failing SILENTLY (no per-row errors to report).\n` +
+    `*Window:* ${windowLabel || "pass"}  ·  *env:* ${env}  ·  *ran:* ${ranAt}`;
+  if (!token) { console.log(`  ⚠ SLACK_BOT_TOKEN not set — ${source} systemic alert not posted. Would post to #${channel}:\n${text}`); return; }
+  const res = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel, text, unfurl_links: false, unfurl_media: false }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!j.ok) throw new Error(`slack ${j.error || res.status}`);
+  console.log(`  🔔 Slack CRITICAL systemic alert posted to #${channel} — ${source}: ${title}`);
+}
+
+module.exports = { postBreakageAlert, postSystemicAlert, ALERT_WARN, ALERT_CRIT };

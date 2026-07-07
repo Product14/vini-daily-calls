@@ -2882,6 +2882,11 @@ app.get("/api/cron/roi-email", async (req, res) => {
     return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary, weekly, monthly });
   } catch (err) {
     console.error("GET /api/cron/roi-email error:", err?.message ?? err);
+    // A total crash of the digest cron writes no rows and would otherwise be invisible → alert loudly.
+    try {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      await postSystemicAlert({ source: "Daily digest", title: "digest cron CRASHED", detail: `runOnce threw before completing: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: "hourly digest cron" });
+    } catch { /* best-effort */ }
     return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
   }
 });
@@ -2946,6 +2951,11 @@ app.get("/api/cron/roi-events", async (req, res) => {
     return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
   } catch (err) {
     console.error("GET /api/cron/roi-events error:", err?.message ?? err);
+    // A total crash of the events cron writes no rows and would otherwise be invisible → alert loudly.
+    try {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      await postSystemicAlert({ source: "Transactional email", title: "events cron CRASHED", detail: `runOnce threw before completing: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: "15-min events cron" });
+    } catch { /* best-effort */ }
     return res.status(500).json({ ok: false, error: err?.message ?? "events cron failed" });
   }
 });

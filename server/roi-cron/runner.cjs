@@ -521,7 +521,37 @@ async function sendMail(to, subject, html, opts) {
 
 // Slack breakage alert — shared with eventRunner.cjs (transactional emails) so BOTH pipelines alert the
 // same way. Tiered warn/crit thresholds live in slackAlert.cjs (DIGEST_ALERT_WARN / DIGEST_ALERT_CRIT).
-const { postBreakageAlert } = require("./slackAlert.cjs");
+const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
+
+// ── Dead-man's-switch for the TRANSACTIONAL events pipeline ────────────────────
+// The events cron (/api/cron/roi-events) can stop producing entirely — a degraded feed, a crashed
+// pass, or Vercel simply not firing it — and when it does, NOTHING in that job is running to alert us
+// (that's exactly how the transactional pipeline went dark for 13 days unnoticed). So we pigg-back a
+// staleness heartbeat on THIS digest cron, which is proven to run reliably every hour: if no
+// roi_event_emails row has been written in far too long, shout. Gated to a few UTC hours so an ongoing
+// outage pings a handful of times/day (not hourly), and a threshold wide enough (default 12h) that a
+// quiet overnight window never false-alarms. Best-effort; never affects the digest send.
+const EVENT_STALE_HOURS = Number(process.env.EVENT_STALE_HOURS || 12);
+const EVENT_HEARTBEAT_UTC_HOURS = (process.env.EVENT_HEARTBEAT_UTC_HOURS || "16,20,23")
+  .split(",").map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
+async function eventPipelineHeartbeat() {
+  try {
+    if (!EVENT_HEARTBEAT_UTC_HOURS.includes(new Date().getUTCHours())) return; // only check a few times/day
+    const { data, error } = await sb.from("roi_event_emails")
+      .select("created_at").order("created_at", { ascending: false }).limit(1);
+    if (error) return; // can't read → don't guess
+    const last = data && data[0] && data[0].created_at ? new Date(data[0].created_at) : null;
+    const ageH = last ? (Date.now() - last.getTime()) / 3600000 : Infinity;
+    if (ageH < EVENT_STALE_HOURS) return; // healthy
+    const lastStr = last ? `${ageH.toFixed(1)}h ago (${last.toISOString()})` : "never";
+    await postSystemicAlert({
+      source: "Transactional email",
+      title: "events pipeline STALE — no transactional email in " + (last ? `${ageH.toFixed(0)}h` : "a very long time"),
+      detail: `Last roi_event_emails row: ${lastStr} (threshold ${EVENT_STALE_HOURS}h). The 15-min /api/cron/roi-events job is likely not firing, crashing, or its reporting-vini feed is down. Check the Vercel cron + reporting-vini feed auth/ClickHouse.`,
+      windowLabel: "events-pipeline heartbeat (from the hourly digest cron)",
+    });
+  } catch (e) { console.warn("[roi-cron] heartbeat skipped:", String(e).slice(0, 140)); }
+}
 
 async function runOnce() {
   const ts = new Date().toISOString();
@@ -699,6 +729,8 @@ async function runOnce() {
   // Same tiered warn/crit alert for the daily digest SMS channel.
   await postBreakageAlert({ source: "Digest SMS", failures: smsFailures, sentOk: null, windowLabel: "daily digest send pass" })
     .catch((e) => console.warn("[roi-cron] digest sms slack alert skipped:", String(e).slice(0, 140)));
+  // Dead-man's-switch: ride this reliable hourly cron to catch a silently-dead events pipeline.
+  await eventPipelineHeartbeat();
   return out;
 }
 
