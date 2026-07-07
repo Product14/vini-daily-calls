@@ -309,7 +309,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
 }
 
 /* ── Transactional emails (roi_event_emails) — per-event sends, monitored per rooftop ───── */
-export type EventTypeCount = { total: number; sent: number; notSent: number; lastAt?: string | null; byDir?: { inbound: number; outbound: number } };
+export type EventTypeCount = { total: number; sent: number; notSent: number; opened?: number; lastAt?: string | null; byDir?: { inbound: number; outbound: number } };
 /** counts keyed by `${team_id}::${department}` → { [email_type]: EventTypeCount } */
 export type EventCounts = Map<string, Record<string, EventTypeCount>>;
 export type EventEmailRow = {
@@ -329,12 +329,12 @@ export async function loadEventCounts(): Promise<EventCounts> {
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase
       .from("roi_event_email_counts")
-      .select("team_id,department,email_type,total,sent,not_sent,last_at");
+      .select("team_id,department,email_type,total,sent,not_sent,opened,last_at");
     if (error) console.warn("[tracker] event counts (view) read failed:", error.message);
-    for (const r of (data ?? []) as Array<{ team_id: string; department: string; email_type: string; total: number; sent: number; not_sent: number; last_at: string | null }>) {
+    for (const r of (data ?? []) as Array<{ team_id: string; department: string; email_type: string; total: number; sent: number; not_sent: number; opened: number | null; last_at: string | null }>) {
       const key = `${r.team_id}::${r.department}`;
       const rec = m.get(key) ?? {};
-      rec[r.email_type] = { total: r.total, sent: r.sent, notSent: r.not_sent, lastAt: r.last_at };
+      rec[r.email_type] = { total: r.total, sent: r.sent, notSent: r.not_sent, opened: r.opened ?? 0, lastAt: r.last_at };
       m.set(key, rec);
     }
   }
@@ -358,7 +358,8 @@ export async function loadEventCounts(): Promise<EventCounts> {
         const sep = k.split("::"); const email_type = sep.pop() as string; const key = sep.join("::");
         const rec = m.get(key) ?? {};
         const sent = rec[email_type]?.sent ?? 0;
-        rec[email_type] = { total: a.total, sent, notSent: Math.max(0, a.total - sent), lastAt: a.lastAt ?? rec[email_type]?.lastAt ?? null, byDir: { inbound: a.inbound, outbound: a.outbound } };
+        const opened = rec[email_type]?.opened ?? 0; // preserve the view's opened count through the CH total override
+        rec[email_type] = { total: a.total, sent, notSent: Math.max(0, a.total - sent), opened, lastAt: a.lastAt ?? rec[email_type]?.lastAt ?? null, byDir: { inbound: a.inbound, outbound: a.outbound } };
         m.set(key, rec);
       }
     }
@@ -385,57 +386,21 @@ export async function loadTeamRecipients(teamId: string): Promise<TeamRecipient[
 export type EventEmailPage = { rows: EventEmailRow[]; hasMore: boolean };
 
 /** One page of the individual transactional emails behind a count — newest first.
- * Paginated end-to-end: ClickHouse is the spine (every real event in the window,
- * newest first, sliced server-side via LIMIT/OFFSET), and only the generated/sent rows
- * for THIS page's event_keys are pulled from roi_event_emails to overlay sent-status —
- * so each page is a small, fast fetch. Events not generated yet appear as `status:"live"`
- * rows (id:"" → the drawer's "Live preview · decide to send or ignore" path). When CH is
- * unavailable (or a type has no live events), degrades to the stored rows, paged directly
- * from Supabase. `hasMore` is true when a full page came back (more pages likely follow). */
+ * This lists ONLY real emails the pipeline actually produced (sent / suppressed / error /
+ * queued), paged straight from roi_event_emails. It deliberately does NOT fabricate rows for
+ * qualified-but-never-emailed ClickHouse events — the drill-down is a true "what got sent, what
+ * day" record, not a preview surface. (Generating a preview for a not-yet-sent event is now an
+ * explicit action from the drawer's empty state / the grid's ✦ Generate cell, never a list row.)
+ * `hasMore` is true when a full page came back (more pages likely follow).
+ *
+ * Note: roi_event_emails has no direction column, so the IB/OB `direction` filter isn't applied
+ * here — consistent with the count's numerator (`sent`), which is likewise not direction-split. */
 export async function loadEventEmails(
   teamId: string, department: string, emailType: string,
   opts: { limit?: number; offset?: number; direction?: string | null } = {},
 ): Promise<EventEmailPage> {
   const limit = opts.limit ?? 50;
   const offset = Math.max(0, opts.offset ?? 0);
-
-  // 1) CH page (the spine) — only the requested slice of events, newest first.
-  let chEvents: Array<{ eventKey: string; label: string; sub: string; createdAt: string }> = [];
-  let chOk = false;
-  try {
-    const q = `teamId=${encodeURIComponent(teamId)}&department=${encodeURIComponent(department)}&emailType=${encodeURIComponent(emailType)}&limit=${limit}&offset=${offset}` + (opts.direction ? `&direction=${encodeURIComponent(opts.direction)}` : "");
-    const r = await fetch(`/api/email/roi-event-list?${q}`, { cache: "no-store" });
-    const j = await r.json().catch(() => ({}));
-    if (r.ok && Array.isArray((j as { events?: unknown }).events)) { chEvents = (j as { events: typeof chEvents }).events; chOk = true; }
-  } catch { /* fall through to stored-only */ }
-
-  if (chOk && chEvents.length) {
-    // Overlay sent-status for just this page's events (bounded .in() lookup, not the whole history).
-    const byKey = new Map<string, EventEmailRow>();
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from("roi_event_emails")
-        .select("id,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
-        .eq("team_id", teamId).eq("department", department).eq("email_type", emailType)
-        .in("event_key", chEvents.map((e) => e.eventKey));
-      if (error) console.warn("[tracker] event emails overlay read failed:", error.message);
-      for (const r of (data ?? []) as EventEmailRow[]) byKey.set(r.event_key, r);
-    }
-    const rows: EventEmailRow[] = chEvents.map((e) => {
-      const hit = byKey.get(e.eventKey);
-      if (hit) return { ...hit, subject: hit.subject || e.label };
-      // Not generated yet → "live, decide to send/ignore" row (id:"" routes to the live preview/generate path).
-      return {
-        id: "", email_type: emailType, status: "live",
-        subject: e.label + (e.sub ? ` · ${e.sub}` : ""),
-        recipients: null, sent_at: null, created_at: e.createdAt, opened_at: null, open_count: 0,
-        reason: null, rendered_html: null, event_key: e.eventKey, message_id: null,
-      };
-    });
-    return { rows, hasMore: chEvents.length === limit };
-  }
-
-  // Fallback: CH unavailable or this type has no live events → page the stored rows directly.
   let stored: EventEmailRow[] = [];
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase

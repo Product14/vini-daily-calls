@@ -316,6 +316,25 @@ export function EmailerTracker() {
 
   // Summary reflects the CURRENT filter set (so filtering to one CSM updates the count + %).
   const summary = useMemo(() => computeSummary(filtered, cadence), [filtered, cadence]);
+  // Per-transactional-type KPIs (sent rate + open rate), aggregated over the filtered rooftops.
+  // The digest `summary` above is cadence/digest-only, so the KPI strip in the Transactional view
+  // reads from here instead. `eligible` = real events that qualified (CH total when available);
+  // `sent` = emails actually generated; `opened` = sent emails whose pixel fired (from the view).
+  const txTypeStats = useMemo(() => TRANSACTIONAL_TYPES.map((t) => {
+    let eligible = 0, sent = 0, opened = 0;
+    for (const r of filtered) {
+      const ec = eventCounts.get(`${r.team_id}::${r.department}`)?.[t.key];
+      if (!ec) continue;
+      eligible += prodDir ? (ec.byDir?.[prodDir] ?? 0) : (ec.total ?? 0);
+      sent += ec.sent ?? 0;
+      opened += ec.opened ?? 0;
+    }
+    return {
+      key: t.key, label: t.label, eligible, sent, opened,
+      sentRate: eligible ? Math.round((sent / eligible) * 100) : 0,
+      openRate: sent ? Math.round((opened / sent) * 100) : 0,
+    };
+  }), [filtered, eventCounts, prodDir]);
   const breakdown = useMemo(() => reasonBreakdown(rooftops), [rooftops]);
   const teamCount = useMemo(() => new Set(rooftops.map((r) => r.team_id)).size, [rooftops]);
   const salesRows = rooftops.filter((r) => r.department === "sales").length;
@@ -585,22 +604,29 @@ export function EmailerTracker() {
           <Stat label="Dept trackers" value={rooftops.length} />
           <Stat label="Sales / Service" value={`${salesRows} / ${serviceRows}`} />
           <span className="mx-1 w-px self-stretch bg-border-subtle" />
-          <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} />
-          <Stat label="Not sent" value={summary.emailStatus.notSent} tone="negative" onClick={() => setAnalyticsMetric("notSent")} />
-          <Stat
-            label="Sent rate"
-            value={`${summary.emailStatus.sentRatePct}%`}
-            sub={`${summary.emailStatus.sent} of ${summary.emailStatus.sent + summary.emailStatus.notSent} eligible`}
-            tone={summary.emailStatus.sentRatePct >= 50 ? "positive" : "negative"}
-            onClick={() => setAnalyticsMetric("sentRate")}
-          />
-          <Stat
-            label="Rooftops opened"
-            value={`${summary.emailStatus.openRatePct}%`}
-            sub={`${summary.emailStatus.opened} of ${summary.emailStatus.sent} sent`}
-            tone={summary.emailStatus.openRatePct >= 40 ? "positive" : summary.emailStatus.opened > 0 ? "neutral" : undefined}
-            onClick={() => setAnalyticsMetric("openRate")}
-          />
+          {view === "transactional" ? (
+            /* Per-type sent rate + open rate — one card per transactional email type. */
+            txTypeStats.map((s) => <TxTypeStat key={s.key} s={s} />)
+          ) : (
+            <>
+              <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} />
+              <Stat label="Not sent" value={summary.emailStatus.notSent} tone="negative" onClick={() => setAnalyticsMetric("notSent")} />
+              <Stat
+                label="Sent rate"
+                value={`${summary.emailStatus.sentRatePct}%`}
+                sub={`${summary.emailStatus.sent} of ${summary.emailStatus.sent + summary.emailStatus.notSent} eligible`}
+                tone={summary.emailStatus.sentRatePct >= 50 ? "positive" : "negative"}
+                onClick={() => setAnalyticsMetric("sentRate")}
+              />
+              <Stat
+                label="Rooftops opened"
+                value={`${summary.emailStatus.openRatePct}%`}
+                sub={`${summary.emailStatus.opened} of ${summary.emailStatus.sent} sent`}
+                tone={summary.emailStatus.openRatePct >= 40 ? "positive" : summary.emailStatus.opened > 0 ? "neutral" : undefined}
+                onClick={() => setAnalyticsMetric("openRate")}
+              />
+            </>
+          )}
         </div>
       </div>
 
@@ -784,7 +810,8 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     setRows(null); setPreview(null); setSendMsg(""); setGenState("idle"); setHasMore(false);
     void loadEventEmails(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction }).then((page) => {
       setRows(page.rows); setHasMore(page.hasMore);
-      if (!page.rows.length) setPreview(synthetic()); // empty type → jump straight to a live preview
+      // NOTE: an empty list no longer auto-opens a synthetic preview — the drill-down is a record
+      // of real sends only. Generating a preview is an explicit action (empty-state button below).
     });
   }, [entry]);
   const loadMore = useCallback(async () => {
@@ -858,6 +885,32 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   useEffect(() => { if (mode === "live" && liveHtml === null && liveState === "idle") void fetchLive(); }, [mode, liveHtml, liveState, fetchLive]);
   if (!entry) return null;
   const fmt = (iso: string) => { try { return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true }); } catch { return iso; } };
+  // Time-only (day comes from the section header) for the per-row line.
+  const fmtTime = (iso: string) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); } catch { return iso; } };
+  // The timestamp a row is filed under: when it was sent, else when the row was created.
+  const rowTime = (r: EventEmailRow) => r.sent_at || r.created_at;
+  // Local-day key + human label ("Today" / "Yesterday" / "Mon, Jul 6") for day grouping.
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayKey = (iso: string) => { const d = new Date(iso); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+  const dayLabel = (iso: string) => {
+    const d = new Date(iso);
+    const diff = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Yesterday";
+    return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+  };
+  // Group the loaded rows into consecutive same-day buckets (rows are already newest-first).
+  const dayGroups = (() => {
+    const out: { key: string; label: string; iso: string; rows: EventEmailRow[] }[] = [];
+    for (const r of rows ?? []) {
+      const iso = rowTime(r);
+      const k = dayKey(iso);
+      const last = out[out.length - 1];
+      if (last && last.key === k) last.rows.push(r);
+      else out.push({ key: k, label: dayLabel(iso), iso, rows: [r] });
+    }
+    return out;
+  })();
   const recipientsOf = (r: EventEmailRow) => (r.recipients ?? []).map((x) => x.email).join(", ");
   // Who actually opened (recipients flagged by the tracking pixel).
   const openedRecips = (r: EventEmailRow) => (r.recipients ?? []).filter((x) => x.opened).map((x) => x.email);
@@ -1012,39 +1065,52 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
             );
           })()
         ) : (
-          /* ── list of all emails — click a row to view it ── */
+          /* ── real emails only, grouped by day (click a row to view it) ── */
           <div className="flex-1 overflow-auto">
             {rows === null ? (
               <div className="py-12 text-center text-[13px] text-text-muted">Loading…</div>
             ) : rows.length === 0 ? (
-              <div className="py-12 text-center text-[13px] text-text-muted">No emails of this type yet.</div>
+              <div className="flex flex-col items-center justify-center gap-3 px-8 py-14 text-center">
+                <div className="text-[13px] font-medium text-text-primary">No {entry.label} emails sent yet</div>
+                <div className="max-w-[320px] text-[12px] text-text-muted">This rooftop hasn’t had a real {entry.label.toLowerCase()} email go out. You can render the latest design from live data and decide whether to send it.</div>
+                <button type="button" onClick={() => setPreview(synthetic())} className="rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:opacity-90">✦ Generate a preview</button>
+              </div>
             ) : (
               <>
-                {rows.map((r) => (
-                  <button
-                    key={r.id || r.event_key}
-                    type="button"
-                    onClick={() => setPreview(r)}
-                    className="flex w-full items-center justify-between gap-3 border-b border-border-subtle px-5 py-2.5 text-left hover:bg-surface-subtle"
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-[13px] font-medium text-text-primary">{r.subject || entry.label}</div>
-                      <div className="mt-0.5 text-[11px] text-text-muted">
-                        {fmt(r.created_at)}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}{r.reason ? " · " + r.reason : ""}
-                      </div>
+                {dayGroups.map((g) => (
+                  <div key={g.key}>
+                    {/* sticky day header — "what got sent, what day" */}
+                    <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle bg-surface-subtle/95 px-5 py-1.5 backdrop-blur">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-text-secondary">{g.label}</span>
+                      <span className="text-[10px] font-semibold tabular text-text-muted">{g.rows.length} email{g.rows.length === 1 ? "" : "s"}</span>
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {r.opened_at ? (
-                        <span title={openTitle(r)} className="rounded-full bg-positive/10 px-2 py-0.5 text-[10px] font-semibold text-positive">
-                          👁 Opened{r.open_count && r.open_count > 1 ? ` · ${r.open_count} views` : ""}
-                        </span>
-                      ) : r.status === "sent" ? (
-                        <span title="Sent — no open detected yet" className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-muted">Not opened</span>
-                      ) : null}
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone(r.status)}`}>{r.status}</span>
-                      <span className="text-[12px] text-text-muted">View →</span>
-                    </div>
-                  </button>
+                    {g.rows.map((r) => (
+                      <button
+                        key={r.id || r.event_key}
+                        type="button"
+                        onClick={() => setPreview(r)}
+                        className="flex w-full items-center justify-between gap-3 border-b border-border-subtle px-5 py-2.5 text-left hover:bg-surface-subtle"
+                      >
+                        <div className="min-w-0">
+                          <div className="truncate text-[13px] font-medium text-text-primary">{r.subject || entry.label}</div>
+                          <div className="mt-0.5 text-[11px] text-text-muted">
+                            {fmtTime(rowTime(r))}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}{r.reason ? " · " + r.reason : ""}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          {r.opened_at ? (
+                            <span title={openTitle(r)} className="rounded-full bg-positive/10 px-2 py-0.5 text-[10px] font-semibold text-positive">
+                              👁 Opened{r.open_count && r.open_count > 1 ? ` · ${r.open_count} views` : ""}
+                            </span>
+                          ) : r.status === "sent" ? (
+                            <span title="Sent — no open detected yet" className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-muted">Not opened</span>
+                          ) : null}
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone(r.status)}`}>{r.status}</span>
+                          <span className="text-[12px] text-text-muted">View →</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 ))}
                 {hasMore ? (
                   <button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="flex w-full items-center justify-center gap-2 px-5 py-3 text-[12px] font-semibold text-brand-primary hover:bg-surface-subtle disabled:opacity-50">
@@ -1579,6 +1645,31 @@ function Stat({
       <div className="mt-1 text-[9px] font-semibold uppercase tracking-widest text-text-muted">{label}{onClick ? " ›" : ""}</div>
       {sub ? <div className="mt-0.5 text-[9px] font-medium tabular text-text-muted">{sub}</div> : null}
     </Tag>
+  );
+}
+
+/* Compact per-transactional-type KPI card — sent rate (sent ÷ eligible) stacked over
+   open rate (opened ÷ sent). Used in the KPI strip when the Transactional view is active. */
+function TxTypeStat({ s }: { s: { label: string; eligible: number; sent: number; opened: number; sentRate: number; openRate: number } }) {
+  const sentTone = s.eligible === 0 ? "text-text-muted" : s.sentRate >= 50 ? "text-positive" : "text-negative";
+  const openTone = s.sent === 0 ? "text-text-muted" : s.openRate >= 40 ? "text-positive" : s.opened > 0 ? "text-text-primary" : "text-text-muted";
+  return (
+    <div
+      title={`${s.label}: ${s.sent} of ${s.eligible} eligible sent · ${s.opened} of ${s.sent} sent opened`}
+      className="rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[128px]"
+    >
+      <div className="text-[9px] font-semibold uppercase tracking-widest text-text-secondary">{s.label}</div>
+      <div className="mt-1 flex items-baseline justify-between gap-2">
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Sent</span>
+        <span className={`text-[15px] font-extrabold tabular leading-none ${sentTone}`}>{s.sentRate}%</span>
+      </div>
+      <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.sent} of {s.eligible} eligible</div>
+      <div className="mt-1 flex items-baseline justify-between gap-2 border-t border-border-subtle pt-1">
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Opened</span>
+        <span className={`text-[15px] font-extrabold tabular leading-none ${openTone}`}>{s.openRate}%</span>
+      </div>
+      <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.opened} of {s.sent} sent</div>
+    </div>
   );
 }
 
