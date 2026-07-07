@@ -520,15 +520,23 @@ async function sendMail(to, subject, html, opts) {
 
 // ── Slack breakage alert ──────────────────────────────────────────────────────
 // Posts a Slack message when digests genuinely FAIL to send in a pass (not deliberate holds). Styled
-// after the ops alerts the team already uses: 🚨 header · @channel · What · counts · per-rooftop list ·
-// window/env/ran footer. Best-effort: no bot token → log-only; a Slack error never breaks the cron.
-// Reuses the controlTower Slack wiring (SLACK_BOT_TOKEN + SLACK_CHANNEL); SLACK_ALERT_CHANNEL overrides
-// the destination for alerts specifically. Tune the crit threshold with DIGEST_ALERT_CRIT (default 1).
+// after the ops alerts the team already uses: severity header · What · counts · thresholds · per-rooftop
+// list · window/env/ran footer. Best-effort: no bot token → log-only; a Slack error never breaks the cron.
+//
+// TIERED THRESHOLDS (env-tunable): alert fires only at/above WARN; at/above CRIT it escalates to a
+// :rotating_light: CRITICAL with an @channel ping (a WARNING is quieter — no @channel). Below WARN the
+// pass is considered healthy and nothing is posted (noise floor).
+//   DIGEST_ALERT_WARN  (default 1)  — any failed send is worth surfacing (digests are low-volume/hourly)
+//   DIGEST_ALERT_CRIT  (default 5)  — this many failing at once = systemic (mail gateway / token / render)
 const SLACK_ALERT_MAX_LIST = 20;
+const DIGEST_ALERT_WARN = Math.max(1, Number(process.env.DIGEST_ALERT_WARN) || 1);
+const DIGEST_ALERT_CRIT = Math.max(DIGEST_ALERT_WARN, Number(process.env.DIGEST_ALERT_CRIT) || 5);
 async function postSlackAlert(failures, out) {
   if (!Array.isArray(failures) || failures.length === 0) return;
-  const crit = Number(process.env.DIGEST_ALERT_CRIT || 1);
-  if (failures.length < crit) return;
+  if (failures.length < DIGEST_ALERT_WARN) return; // below the noise floor — healthy pass
+  const critical = failures.length >= DIGEST_ALERT_CRIT;
+  const level = critical ? "CRITICAL" : "WARNING";
+  const icon = critical ? ":rotating_light:" : ":warning:";
   const token = process.env.SLACK_BOT_TOKEN;
   // Breakage alerts go to #vini-alerts-and-monitoring by default (override with SLACK_ALERT_CHANNEL).
   // Requires SLACK_BOT_TOKEN in this project's env AND the bot to be a member of that channel.
@@ -539,10 +547,11 @@ async function postSlackAlert(failures, out) {
   const lines = shown.map((f) => `• *${f.rooftop}* [${f.dept}] — ${f.error}`).join("\n");
   const more = failures.length > shown.length ? `\n…and ${failures.length - shown.length} more.` : "";
   const text =
-    `:rotating_light: *[Digest · CRITICAL] Daily digest sends failing*\n<!channel>\n\n` +
+    `${icon} *[Digest · ${level}] Daily digest sends failing*` + (critical ? "\n<!channel>" : "") + `\n\n` +
     `*What:* ${failures.length} rooftop digest${failures.length === 1 ? "" : "s"} threw on send this pass ` +
     `(mail gateway / render / unexpected error). Recorded as *error* in roi_digest_runs and shown as *Failed* in the tracker.\n` +
-    `*Failed:* ${failures.length}   ·   *Sent OK:* ${out ? out.sent : "?"}   ·   *Threshold:* crit ≥ ${crit}\n` +
+    `*Failed:* ${failures.length}   ·   *Sent OK:* ${out ? out.sent : "?"}\n` +
+    `*Thresholds:* warn ≥ ${DIGEST_ALERT_WARN} · crit ≥ ${DIGEST_ALERT_CRIT}   (tune via DIGEST_ALERT_WARN / DIGEST_ALERT_CRIT)\n` +
     `*Window:* daily digest send pass  ·  *env:* ${env}  ·  *ran:* ${ranAt}\n\n` +
     `*Failed sends:*\n${lines}${more}`;
   if (!token) { console.log(`  ⚠ SLACK_BOT_TOKEN not set — alert not posted. Would post to #${channel}:\n${text}`); return; }
@@ -553,7 +562,7 @@ async function postSlackAlert(failures, out) {
   });
   const j = await res.json().catch(() => ({}));
   if (!j.ok) throw new Error(`slack ${j.error || res.status}`);
-  console.log(`  🔔 Slack breakage alert posted to #${channel} (${failures.length} failed)`);
+  console.log(`  🔔 Slack ${level} alert posted to #${channel} (${failures.length} failed · warn≥${DIGEST_ALERT_WARN} crit≥${DIGEST_ALERT_CRIT})`);
 }
 
 async function runOnce() {
