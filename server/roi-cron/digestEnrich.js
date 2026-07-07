@@ -69,10 +69,18 @@ export async function enrichRooftop(teamId, opts = {}) {
     ? `${base}/api/meetings?scope=window&start=${encodeURIComponent(opts.start)}&end=${encodeURIComponent(opts.end)}&${qs}`
     : `${base}/api/meetings?scope=upcoming&${qs}`;
 
-  // Fetch both in parallel; a failure in one must not drop the other.
-  const [apptsRes, vehRes] = await Promise.allSettled([
+  // Warm/hot leads (buying intent, no appointment yet) for the "Leads to call now" section — the
+  // workable pipeline. Sourced from the SAME reporting-vini report the counts come from (j.warmLeads),
+  // dept-filtered below. Best-effort: a failure just omits the section.
+  const reportUrl = `${base}/api/reports?team_id=${encodeURIComponent(String(teamId))}`
+    + (opts.enterpriseId ? `&enterprise_id=${encodeURIComponent(String(opts.enterpriseId))}` : "")
+    + (opts.start && opts.end ? `&start=${encodeURIComponent(opts.start)}&end=${encodeURIComponent(opts.end)}` : "");
+
+  // Fetch in parallel; a failure in one must not drop the others.
+  const [apptsRes, vehRes, warmRes] = await Promise.allSettled([
     fetchJson(apptUrl),
     fetchJson(`${base}/api/meetings?scope=top-vehicles&${qs}`),
+    fetchJson(reportUrl),
   ]);
 
   let appointments = [];
@@ -100,5 +108,19 @@ export async function enrichRooftop(teamId, opts = {}) {
     console.warn("[digest-enrich] top vehicles skipped:", String(vehRes.reason).slice(0, 160));
   }
 
-  return { appointments, topVehicles };
+  // Warm leads → "Leads to call now". Filter to this department; hot first.
+  let warmLeads = [];
+  if (warmRes.status === "fulfilled") {
+    const dept = opts.dept === "sales" || opts.dept === "service" ? opts.dept : null;
+    warmLeads = (warmRes.value?.warmLeads || [])
+      .filter((w) => !dept || (w.serviceType || "").toLowerCase() === dept)
+      .filter((w) => (w.customer || "").trim() || (w.phone || "").trim())
+      .map((w) => ({ customer: (w.customer || "").trim() || "Lead", phone: w.phone || "", tier: w.tier === "hot" ? "hot" : "warm", interest: w.interest || "", lastActivity: w.lastActivity || null }))
+      .sort((a, b) => (a.tier === b.tier ? 0 : a.tier === "hot" ? -1 : 1))
+      .slice(0, 8);
+  } else {
+    console.warn("[digest-enrich] warm leads skipped:", String(warmRes.reason).slice(0, 160));
+  }
+
+  return { appointments, topVehicles, warmLeads };
 }

@@ -182,6 +182,9 @@ async function apiMetrics(teamId, dept, start, end) {
   const warmWorked = n(ibf.qualified) + n(obf.qualified);
   return {
     appointmentsYesterday: n(im.appointments) + n(om.appointments), appointmentsInbound: n(im.appointments),
+    // canonical: AI-assisted (CRM) appointments — SECONDARY metric, shown small under the AI-booked
+    // headline, never folded in. Sourced from the reporting API's per-agent appointmentsAssisted.
+    assistedAppointments: n(im.appointmentsAssisted) + n(om.appointmentsAssisted),
     inboundUniqueLeads: ibLeads, totalLeads: totalLeadsWorked,
     // Legacy inbound-leads value (report.leadsAttempted) — what the classic v1 email + its
     // guardrail used before the leadFunnel.contacted switch. Kept so a rooftop still on the
@@ -344,6 +347,7 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
     links: { appointments: L.appts, conversations: L.conv, actionItems: L.action, console: L.reports },
     appointments: Array.isArray(m.appointments) ? m.appointments : [],
     topVehicles: Array.isArray(m.topVehicles) ? m.topVehicles : [],
+    warmLeads: Array.isArray(m.warmLeads) ? m.warmLeads : [],
     dollarRate: Number(m.dollarRate) || 0,
     // Upsell banner is driven by agent deployment state when it's present on the
     // stored metrics; absent → the template falls back to the speed-to-lead CTA.
@@ -684,7 +688,7 @@ async function runOnce() {
       // SAME Reporting service as every other metric (single source of truth), not a separate
       // ClickHouse query. Optional — degrades to empty (section omitted) when unavailable.
       const dollarRate = digestDollarRate(L.department);
-      let enr = { appointments: [], topVehicles: [] };
+      let enr = { appointments: [], topVehicles: [], warmLeads: [] };
       try {
         const { enrichRooftop } = await import("./digestEnrich.js");
         enr = await enrichRooftop(L.team_id, {
@@ -695,7 +699,7 @@ async function runOnce() {
       } catch (e) { console.warn("[roi-cron] enrich skipped:", String(e).slice(0, 120)); }
       // canonical stored payload — carries everything the template reads so a later
       // re-render (and the SPA preview) reproduce the exact email.
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate, daily_template: tpl, digest_focus: pickFocus(c, m) };
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, "daily");
       // Digest SMS — terse headline + report link to subscribers with a phone (opt-in per type).
       // Runs BEFORE the email dry gate so held emails don't block SMS; own SMS_DRY_RUN + dedupe.
@@ -1028,9 +1032,9 @@ async function generateAndSendNow(opts) {
       if (!g.ok && !force) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
       const camps = await getCampaigns(L.team_id, L.department, w);
       const dollarRate = digestDollarRate(L.department);
-      let enr = { appointments: [], topVehicles: [] };
+      let enr = { appointments: [], topVehicles: [], warmLeads: [] };
       try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
       const dry = forceDry || DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
@@ -1086,9 +1090,9 @@ async function previewDigestNow(opts) {
   const g = guardrailFor(tpl, m);
   const camps = await getCampaigns(teamId, department, w);
   const dollarRate = digestDollarRate(department);
-  let enr = { appointments: [], topVehicles: [] };
+  let enr = { appointments: [], topVehicles: [], warmLeads: [] };
   try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(teamId, { dollarRate, dept: department, enterpriseId, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
-  const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
+  const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
   const html = renderDigest(tpl, name, department, w.dateLabel, enterpriseId, teamId, w.localDate, tz, metricsFull, camps, cadence);
   return { ok: true, cadence, teamId, department, name, subject, dateLabel: w.dateLabel, hasData: g.ok, reason: g.ok ? null : g.reason, metrics: metricsFull, html };
 }
@@ -1142,9 +1146,9 @@ async function runCadence(cadence) {
       if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; return; }
       const camps = await getCampaigns(L.team_id, L.department, w);
       const dollarRate = digestDollarRate(L.department);
-      let enr = { appointments: [], topVehicles: [] };
+      let enr = { appointments: [], topVehicles: [], warmLeads: [] };
       try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, dollarRate };
+      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
       // Digest SMS (weekly/monthly) — terse summary to subscribers with a phone. Before the email
       // dry gate so held emails don't block SMS; own SMS_DRY_RUN + dedupe.

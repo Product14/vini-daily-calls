@@ -45,6 +45,14 @@ function money(v) { var x = num(v); if (x >= 1e6) return "$" + (x / 1e6).toFixed
 function initial(name) { var s = String(name || "").trim(); return (s ? s[0] : "A").toUpperCase(); }
 function plural(n, one, many) { return num(n) === 1 ? one : (many || one + "s"); }
 function joinAnd(a) { return a.length <= 1 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
+// canonical rate display — never headline a rounded "0%". When the rounded percent would read 0%
+// (a real-but-small rate) surface the raw fraction ("1/32") instead. Turn/Close rates use this.
+function rateFrac(numr, den) {
+  var nn = num(numr), dd = num(den);
+  if (!dd) return "—";
+  var r = Math.round((nn / dd) * 100);
+  return (nn > 0 && r === 0) ? nn + "/" + dd : r + "%";
+}
 
 // signed "▲27% vs prior" chip
 function deltaChip(pct, opts) {
@@ -188,10 +196,10 @@ function humanize(k) { return INTENT_LABELS[normKey(k)] || String(k || "").toLow
 function primaryMetric(m, leads, pn) {
   pn = pn || "yesterday";
   var appts = num(m.appointmentsYesterday);
-  if (appts > 0) return { n: appts, label: plural(appts, "Appointment booked", "Appointments booked"), mode: "appts" };
+  if (appts > 0) return { n: appts, label: "Appointments — AI-booked", mode: "appts" };
   var warm = num(m.warmLeads) || leads;
-  if (warm > 0) return { n: warm, label: "Leads Warmed " + pn, mode: "warm" };
-  return { n: num(m.qualifiedLeads), label: "Leads Qualified", mode: "qual" };
+  if (warm > 0) return { n: warm, label: "Leads warmed " + pn, mode: "warm" };
+  return { n: num(m.qualifiedLeads), label: "Qualified leads", mode: "qual" };
 }
 
 // data-driven commentary — always an interpretation (what · so-what · hope)
@@ -269,14 +277,17 @@ function renderDigestHtml(metrics, opts) {
   // and demotes appointments to a down-funnel widget shown only when there are any. SAME design — only
   // the hero metric, the KPI order and the section order change; appointment-focus is byte-identical.
   var focus = opts.focus === "conversation" ? "conversation" : "appointment";
-  var convHero = num(m.conversationsHandled) || num(m.conversationsReached) || (num(m.conversationsInbound) + num(m.outboundUniqueReached)) || callsHandled;
-  var convHeroMTD = num(m.conversationsHandledMTD) || num(m.conversationsReachedMTD);
+  // canonical "Real conversations" = deduped CONNECTED leads (voicemail excluded), matching the console —
+  // NOT conversationsHandled (raw call+SMS activity, which over-counts). Prefer conversationsReached;
+  // fall back to the IB+OB reached sum, then (last resort) raw handled / calls so the hero never blanks.
+  var convHero = num(m.conversationsReached) || (num(m.conversationsInbound) + num(m.outboundUniqueReached)) || num(m.conversationsHandled) || callsHandled;
+  var convHeroMTD = num(m.conversationsReachedMTD) || num(m.conversationsHandledMTD);
   var apptsAny = num(m.appointmentsYesterday);
 
   // ── HERO (scenic photo bg + white inner panel) ──────────────────────────────
   var heroBg = "background:" + BRAND + ";background:" + BRAND + " url('" + asset("/digest-assets/hero.jpg") + "') center/cover no-repeat;";
   var heroNum = focus === "conversation" ? convHero : primary.n;
-  var heroLabel = focus === "conversation" ? "Conversations handled " + pn : primary.label;
+  var heroLabel = focus === "conversation" ? "Real conversations " + pn : primary.label;
   var heroBtn = focus === "conversation"
     ? btnPrimarySm("View conversations", L.conversations || consoleUrl)
     : btnPrimarySm("View appointments", L.appointments || consoleUrl);
@@ -286,11 +297,18 @@ function renderDigestHtml(metrics, opts) {
   var heroMTD;
   if (focus === "conversation") {
     var cm = convHeroMTD || leadsMTD;
-    heroMTD = (cm > 0 ? '<span style="font-size:22px;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(cm) + '</span> <span style="font-size:12px;font-weight:700;color:' + MUTE + ';">' + (convHeroMTD ? "conversations handled" : "leads worked") + ' this month</span>' : "") +
-      (apptsAny > 0 ? '<span style="font-size:12px;font-weight:700;color:' + MUTE + ';">' + (cm > 0 ? " &nbsp;·&nbsp; " : "") + fmtInt(apptsAny) + " booked " + pn + "</span>" : "");
+    // canonical: always carry the month's booking win — even on a 0-appointment day surface
+    // "N booked this month" (apptMTD) so a dry day still shows the month is producing.
+    var bookedNote = apptMTD > 0 ? fmtInt(apptMTD) + " booked this month" : (apptsAny > 0 ? fmtInt(apptsAny) + " booked " + pn : "");
+    heroMTD = (cm > 0 ? '<span style="font-size:22px;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(cm) + '</span> <span style="font-size:12px;font-weight:700;color:' + MUTE + ';">' + (convHeroMTD ? "real conversations" : "leads worked") + ' this month</span>' : "") +
+      (bookedNote ? '<span style="font-size:12px;font-weight:700;color:' + MUTE + ';">' + (cm > 0 ? " &nbsp;·&nbsp; " : "") + bookedNote + "</span>" : "");
   } else {
     heroMTD = apptMTD > 0 ? '<span style="font-size:22px;font-weight:900;color:' + GREEN_BIG + ';">' + fmtInt(apptMTD) + '</span> <span style="font-size:12px;font-weight:700;color:' + MUTE + ';">appointments booked this month</span>' : "";
   }
+  // canonical "extra" for a dry day: a one-line "what happened · so-what" read so a 0-appointment
+  // email still lands as valuable — never a bare "0". Gated to zero-appointment days only, so
+  // non-zero days stay exactly as the Jun-2026 review left them (no commentary line).
+  var heroComment = apptsAny === 0 ? buildCommentary(m, primary.mode, pn) : "";
   var hero =
     '<tr><td class="pad" style="padding:8px 26px 2px;">' +
     '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:18px;overflow:hidden;"><tr><td style="' + heroBg + 'padding:20px;">' +
@@ -300,6 +318,7 @@ function renderDigestHtml(metrics, opts) {
     '<span style="font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';">&nbsp;&nbsp;' + esc(heroLabel) + "</span></td>" +
     '<td class="col hero-cta" align="right" valign="middle" style="white-space:nowrap;">' + heroBtn + "</td>" +
     "</tr></table>" +
+    (heroComment ? '<div style="margin-top:12px;font-size:13px;line-height:1.6;color:' + BODY + ';">' + esc(heroComment) + "</div>" : "") +
     (heroMTD ? '<div style="margin-top:16px;border-top:1px solid ' + LINE + ';padding-top:14px;">' + heroMTD + "</div>" : "") +
     "</td></tr></table></td></tr></table></td></tr>";
 
@@ -313,27 +332,52 @@ function renderDigestHtml(metrics, opts) {
   // yet wired in the digest pipeline, so it would read 0), so the card is real, not a hardcoded zero.
   var openAI = num(m.actionItemsTotal), overdueAI = num(m.actionItemsOverdue);
   var dueCard = kpiCard("Due action items", fmtInt(openAI), "", null, overdueAI > 0 ? fmtInt(overdueAI) + " overdue" : "");
+  // canonical: AI-assisted (CRM) appointments are SECONDARY — shown as a small sub under the AI-booked
+  // headline, NEVER folded into it. Only surfaced when there are any (field mapped in runner apiMetrics).
+  var assisted = num(m.assistedAppointments);
+  var apptSub = (apptMTD ? fmtInt(apptMTD) + " MTD" : "") + (assisted > 0 ? (apptMTD ? " · " : "") + "+" + fmtInt(assisted) + " AI-assisted (CRM)" : "");
   var cards, kpiRow, cardList;
   if (focus === "conversation") {
-    // Glance funnel: Conversations → Qualified → Appointments → Due action items. ("Leads worked" moves off
-    // the KPI row — it still shows in the inbound section minis — to make room for the due-items card.)
+    // canonical glance funnel: Real conversations → Qualified leads → Appointments (AI-booked) → Due action items.
     cardList = [
-      kpiCard("Conversations", fmtInt(convHero), "", d.totalCalls, ""),
-      kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, ""),
-      kpiCard("Appointments", fmtInt(apptsAny), "", null, apptMTD ? fmtInt(apptMTD) + " MTD" : ""),
+      kpiCard("Real conversations", fmtInt(convHero), "", d.totalCalls, ""),
+      kpiCard("Qualified leads", fmtInt(qualified), "", d.leadsQualified, ""),
+      kpiCard("Appointments — AI-booked", fmtInt(apptsAny), "", null, apptSub),
       dueCard,
     ];
   } else {
     cardList = [
-      kpiCard("Leads Attempted", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : ""),
-      kpiCard("Calls", fmtInt(callsHandled), "", d.totalCalls, ""),
-      kpiCard("Leads Qualified", fmtInt(qualified), "", d.leadsQualified, ""),
-      dueCard,
+      kpiCard("Leads touched", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : ""),
+      kpiCard("Real conversations", fmtInt(convHero), "", d.totalCalls, ""),
+      kpiCard("Qualified leads", fmtInt(qualified), "", d.leadsQualified, ""),
+      kpiCard("Appointments — AI-booked", fmtInt(apptsAny), "", null, apptSub),
     ];
   }
   // kpiCard hardcodes width 25% (4-up); rewrite to an even split for the actual card count.
   cards = cardList.join("").replace(/width="25%"/g, 'width="' + Math.floor(100 / cardList.length) + '%"');
   kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
+
+  // ── SECONDARY canonical strip — the three metrics the Overview headlines that the glance cards don't:
+  //   Hand-offs to team (= transfers + callbacks) · Turn rate (qualified ÷ conversations) · Close rate
+  //   (appointments ÷ qualified). Fraction-aware; inbound-consistent basis (matches the Qualified card).
+  var CB_KEYS = { requestcallback: 1, callbackrequest: 1 };
+  var sTransfers = num(m.inboundTransfers != null ? m.inboundTransfers : m.warmTransfers);
+  var sCallbacks = num(m.inboundCallbacks) || arr(m.actionItems).reduce(function (s, it) { return s + (CB_KEYS[normKey(it.intent)] ? num(it.count) : 0); }, 0);
+  var sHandoffs = sTransfers + sCallbacks;
+  var sConvos = num(m.conversationsInbound != null ? m.conversationsInbound : m.conversationsReached) || convHero;
+  var rateTile = function (label, value, sub) {
+    return '<td class="col" width="33%" valign="top" style="padding:6px;">' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-left:3px solid ' + VIOLET + ';border-radius:12px;background:' + CARD + ';"><tr><td style="padding:13px 15px;">' +
+      '<div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:800;">' + esc(label) + '</div>' +
+      '<div style="font-size:20px;font-weight:900;color:' + INK + ';margin-top:6px;line-height:1;">' + esc(value) + '</div>' +
+      '<div style="font-size:10px;color:' + FAINT + ';margin-top:5px;">' + esc(sub) + '</div>' +
+      '</td></tr></table></td>';
+  };
+  var rateRow = '<tr><td class="pad" style="padding:2px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+    rateTile("Hand-offs to team", fmtInt(sHandoffs), fmtInt(sTransfers) + " transfers · " + fmtInt(sCallbacks) + " callbacks") +
+    rateTile("Turn rate", rateFrac(qualified, sConvos), "qualified ÷ conversations") +
+    rateTile("Close rate", apptsAny > 0 ? rateFrac(apptsAny, qualified) : "—", apptsAny > 0 ? "appointments ÷ qualified" : (qualified > 0 ? fmtInt(qualified) + " qualified to close" : "no bookings yet")) +
+    "</tr></table></td></tr>";
 
   // ── UPSELL banner — WEEKLY/MONTHLY ONLY. The daily report is "just the day's work":
   // no marketing (per the Jun-2026 review). The upsell funnel is handled on the weekly cadence.
@@ -355,23 +399,47 @@ function renderDigestHtml(metrics, opts) {
   // Default: today's. Fallbacks degrade gracefully and the section omits itself
   // when there's nothing to show.
   // Dense TABLE (per the review: tables over cards — show 5–6 rows + a total, "view all" carries the rest).
+  // canonical: the AI-booked appointments themselves — WHO booked, the vehicle, WHEN, and the reason
+  // (intent). Sourced scope=window (booked in the report period) so the list reconciles with the
+  // "Appointments — AI-booked" headline count. Section omits itself when there are none.
   var apptAll = arr(opts.appointments), appointments = apptAll.slice(0, 6), apptSection = "";
   if (appointments.length) {
     var apptTotal = num(m.appointmentsUpcomingTotal) || apptAll.length;
     var rows = appointments.map(function (a) {
       var est = a.estValue != null ? a.estValue : (dollarRate > 0 ? dollarRate : 0);
-      var sub = [a.vehicle && a.vehicle !== "—" ? esc(a.vehicle) : "", a.phone ? esc(a.phone) : ""].filter(Boolean).join(" · ");
+      var why = a.intent ? humanize(a.intent) : "";
+      var sub = [a.vehicle && a.vehicle !== "—" ? esc(a.vehicle) : "", a.phone ? esc(a.phone) : "", why ? esc(why) : ""].filter(Boolean).join(" · ");
       return '<tr>' +
         '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;color:' + INK + ';"><span style="font-weight:700;">' + esc(a.customer || "Customer") + "</span>" + (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:2px;">' + sub + "</div>" : "") + "</td>" +
         '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:600;color:' + BODY + ';white-space:nowrap;">' + esc(a.sched || "") + "</td>" +
         '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:800;color:' + INK + ';white-space:nowrap;">' + (est > 0 ? money(est) : "") + "</td></tr>";
     }).join("");
-    apptSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow(focus === "conversation" ? "Appointments booked too" : "Upcoming appointments", L.appointments || consoleUrl) +
+    apptSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Appointments booked · " + pn, L.appointments || consoleUrl) +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' +
-      '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Customer</td><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">When</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Est. value</td></tr>' +
+      '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Customer · vehicle · reason</td><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">When</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Est. value</td></tr>' +
       rows + "</table>" +
-      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(apptTotal) + "</span> scheduled &nbsp;·&nbsp; " +
+      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(apptTotal) + "</span> AI-booked " + esc(pn) + " &nbsp;·&nbsp; " +
       '<a href="' + esc(L.appointments || consoleUrl) + '" target="_blank" rel="noopener noreferrer" style="color:' + BRAND + ';font-weight:700;text-decoration:none;">View all &#8594;</a></div></td></tr>';
+  }
+
+  // ── LEADS TO CALL NOW (warm/hot leads: buying intent on record, no appointment yet) ──────────
+  // The workable pipeline — WHO to call to turn conversations into the next appointment. Mirrors the
+  // console's "Work these now". Fed by opts.warmLeads (reporting-vini warmLeads); omits itself when empty.
+  var warm = arr(opts.warmLeads).filter(function (w) { return (w.customer || "").trim() || (w.phone || "").trim(); });
+  var warmSection = "";
+  if (warm.length) {
+    var wRows = warm.slice(0, 6).map(function (w) {
+      var hot = w.tier === "hot";
+      var chip = '<span style="display:inline-block;font-size:9px;font-weight:800;letter-spacing:.05em;color:' + (hot ? NEG : WARM) + ";background:" + (hot ? NEG_BG : WARM_BG) + ';border-radius:6px;padding:2px 7px;">' + (hot ? "HOT" : "WARM") + "</span>";
+      var meta = [w.interest ? esc(w.interest) : "", w.phone ? esc(w.phone) : ""].filter(Boolean).join(" · ");
+      return '<tr><td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;color:' + INK + ';"><span style="font-weight:700;">' + esc(w.customer || "Lead") + "</span>" + (meta ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:2px;">' + meta + "</div>" : "") + "</td>" +
+        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';white-space:nowrap;">' + chip + "</td></tr>";
+    }).join("");
+    warmSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Leads to call now", L.conversations || consoleUrl, "Open inbox") +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' +
+      '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Lead · what they want</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Priority</td></tr>' +
+      wRows + "</table>" +
+      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(warm.length) + "</span> with buying intent · no appointment yet — call these first</div></td></tr>";
   }
 
   // ── ACTION ITEMS (spec §3) ──────────────────────────────────────────────────
@@ -445,16 +513,16 @@ function renderDigestHtml(metrics, opts) {
   var inAppts = num(m.appointmentsInbound);
   // conversation-focus: lead inbound with conversations handled (never "Appointments booked").
   var inboundBig = focus === "conversation"
-    ? { n: inboundConv, label: "Conversations handled" }
+    ? { n: inboundConv, label: "Real conversations" }
     : (inAppts > 0
-      ? { n: inAppts, label: plural(inAppts, "Appointment booked", "Appointments booked") }
-      : (num(m.warmLeads) > 0 ? { n: num(m.warmLeads), label: "Leads Warmed " + pn } : { n: qualified, label: "Leads Qualified" }));
+      ? { n: inAppts, label: "Appointments — AI-booked" }
+      : (num(m.warmLeads) > 0 ? { n: num(m.warmLeads), label: "Leads warmed " + pn } : { n: qualified, label: "Qualified leads" }));
   var hasInAppts = focus !== "conversation" && inAppts > 0;
-  // mini metrics under the inbound big number — appointment-focus shows Conversations+Qualified;
-  // conversation-focus already leads with conversations, so the minis carry Leads worked + Qualified.
+  // mini metrics under the inbound big number — canonical wordings (Leads reached / Real conversations /
+  // Qualified leads). conversation-focus already leads with conversations, so its minis carry reach + qualified.
   var inboundMinis = focus === "conversation"
-    ? miniMetric("Leads worked", fmtInt(leads), d.leadsAttempted, "50%") + miniMetric("Leads Qualified", fmtInt(qualified), d.leadsQualified, "50%")
-    : miniMetric("Conversations", fmtInt(inboundConv), d.totalCalls, "50%") + miniMetric("Leads Qualified", fmtInt(qualified), d.leadsQualified, "50%");
+    ? miniMetric("Leads reached", fmtInt(leads), d.leadsAttempted, "50%") + miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "50%")
+    : miniMetric("Real conversations", fmtInt(inboundConv), d.totalCalls, "50%") + miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "50%");
   // Two-column layout (Jun-2026 review): LEFT = the appointment-booked numbers; RIGHT = channel
   // engaged + during/after hours (moved over from the full-width strip). The "VINI" agent device
   // card was removed; booking-rate mini metric dropped along with the KPI card.
@@ -563,13 +631,13 @@ function renderDigestHtml(metrics, opts) {
   if (hasOutbound) {
     var obAppts = num(m.outboundAppointmentsSet);
     var obWarm = num((m.leadFunnel || {}).qualified) || num(m.warmLeads);
-    var obBig = obAppts > 0 ? { n: obAppts, label: "Appointments" } : { n: obWarm, label: "Leads Warmed" };
+    var obBig = obAppts > 0 ? { n: obAppts, label: "Appointments — AI-booked" } : { n: obWarm, label: "Qualified leads" };
     var outcomes = arr(m.outcomes).filter(function (o) { return num(o.value) > 0; }), funnel = m.leadFunnel || null, outcomesHtml = "";
     if (outcomes.length) {
       var maxO = outcomes.reduce(function (mx, o) { return Math.max(mx, num(o.value)); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes") + panel('<div style="font-size:11px;color:' + MUTE + ';margin:0 0 10px;">How outbound conversations ended</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
     } else if (funnel) {
-      var fr = [["Leads Attempted", funnel.contacted], ["Conversations", funnel.connected], ["Leads Qualified", funnel.qualified], ["Appointments", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
+      var fr = [["Leads dialed", funnel.contacted], ["Real conversations", funnel.connected], ["Qualified leads", funnel.qualified], ["Appointments — AI-booked", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + panel('<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
     }
     // AI-handle callout — share of conversations the agent closed without a transfer
@@ -585,9 +653,9 @@ function renderDigestHtml(metrics, opts) {
       '<td valign="top"><div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(obBig.label) + "</div>" +
       '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(obBig.n) + "</span> &nbsp;" + (obBig.n > 0 ? deltaChip(d.appointments) : "") + "</div>" +
       '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
-      miniMetric("Unique reached", fmtInt(m.outboundUniqueReached), d.totalCalls, "34%") +
+      miniMetric("Real conversations", fmtInt(m.outboundUniqueReached), d.totalCalls, "34%") +
       miniMetric("Connect rate", Math.round(num(m.outboundConnectRate)) + "%", null, "33%") +
-      miniMetric(obAppts > 0 ? "Appointments" : "Leads Warmed", obAppts > 0 ? fmtInt(obAppts) : fmtInt(obWarm), null, "33%") +
+      miniMetric(obAppts > 0 ? "Appointments — AI-booked" : "Qualified leads", obAppts > 0 ? fmtInt(obAppts) : fmtInt(obWarm), null, "33%") +
       "</tr></table></td>" +
       // VINI agent device card removed per Jun-2026 review.
       "</tr></table>" +
@@ -637,13 +705,13 @@ function renderDigestHtml(metrics, opts) {
     '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(opts.dateLabel) + "</div></td>" +
     "</tr></table></td></tr>" +
     // glance
-    hero + kpiRow + upsellSection +
+    hero + kpiRow + rateRow + upsellSection +
     // sections — appointment-focus leads with the appointment list; conversation-focus leads with the
     // work funnel (action items / intents → inbound conversations → outbound) and demotes appointments
     // to a down-funnel widget that only appears when there are any.
     (focus === "conversation"
-      ? fuSection + inboundSection + midCta + outboundSection + apptSection + tvSection + campSection
-      : apptSection + fuSection + tvSection + inboundSection + midCta + outboundSection + campSection) +
+      ? warmSection + fuSection + inboundSection + midCta + outboundSection + apptSection + tvSection + campSection
+      : apptSection + warmSection + fuSection + tvSection + inboundSection + midCta + outboundSection + campSection) +
     breakdown +
     // footer
     '<tr><td class="pad" style="padding:24px 28px 28px;" align="center"><div style="font-size:11px;color:' + FAINT + ';line-height:1.7;">Reporting period: ' + esc(opts.dateLabel) + ' &nbsp;·&nbsp; Next report: ' + esc(nextReport) + '<br/>© Spyne · Vini · 2026</div></td></tr>' +
