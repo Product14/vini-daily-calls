@@ -530,7 +530,9 @@ async function postSlackAlert(failures, out) {
   const crit = Number(process.env.DIGEST_ALERT_CRIT || 1);
   if (failures.length < crit) return;
   const token = process.env.SLACK_BOT_TOKEN;
-  const channel = process.env.SLACK_ALERT_CHANNEL || process.env.SLACK_CHANNEL || "central-analytics-programs";
+  // Breakage alerts go to #vini-alerts-and-monitoring by default (override with SLACK_ALERT_CHANNEL).
+  // Requires SLACK_BOT_TOKEN in this project's env AND the bot to be a member of that channel.
+  const channel = process.env.SLACK_ALERT_CHANNEL || "vini-alerts-and-monitoring";
   const ranAt = new Date().toISOString();
   const env = process.env.VERCEL_ENV || process.env.NODE_ENV || "production";
   const shown = failures.slice(0, SLACK_ALERT_MAX_LIST);
