@@ -192,6 +192,7 @@ async function runOnce() {
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0 };
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
+  const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
@@ -444,8 +445,8 @@ async function runOnce() {
           const firstSid = (results.find((x) => x.sid) || {}).sid || null;
           const anySent = results.some((x) => x.sent);
           await finishSms(sid, { status: anySent ? "sent" : "error", reason: anySent ? null : "all_recipients_failed", body: job.smsBody, message_sid: firstSid, sent_at: anySent ? sentAt : null, recipients: results });
-          if (anySent) out.sms_sent++; else out.sms_errors++;
-        } catch (e) { out.sms_errors++; if (sid) { try { await finishSms(sid, { status: "error", reason: String(e).slice(0, 300), body: job.smsBody }); } catch { /* ignore */ } } }
+          if (anySent) out.sms_sent++; else { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: (results.find((x) => x.error) || {}).error || "all recipients failed" }); }
+        } catch (e) { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (sid) { try { await finishSms(sid, { status: "error", reason: String(e).slice(0, 300), body: job.smsBody }); } catch { /* ignore */ } } }
       }
     }
   }
@@ -459,6 +460,9 @@ async function runOnce() {
   // warn/crit thresholds + channel as the digest alert). Best-effort; never throws.
   await postBreakageAlert({ source: "Transactional email", failures, sentOk: out.sent, windowLabel: `event email pass (~${POLL_MINUTES}m)` })
     .catch((e) => console.warn("[roi-event] slack alert skipped:", String(e).slice(0, 140)));
+  // Same tiered warn/crit alert for the SMS channel — a Twilio/render failure surfaces the same way.
+  await postBreakageAlert({ source: "SMS", failures: smsFailures, sentOk: out.sms_sent, windowLabel: `event SMS pass (~${POLL_MINUTES}m)` })
+    .catch((e) => console.warn("[roi-event] sms slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
 

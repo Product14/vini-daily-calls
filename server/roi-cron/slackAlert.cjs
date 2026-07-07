@@ -36,10 +36,14 @@ async function postBreakageAlert({ source, failures, sentOk, windowLabel }) {
   const shown = failures.slice(0, SLACK_ALERT_MAX_LIST);
   const lines = shown.map((f) => `• *${f.rooftop}* [${f.dept}] — ${f.error}`).join("\n");
   const more = failures.length > shown.length ? `\n…and ${failures.length - shown.length} more.` : "";
+  // Source-aware cause + storage wording so the SMS alert doesn't read as an email/mail-gateway issue.
+  const isSms = /sms/i.test(source);
+  const cause = isSms ? "Twilio / render / unexpected error" : "mail gateway / render / unexpected error";
+  const stored = isSms ? "Recorded as *error* in the SMS ledger (roi_event_sms)." : "Recorded as *error* and shown as *Failed* in the tracker.";
   const text =
     `${icon} *[${source} · ${level}] ${source} sends failing*` + (critical ? "\n<!channel>" : "") + `\n\n` +
     `*What:* ${failures.length} ${source.toLowerCase()} send${failures.length === 1 ? "" : "s"} threw this pass ` +
-    `(mail gateway / render / unexpected error). Recorded as *error* and shown as *Failed* in the tracker.\n` +
+    `(${cause}). ${stored}\n` +
     `*Failed:* ${failures.length}   ·   *Sent OK:* ${sentOk == null ? "?" : sentOk}\n` +
     `*Thresholds:* warn ≥ ${ALERT_WARN} · crit ≥ ${ALERT_CRIT}   (tune via DIGEST_ALERT_WARN / DIGEST_ALERT_CRIT)\n` +
     `*Window:* ${windowLabel || "send pass"}  ·  *env:* ${env}  ·  *ran:* ${ranAt}\n\n` +

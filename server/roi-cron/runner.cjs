@@ -59,8 +59,8 @@ async function sendDigestSms(sbc, base, cadence, localDate, smsRecips, body) {
     const anySent = results.some((x) => x.sent);
     const firstSid = (results.find((x) => x.sid) || {}).sid || null;
     await sbc.from("roi_event_sms").update({ status: anySent ? "sent" : "error", reason: anySent ? null : "all_recipients_failed", body, message_sid: firstSid, sent_at: anySent ? new Date().toISOString() : null, recipients: results }).eq("id", id);
-    return { sent: anySent };
-  } catch (e) { console.warn("[roi-cron] digest sms skipped:", String(e).slice(0, 140)); return { error: true }; }
+    return { sent: anySent, error: anySent ? null : ((results.find((x) => x.error) || {}).error || "all recipients failed") };
+  } catch (e) { const msg = String(e && e.message ? e.message : e).slice(0, 200); console.warn("[roi-cron] digest sms skipped:", msg); return { error: msg }; }
 }
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
@@ -548,6 +548,7 @@ async function runOnce() {
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0 };
   const failures = []; // genuine send failures this pass → the Slack breakage alert (postSlackAlert)
+  const smsFailures = []; // genuine digest-SMS send failures this pass → shared Slack breakage alert (SMS)
   // optional scoping for targeted dry-runs:
   //   ONLY_TEAMS=team1,team2   → run only these team_ids
   //   IGNORE_SEND_HOUR=true    → skip the local send-hour gate (render now regardless of time)
@@ -639,7 +640,8 @@ async function runOnce() {
       const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, "daily", c && c.sms_enabled);
       if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true)) {
         const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
-        await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, "daily", w.localDate, smsRecips, T.renderDigestSms({ cadence: "daily", rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+        const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, "daily", w.localDate, smsRecips, T.renderDigestSms({ cadence: "daily", rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+        if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
       }
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
@@ -694,6 +696,9 @@ async function runOnce() {
   // Breakage alert → Slack when any digest genuinely failed to send this pass. Best-effort; never throws.
   await postBreakageAlert({ source: "Daily digest", failures, sentOk: out.sent, windowLabel: "daily digest send pass" })
     .catch((e) => console.warn("[roi-cron] slack alert skipped:", String(e).slice(0, 140)));
+  // Same tiered warn/crit alert for the daily digest SMS channel.
+  await postBreakageAlert({ source: "Digest SMS", failures: smsFailures, sentOk: null, windowLabel: "daily digest send pass" })
+    .catch((e) => console.warn("[roi-cron] digest sms slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
 
@@ -1040,6 +1045,7 @@ async function runCadence(cadence) {
   const IGNORE_DAY = process.env.IGNORE_SEND_DAY === "true"; // testing: ignore the Mon/1st gate
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const out = { sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, no_data: 0, before_hour: 0, errors: 0 };
+  const smsFailures = []; // genuine weekly/monthly digest-SMS failures this pass → Slack breakage alert (SMS)
 
   const process1 = async (L) => {
     const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York"; const name = c?.rooftop_name || L.team_id;
@@ -1079,7 +1085,8 @@ async function runCadence(cadence) {
       const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, cadence, c && c.sms_enabled);
       if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true)) {
         const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
-        await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+        const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+        if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
       }
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; return; }
@@ -1103,6 +1110,9 @@ async function runCadence(cadence) {
   const POOL = Number(process.env.CRON_POOL || 10); let _i = 0;
   await Promise.all(Array.from({ length: Math.max(1, Math.min(POOL, targets.length || 1)) }, async () => { while (_i < targets.length) { await process1(targets[_i++]); } }));
   console.log(`  ${cadence} summary:`, JSON.stringify(out));
+  // Slack breakage alert for the weekly/monthly digest SMS channel (same tiered thresholds).
+  await postBreakageAlert({ source: `${cadence === "weekly" ? "Weekly" : "Monthly"} digest SMS`, failures: smsFailures, sentOk: null, windowLabel: `${cadence} digest send pass` })
+    .catch((e) => console.warn("[roi-cron] cadence sms slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
 
