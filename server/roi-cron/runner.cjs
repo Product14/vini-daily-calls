@@ -429,12 +429,13 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
 
 // ── Daily-template dispatch ───────────────────────────────────────────────────
 // Pick the template for a given rooftop-config + cadence. Only the DAILY digest is
-// switchable per-rooftop (classic 'v1' vs redesign 'v2'); weekly/monthly are new and
-// only exist in v2. Default 'v1' so every existing rooftop is undisturbed until a
-// human opts it into 'v2' via the tracker.
+// switchable per-rooftop (redesign 'v2' vs classic 'v1'); weekly/monthly are new and
+// only exist in v2. Default 'v2' — the redesigned "Conversational AI 2.0" digest is
+// now the product default for EVERY rooftop (go-live Jul 2026). A rooftop gets the
+// CLASSIC email only if it's explicitly opted back to 'v1' via the tracker.
 function pickTemplate(cfg, cadence) {
   if (cadence === "weekly" || cadence === "monthly") return "v2";
-  return (cfg && cfg.daily_template === "v2") ? "v2" : "v1";
+  return (cfg && cfg.daily_template === "v1") ? "v1" : "v2";
 }
 // ── Content-focus dispatch (the appointment/conversation checker) ────────────
 // Stable, per-rooftop choice of what the digest LEADS with:
@@ -606,7 +607,7 @@ async function runOnce() {
       const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
       await upsert({ status: "queued", reason: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
       out.queued++;
-      // daily-template selection (classic v1 / redesign v2) — per rooftop, default v1
+      // daily-template selection (redesign v2 / classic v1) — per rooftop, default v2
       const tpl = pickTemplate(c, "daily");
       // step 3 — guardrails (v1 keeps the original stricter send rule)
       const g = guardrailFor(tpl, m);

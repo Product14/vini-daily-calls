@@ -1101,9 +1101,10 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   };
 
   // Daily-digest template selector — which email this rooftop's DAILY digest sends:
-  // 'v1' = Classic (the legacy production email), 'v2' = New (redesign). Applies to
-  // both the Sales and Service daily digests; weekly/monthly always use the new one.
-  const prev = cfg.daily_template ?? "v1";
+  // 'v2' = New (redesign, the default since the Jul 2026 go-live), 'v1' = Classic
+  // (legacy, opt-out). Applies to both the Sales and Service daily digests;
+  // weekly/monthly always use the new one.
+  const prev = cfg.daily_template ?? "v2";
   const setTemplate = async (next: "v1" | "v2") => {
     if (next === prev || tplBusy) return;
     setCfg({ ...cfg, daily_template: next }); // optimistic

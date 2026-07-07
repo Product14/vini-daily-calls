@@ -290,7 +290,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
         post_conversation_enabled: cfg?.post_conversation_enabled === true,
         action_item_enabled: cfg?.action_item_enabled === true,
         action_item_overdue_enabled: cfg?.action_item_overdue_enabled === true,
-        daily_template: (cfg?.daily_template === "v2" ? "v2" : "v1") as DailyTemplate,   // default classic
+        daily_template: (cfg?.daily_template === "v1" ? "v1" : "v2") as DailyTemplate,   // default v2 (new) — go-live Jul 2026
         digest_focus: ((cfg?.digest_focus === "conversation" || cfg?.digest_focus === "appointment") ? cfg.digest_focus : "auto") as DigestFocus,   // default auto (→ conversation)
       },
       smsEnabled: cfg?.sms_enabled === true, // rooftop-level SMS master switch (default off)

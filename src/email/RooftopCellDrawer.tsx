@@ -60,6 +60,8 @@ const REASON_HELPER: Record<NotSentReason, string> = {
   scheduler_skipped: "The scheduler didn't fire the job on time. Send manually below.",
   bounced: "The recipient's inbox bounced the message. Update the address below.",
   silent_day: "No customer activity for this rooftop on this day.",
+  send_failed: "The send was attempted but failed (mail gateway or render error). Retry below.",
+  spyne_preview: "Preview mode — only the Spyne reviewers were emailed; the dealer was not sent this.",
 };
 
 export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, nav }: DrawerProps) {
@@ -82,21 +84,26 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   // stored run used v1 and it isn't a sent row (whose exact bytes we already show), auto server-render
   // the real v1 so the preview body matches what the cron sends. Derives from `cell` to keep hook order.
   useEffect(() => {
-    if (!open || !rooftop || !cell || cell.cadence !== "daily") return;
+    // Gate on `mounted`, not just `open`: on the open transition `open` flips true one render BEFORE
+    // `mounted` does, and that render takes the `!mounted` early-return below — so `showTemplate` (a
+    // const declared AFTER that return) is still in its temporal dead zone. Calling it here then throws
+    // "Cannot access 'showTemplate' before initialization", which — with no error boundary — unmounts
+    // the whole app to a blank screen. Waiting for `mounted` guarantees the full render ran first.
+    if (!mounted || !open || !rooftop || !cell || cell.cadence !== "daily") return;
     // Preview must equal what the cron SENDS. The client renderer (renderDigestEmail) drifts from the
     // cron on several inputs — campaign images (gated on DIGEST_ASSET_BASE), deep links, content focus,
     // period wording — and can't render Classic (v1) at all (it lives server-side). So server-render the
     // EXACT template the cron will use via renderStoredDigest, for BOTH v1 and v2. The template the cron
     // will send = the rooftop's CURRENT config (pickTemplate reads the same roi_rooftop_config
-    // .daily_template → rooftop.config.daily_template); fall back to the stored run's metric when config
-    // is absent (mock). Sent cells already show exact stored bytes; no-run cells fall back to the client render.
-    const r = (cell.runs ?? []).find((x) => x.status === cell.status) ?? (cell.runs ?? [])[0] ?? null;
-    const usedTpl = (r?.metrics as { daily_template?: string } | undefined)?.daily_template;
+    // .daily_template → rooftop.config.daily_template): v2 is the default, so only an explicit 'v1'
+    // opt-out previews Classic. Sent cells already show exact stored bytes; no-run cells fall back to the client render.
     const cfgTpl = rooftop.config?.daily_template;
-    const willSendTpl: "v1" | "v2" = cfgTpl === "v2" ? "v2" : cfgTpl === "v1" ? "v1" : usedTpl === "v2" ? "v2" : "v1";
+    // Mirror pickTemplate exactly: v2 is the default (go-live Jul 2026); only an
+    // explicit 'v1' opt-out gets Classic.
+    const willSendTpl: "v1" | "v2" = cfgTpl === "v1" ? "v1" : "v2";
     if (cell.status !== "sent") void showTemplate(willSendTpl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, rooftop?.rooftop_id, cell?.date, cell?.cadence, cell?.status]);
+  }, [mounted, open, rooftop?.rooftop_id, cell?.date, cell?.cadence, cell?.status]);
 
   useEffect(() => {
     if (open) {
@@ -149,7 +156,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   const cfgTpl = rooftop.config?.daily_template;
   const effTpl: "v1" | "v2" = isSent
     ? (storedTpl === "v2" ? "v2" : "v1")
-    : (cfgTpl === "v2" ? "v2" : cfgTpl === "v1" ? "v1" : storedTpl === "v2" ? "v2" : "v1");
+    : (cfgTpl === "v1" ? "v1" : "v2");   // not-yet-sent → what the cron WILL send (pickTemplate default v2)
   const effTplName = effTpl === "v2" ? "New" : "Classic";
   const effFocusRaw = (metrics as { digest_focus?: string } | undefined)?.digest_focus;
   const effFocusName = effFocusRaw === "appointment" ? "Appointment-led" : effFocusRaw === "conversation" ? "Conversation-led" : "";
