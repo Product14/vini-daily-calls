@@ -26,12 +26,7 @@ const PAL = {
   heroEnd:   "#a78bfa",
 };
 
-const AGENT_COLOR = {
-  "Sales IB":   PAL.accent,
-  "Service IB": PAL.green,
-  "Sales OB":   PAL.sec3,
-  "Service OB": PAL.red,
-};
+import { AGENT_COLOR } from "./agentColors.js";
 const AGENTS = ["Sales IB", "Service IB", "Sales OB", "Service OB"];
 
 function fmtMoney(n) {
@@ -40,6 +35,11 @@ function fmtMoney(n) {
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
   if (v >= 1_000)     return `$${Math.round(v / 1_000)}K`;
   return `$${v.toFixed(0)}`;
+}
+// MRR = ARR / 12, shown alongside each ARR figure.
+function fmtMrr(n) {
+  if (n == null || isNaN(n)) return "—";
+  return `${fmtMoney(Number(n) / 12)}/mo`;
 }
 function fmtNum(n)   { return n == null ? "—" : Number(n).toLocaleString("en-US"); }
 function pct(v)      { return v == null ? "—" : `${Math.round(v * 100)}%`; }
@@ -140,7 +140,7 @@ export function buildSlackHtml(data) {
               <tr>
                 <td style="font-size:16px; font-weight:800; letter-spacing:-0.01em;">${agent}</td>
                 <td align="right" style="font-size:11px; font-weight:700; color:rgba(255,255,255,0.92); font-variant-numeric:tabular-nums; white-space:nowrap;">
-                  CARR ${fmtMoney(arr.cArr)} → OB ${fmtMoney(arr.obArr)} → Live ${fmtMoney(arr.liveArr)}
+                  CARR ${fmtMoney(arr.cArr)} <span style="font-weight:500; color:rgba(255,255,255,0.72);">(${fmtMrr(arr.cArr)})</span> → OB ${fmtMoney(arr.obArr)} <span style="font-weight:500; color:rgba(255,255,255,0.72);">(${fmtMrr(arr.obArr)})</span> → Live ${fmtMoney(arr.liveArr)} <span style="font-weight:500; color:rgba(255,255,255,0.72);">(${fmtMrr(arr.liveArr)})</span>
                 </td>
               </tr>
             </table>

@@ -1,3 +1,5 @@
+import { AGENT_COLOR } from "./agentColors.js";
+
 // ─── Vini Daily Control Tower — final design (2026-05-29) ──────────────────
 // One committed visual language. Warm paper background, big hero numbers,
 // strategic indigo accent, RAG color-dots in the matrix (not background tints),
@@ -63,6 +65,8 @@ function fmtMoney(n) {
 }
 function fmtPct(n)   { return n == null ? "—" : `${Math.round(Number(n))}%`; }
 function fmtMult(n)  { return n == null ? "—" : `${Number(n).toFixed(1)}×`; }
+// MRR = ARR / 12, shown under each ARR figure.
+function fmtMrr(n)   { return (n == null || isNaN(n)) ? "—" : `${fmtMoney(Number(n) / 12)}/mo`; }
 
 // ─── Building blocks ────────────────────────────────────────────────────────
 
@@ -169,6 +173,9 @@ function atAGlance({ historical, perAgentArr }) {
           <div style="font-size:10px; color:${PALETTE.muted}; margin-top:3px; font-weight:600; font-variant-numeric:tabular-nums;">
             ${fmtMoney(arr.cArr)} → ${fmtMoney(arr.obArr)} → ${fmtMoney(arr.liveArr)}
           </div>
+          <div style="font-size:10px; color:${PALETTE.soft}; margin-top:1px; font-weight:500; font-variant-numeric:tabular-nums;">
+            ${fmtMrr(arr.cArr)} → ${fmtMrr(arr.obArr)} → ${fmtMrr(arr.liveArr)}
+          </div>
         </td>
         ${cell(m.liveAgents?.mtd,  num,  null)}
         ${cell(m.leads?.mtd,       num,  null)}
@@ -206,9 +213,12 @@ function atAGlance({ historical, perAgentArr }) {
 // Conditional-format color picker for a percentage value. Returns a CSS
 // color (red / amber / green / default text) given a metric type + value.
 // Per-metric thresholds chosen to match the report's RAG semantics.
-function condColor(metric, v) {
+function condColor(metric, v, agent) {
   if (v == null) return null;
-  const t = {
+  // Appointments grades per agent TYPE (IB high-volume vs OB few/high-value).
+  const t = metric === "appts"
+    ? (agent && agent.endsWith("OB") ? { good: 3, amber: 1 } : { good: 10, amber: 3 })
+    : {
     abr:         { good: 0.05, amber: 0.02 },      // ≥5% green, 2–5% amber
     pctGreen:    { good: 0.30, amber: 0.15 },
     pctAllClear: { good: 0.30, amber: 0.20 },
@@ -225,6 +235,16 @@ function condColor(metric, v) {
   if (v >= t.good)  return "#0b6635";
   if (v >= t.amber) return "#b85a08";
   return "#c92626";
+}
+
+// Light background fill matching a conditional text color — used for the ROI
+// row so the green/amber/red grading reads as spreadsheet-style cell fill.
+function condBgFill(metric, v, agent) {
+  const c = condColor(metric, v, agent);
+  if (!c) return "";
+  return c === "#0b6635" ? "background:#e6f2eb;"
+       : c === "#b85a08" ? "background:#fbeede;"
+       : "background:#fbe8e8;";
 }
 
 function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
@@ -294,14 +314,14 @@ function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
       { key: "pctGreen",    label: "% Green (RAG)",         color: PALETTE.green,  cond: "pctGreen" },
       { key: "leads",       label: "Leads touched",         color: PALETTE.text },
       { key: "qualified",   label: "Qualified calls",       color: PALETTE.text },
+      // Warm leads = distinct leads with appointment-intent (had_appt_intent),
+      // a stronger cohort than "qualified" (any buying-intent). Wired 3-Jul via
+      // the spine's appointment_intent_leads column.
+      { key: "warmLeads",   label: "Warm leads",            color: PALETTE.text },
       isIB && { key: "transferRate", label: "Transfer %",   color: PALETTE.text },
-      // Warm leads — Metabase field appointment_intent_leads is empty for
-      // both OB agents today. Showing the row with "coming soon" until the
-      // OB warm-lead source is wired upstream.
-      isOB && { key: "warmLeads",    label: "Warm leads",   color: PALETTE.muted, comingSoon: true },
-      { key: "appts",       label: "Appointments booked",   color: PALETTE.accent, highlight: PALETTE.accent },
-      { key: "abr",         label: abrLabel,                color: PALETTE.red,    highlight: PALETTE.red },
-      { key: "roiMultiple", label: "ROI Multiple",          color: PALETTE.accent, cond: "roiMultiple" },
+      { key: "appts",       label: "Appointments booked",   color: PALETTE.accent, cond: "appts", condBg: true },
+      { key: "abr",         label: abrLabel,                color: PALETTE.red,    cond: "abr",   condBg: true },
+      { key: "roiMultiple", label: "ROI Multiple",          color: PALETTE.accent, cond: "roiMultiple", condBg: true },
       { key: "pctAllClear", label: "% All Clear (quality)", color: PALETTE.green,  cond: "pctAllClear" },
       { key: "arrBlocked",  label: "Blocked ARR (OB)",      color: PALETTE.amber,  cond: "arrBlocked" },
     ].filter(Boolean);
@@ -353,10 +373,13 @@ function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
         cells = colKeys.map(k => {
           const v = m[mr.key]?.[k];
           const isMTD = k === "mtd";
-          const mtdBg = isHL ? "" : (isMTD ? "background:#fff8ed;" : "");
-          const condFg = !isHL && mr.cond ? condColor(mr.cond, v) : null;
+          const condFg = !isHL && mr.cond ? condColor(mr.cond, v, agent) : null;
+          // Conditional grading shows as TEXT color only (user 3-Jul: "too many
+          // colors" — dropped the full-cell green/amber/red fills). MTD column
+          // keeps its soft highlight.
+          const bg = isHL ? "" : (isMTD ? "background:#fff8ed;" : "");
           const fg = condFg || (isHL ? "#ffffff" : PALETTE.text);
-          return `<td style="padding:11px 8px; text-align:right; font-size:14px; color:${fg}; font-weight:${isMTD || isHL || condFg ? 800 : 600}; font-variant-numeric:tabular-nums; ${mtdBg} ${sepBorder(k)}">${f(v)}</td>`;
+          return `<td style="padding:11px 8px; text-align:right; font-size:14px; color:${fg}; font-weight:${isMTD || isHL || condFg ? 800 : 600}; font-variant-numeric:tabular-nums; ${bg} ${sepBorder(k)}">${f(v)}</td>`;
         }).join("");
       }
 
@@ -370,39 +393,42 @@ function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
         </tr>`;
     }).join("");
 
-    // CEO 18-Jun: header shows the per-agent CARR → OB → Live ARR funnel.
-    // User 23-Jun: show day-on-day movement on each tile, INLINE (no extra
-    // height) — small ±$X chip after each ARR value, colored by direction.
-    const arrow = `<span style="color:${PALETTE.soft}; font-weight:500; padding:0 6px;">→</span>`;
+    // User 2-Jul: CARR → In OB → Live ARR are KPI cards ABOVE the table (each a
+    // funnel snapshot with MRR + day-on-day movement). Agent gets its identity
+    // color on the name + the card top-borders.
+    const agColor = AGENT_COLOR[agent] || PALETTE.text;
     const agDelta = arrDeltas?.[agent] || {};
     const deltaChip = (dN) => (dN == null || dN === 0) ? "" :
-      `<span style="font-size:11px; font-weight:700; color:${deltaColor(dN)}; margin-left:4px; font-variant-numeric:tabular-nums;">${signedMoney(dN)}</span>`;
-    const arrTile = (label, value, delta, color) => `
-      <span style="display:inline-block; margin-right:2px;">
-        <span style="font-size:10px; color:${PALETTE.muted}; font-weight:700; letter-spacing:0.08em; text-transform:uppercase;">${label}</span>
-        <span style="display:inline-block; margin-left:6px; font-size:15px; font-weight:800; color:${color}; font-variant-numeric:tabular-nums;">${fmtMoney(value)}</span>${deltaChip(delta)}
-      </span>`;
+      `<span style="font-size:11px; font-weight:700; color:${deltaColor(dN)}; margin-left:6px; font-variant-numeric:tabular-nums;">${signedMoney(dN)}</span>`;
+    // Neutral KPI cards (user 3-Jul: fewer colors) — dark values, one subtle
+    // agent-colored top accent, no per-stage color trio. Delta chips still carry
+    // green/red movement.
+    const kpiCard = (label, value, delta) => `
+      <td width="33.33%" valign="top" style="padding:0 5px;">
+        <div style="background:${PALETTE.card}; border:1px solid ${PALETTE.border}; border-top:3px solid ${agColor}; border-radius:10px; padding:13px 15px;">
+          <div style="font-size:10px; font-weight:800; letter-spacing:0.08em; text-transform:uppercase; color:${PALETTE.muted};">${label}</div>
+          <div style="font-size:23px; font-weight:800; color:${PALETTE.text}; margin-top:7px; font-variant-numeric:tabular-nums;">${money(value)}</div>
+          <div style="font-size:11px; font-weight:600; color:${PALETTE.soft}; margin-top:3px;">${fmtMrr(value)}${deltaChip(delta)}</div>
+        </div>
+      </td>`;
+    const kpiCards = `
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:10px 0 0; border-collapse:separate; border-spacing:0;">
+        <tr>
+          ${kpiCard("CARR",     arr.cArr,    agDelta.cArr)}
+          ${kpiCard("In OB",    arr.obArr,   agDelta.obArr)}
+          ${kpiCard("Live ARR", arr.liveArr, agDelta.liveArr)}
+        </tr>
+      </table>`;
 
     return `
-      <div style="margin-top:16px;">
+      <div style="margin-top:22px;">
+        <div style="display:flex; align-items:center; gap:9px;">
+          <span style="width:5px; height:20px; border-radius:3px; background:${agColor}; display:inline-block;"></span>
+          <span style="font-size:19px; font-weight:800; color:${agColor}; letter-spacing:-0.01em;">${agent}</span>
+        </div>
+        ${kpiCards}
         <table width="100%" cellpadding="0" cellspacing="0" border="0"
-               style="background:${PALETTE.card}; border:1px solid ${PALETTE.border}; border-radius:12px; border-collapse:separate; border-spacing:0; overflow:hidden;">
-          <tr>
-            <td colspan="${1 + colKeys.length}" style="padding:14px 16px; border-bottom:1px solid ${PALETTE.border};">
-              <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                <tr>
-                  <td><div style="font-size:18px; font-weight:800; color:${PALETTE.text}; letter-spacing:-0.01em;">${agent}</div></td>
-                  <td align="right" style="white-space:nowrap;">
-                    ${arrTile("CARR",     arr.cArr,    agDelta.cArr,    PALETTE.accent)}
-                    ${arrow}
-                    ${arrTile("In OB",    arr.obArr,   agDelta.obArr,   PALETTE.sec3)}
-                    ${arrow}
-                    ${arrTile("Live ARR", arr.liveArr, agDelta.liveArr, PALETTE.green)}
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
+               style="margin-top:12px; background:${PALETTE.card}; border:1px solid ${PALETTE.border}; border-radius:12px; border-collapse:separate; border-spacing:0; overflow:hidden;">
           <tr>
             <th style="padding:9px 14px; text-align:left; font-size:10px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color:${PALETTE.muted}; background:${PALETTE.bg}; border-bottom:2px solid ${PALETTE.border};">Metric</th>
             ${colKeys.map(k => th(colLabels[k], colSubs[k], k === "mtd", k)).join("")}
