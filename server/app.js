@@ -2661,6 +2661,39 @@ app.get("/api/email/track-open", async (req, res) => {
   }
 });
 
+// ── Email-tracker sign-in (server-side password — keeps it out of the JS bundle) ──
+// Light gate for the PII tracker: the password is validated HERE (server), never shipped to the
+// browser. On success we return a short HMAC-signed token the UI stores + re-checks via /verify.
+// NOTE: intentionally light — it does NOT yet gate the /api/email/* endpoints or enable Supabase RLS
+// (the browser anon key can still read roi_* directly). That hardening is deferred. Credentials +
+// signing secret are overridable via TRACKER_USER / TRACKER_PASSWORD / TRACKER_AUTH_SECRET.
+const _crypto = require("crypto");
+const TRACKER_USER = process.env.TRACKER_USER || "spyne-devansh";
+const TRACKER_PASSWORD = process.env.TRACKER_PASSWORD || "SPYNE";
+const TRACKER_SECRET = process.env.TRACKER_AUTH_SECRET || process.env.ROI_SUPABASE_SERVICE_KEY || "vini-tracker-fallback-secret";
+const TRACKER_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+function _trackerSign(exp) { return _crypto.createHmac("sha256", TRACKER_SECRET).update(`${TRACKER_USER}.${exp}`).digest("hex"); }
+function _trackerToken() { const exp = Date.now() + TRACKER_TTL_MS; return Buffer.from(`${exp}.${_trackerSign(exp)}`).toString("base64"); }
+function _trackerValid(token) {
+  try {
+    const [exp, sig] = Buffer.from(String(token || ""), "base64").toString("utf8").split(".");
+    if (!exp || !sig || Number(exp) < Date.now()) return false;
+    const good = _trackerSign(Number(exp));
+    return sig.length === good.length && _crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good));
+  } catch { return false; }
+}
+app.post("/api/tracker/login", (req, res) => {
+  const { id, password } = req.body ?? {};
+  const ok = String(id || "").trim() === TRACKER_USER
+    && _crypto.timingSafeEqual(
+      _crypto.createHash("sha256").update(String(password ?? "")).digest(),
+      _crypto.createHash("sha256").update(TRACKER_PASSWORD).digest(),
+    );
+  if (!ok) return res.status(401).json({ ok: false, error: "Incorrect ID or password." });
+  return res.json({ ok: true, token: _trackerToken() });
+});
+app.post("/api/tracker/verify", (req, res) => res.json({ ok: _trackerValid((req.body ?? {}).token) }));
+
 // ── Add a recipient to a rooftop+department (tracker "Add recipient") ────────
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
 app.post("/api/recipients", async (req, res) => {
