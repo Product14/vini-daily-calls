@@ -1286,7 +1286,7 @@ const AGENT_NUMERIC_FIELDS = [
   // Inbound-only outcome counts (added in the latest card revision). Distinct
   // lead counts per (team × agent_type), so additive across dupes like the
   // other distinct-count fields. Null/absent on Outbound rows.
-  "transfer_leads", "callback_leads",
+  "appointment_intent_leads", "transfer_leads", "callback_leads",
 ];
 // Fields that are NOT additive across dupes — rolling-window totals
 // (new_leads_created, leads_contacted_from_new) are constant across all

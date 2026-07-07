@@ -40,8 +40,11 @@ type AgentRowBase = {
   abr: number | null;
 
   // Inbound-only outcome counts (Sales IB / Service IB). Distinct lead counts:
+  // `appointment_intent_leads` = leads that asked to book/reschedule/cancel a
+  // service appointment (service-oriented — see appointment_intent_set upstream);
   // `transfer_leads` = leads the agent handed off to a human; `callback_leads`
   // = leads for which a callback was scheduled. Null on Outbound rows.
+  appointment_intent_leads: number | null;
   transfer_leads: number | null;
   callback_leads: number | null;
 };
@@ -301,6 +304,7 @@ type Bucket = {
   newLeads: number;
   contactedFromNew: number;
   // Inbound-only outcome counts — see AgentRowBase. Additive like touched.
+  apptIntent: number;
   transfers: number;
   callbacks: number;
   // Cost-weighted appointment value = appts × cost-per-appt for THIS row's
@@ -313,7 +317,7 @@ const EMPTY: Bucket = {
   touched: 0, qualified: 0, appts: 0, apptValue: 0,
   totalCalls: 0, totalSms: 0, leadsWithCalls: 0, leadsWithSms: 0,
   newLeads: 0, contactedFromNew: 0,
-  transfers: 0, callbacks: 0,
+  apptIntent: 0, transfers: 0, callbacks: 0,
   roiValue: 0,
 };
 
@@ -329,6 +333,7 @@ function projectRow(r: AnyAgentRow): Bucket {
     leadsWithSms: num(r.leads_with_sms),
     newLeads: num(r.new_leads_created),
     contactedFromNew: num(r.leads_contacted_from_new),
+    apptIntent: num(r.appointment_intent_leads),
     transfers: num(r.transfer_leads),
     callbacks: num(r.callback_leads),
     roiValue: num(r.appointments) *
@@ -347,6 +352,7 @@ function add(a: Bucket, b: Bucket): Bucket {
     leadsWithSms: a.leadsWithSms + b.leadsWithSms,
     newLeads: a.newLeads + b.newLeads,
     contactedFromNew: a.contactedFromNew + b.contactedFromNew,
+    apptIntent: a.apptIntent + b.apptIntent,
     transfers: a.transfers + b.transfers,
     callbacks: a.callbacks + b.callbacks,
     roiValue: a.roiValue + b.roiValue,
@@ -369,6 +375,7 @@ function collapseDailyForRooftop(daily: Bucket[]): Bucket {
     out.totalSms         += d.totalSms;
     out.leadsWithCalls   += d.leadsWithCalls;
     out.leadsWithSms     += d.leadsWithSms;
+    out.apptIntent       += d.apptIntent;
     out.transfers        += d.transfers;
     out.callbacks        += d.callbacks;
     out.roiValue         += d.roiValue;
@@ -1465,6 +1472,8 @@ const KPI_INFO: Record<string, string> = {
     "Of the qualified leads, how many actually booked. Measures closing strength.",
   "Total Accounts":
     "Number of dealerships in this view, split into Live vs Churned.",
+  "Appt Intent":
+    "Inbound leads that asked to book, reschedule, or cancel a service appointment (incl. recalls).",
   "Transfers":
     "Inbound leads the agent handed off to a live human — e.g. a hot sales lead or an escalation.",
   "Callbacks":
@@ -1492,6 +1501,10 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
   // on pure-Outbound rows so we hide the cards there rather than show "0".
   const showInboundOutcomes =
     agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
+  // Appt Intent is a service-appointment signal (appointment_intent_set is
+  // service-oriented), so it's meaningful on Service IB and the mixed "All"
+  // view — not on Sales IB, where it's structurally ~0.
+  const showApptIntent = agent === "Service Inbound" || agent === "All";
   const convNumer = totals.appts;
   const convDenom = usesQualified ? totals.qualified : totals.touched;
   const convDenomLabel = usesQualified ? "qualified" : "touched";
@@ -1522,6 +1535,11 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
       sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
     { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
       sub: "appts / qualified", info: KPI_INFO["ABR"] },
+    ...(showApptIntent ? [
+      { label: "Appt Intent", value: fmtNum(totals.apptIntent), color: "#f59e0b",
+        sub: totals.touched > 0 ? `${fmtRate(totals.apptIntent, totals.touched)} of touched` : undefined,
+        info: KPI_INFO["Appt Intent"] },
+    ] as KpiSpec[] : []),
     ...(showInboundOutcomes ? [
       { label: "Transfers", value: fmtNum(totals.transfers), color: "#d97706",
         sub: totals.touched > 0 ? `${fmtRate(totals.transfers, totals.touched)} of touched` : undefined,
@@ -1767,9 +1785,11 @@ function columnsFor(agent: ActiveAgent): Col[] {
   const usesQualified = agent === "Sales Outbound" || agent === "Service Inbound";
   const convDenom  = (b: Bucket) => usesQualified ? b.qualified : b.touched;
   // Transfer/Callback are inbound-only — surface the columns on the IB tabs and
-  // "All"; null on pure-Outbound rows, so we omit them there.
+  // "All"; null on pure-Outbound rows, so we omit them there. Appt Intent is a
+  // service-appointment signal, so it rides only Service IB + the mixed "All".
   const showInboundOutcomes =
     agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
+  const showApptIntent = agent === "Service Inbound" || agent === "All";
   return [
     { label: "Leads Attempted", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
@@ -1779,6 +1799,9 @@ function columnsFor(agent: ActiveAgent): Col[] {
     { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
     { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
     { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },
+    ...(showApptIntent ? [
+      { label: "Appt Intent", render: (b: Bucket) => fmtNum(b.apptIntent), sortValue: (b: Bucket) => b.apptIntent, minWidth: 90 },
+    ] as Col[] : []),
     ...(showInboundOutcomes ? [
       { label: "Transfers", render: (b: Bucket) => fmtNum(b.transfers), sortValue: (b: Bucket) => b.transfers },
       { label: "Callbacks", render: (b: Bucket) => fmtNum(b.callbacks), sortValue: (b: Bucket) => b.callbacks },
