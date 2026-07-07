@@ -15,6 +15,7 @@
 export type SendStatus =
   | "sent"
   | "not_sent"
+  | "error"        // send genuinely FAILED (mail gateway / render / unexpected throw) — shown as "Failed"
   | "suppressed"
   | "scheduled"
   | "not_subscribed";
@@ -27,7 +28,8 @@ export type NotSentReason =
   | "scheduler_skipped"
   | "silent_day"
   | "bounced"
-  | "spyne_preview";
+  | "spyne_preview"
+  | "send_failed";
 
 export type Cadence = "daily" | "weekly" | "monthly";
 
@@ -416,6 +418,7 @@ export const NOT_SENT_REASON_LABEL: Record<NotSentReason, string> = {
   silent_day: "Silent day · no activity",
   bounced: "Inbox bounced",
   spyne_preview: "Preview · Spyne only (dealer not sent)",
+  send_failed: "Send failed",
 };
 
 export const NOT_SENT_REASON_CTA: Record<NotSentReason, { label: string; tone: "warn" | "danger" }> = {
@@ -427,6 +430,7 @@ export const NOT_SENT_REASON_CTA: Record<NotSentReason, { label: string; tone: "
   silent_day: { label: "—", tone: "warn" },
   bounced: { label: "+ Update email", tone: "danger" },
   spyne_preview: { label: "→ Send now", tone: "warn" },
+  send_failed: { label: "⚠ Retry", tone: "danger" },
 };
 
 export const TRACKER_META = {

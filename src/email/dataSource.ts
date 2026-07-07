@@ -80,7 +80,7 @@ const CADENCE_LEN: Record<Cadence, number> = { daily: 14, weekly: 8, monthly: 6 
 /* ── reason mapping: backend canonical → tracker NotSentReason ─────────────── */
 const TRACKER_REASONS = new Set<NotSentReason>([
   "recipients_missing", "tag_missing", "recipient_placeholder",
-  "smtp_timeout", "scheduler_skipped", "silent_day", "bounced", "spyne_preview",
+  "smtp_timeout", "scheduler_skipped", "silent_day", "bounced", "spyne_preview", "send_failed",
 ]);
 function normReason(r: string | null): NotSentReason {
   if (r && TRACKER_REASONS.has(r as NotSentReason)) return r as NotSentReason;
@@ -91,7 +91,8 @@ function normReason(r: string | null): NotSentReason {
     case "not_actionable":
     case "guardrail_failed": return "silent_day";
     case "not_subscribed": return "recipients_missing";
-    case "mail_error": return "smtp_timeout";
+    case "mail_error":
+    case "error": return "send_failed";
     default: return "scheduler_skipped";
   }
 }
@@ -136,6 +137,10 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
 
   if (!runs.length) return cell("not_subscribed");
   if (runs.some(r => r.status === "sent")) return cell("sent");
+  // A genuine send FAILURE — surfaced as "Failed" (distinct from a deliberate not_sent hold). Matches both
+  // the new status="error" rows and legacy failures stored as status="not_sent" with reason="error".
+  const err = runs.find(r => r.status === "error" || (r.status === "not_sent" && r.reason === "error"));
+  if (err) return cell("error", normReason(err.reason ?? "error"));
   if (runs.some(r => r.status === "suppressed")) {
     const s = runs.find(r => r.status === "suppressed");
     return cell("suppressed", normReason(s?.reason ?? null));

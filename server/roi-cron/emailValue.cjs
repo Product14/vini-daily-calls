@@ -14,11 +14,12 @@ const NO_VALUE_MARK = "<!--vini:no-value-->";
 const OVERRIDE_PASSWORD = "DANGER";
 
 // ─── v2 (redesign) recipient lock ────────────────────────────────────────────
-// SAFETY: while the redesigned digest is in testing, a v2 email may ONLY reach @spyne.ai.
-// The v2 renderer stamps V2_MARK; every send chokepoint filters recipients to @spyne.ai when the
-// HTML is v2-marked, unless V2_TO_CUSTOMERS=true is explicitly set (the deliberate "ship it" switch).
+// The redesigned digest is SHIPPED to all customers (product go-live, Jul 2026). The v2 renderer still
+// stamps V2_MARK, and the send chokepoints still route through lockV2Recipients — so the @spyne.ai-only
+// lock can be re-armed instantly by setting V2_TO_CUSTOMERS=false (kill switch) without a code change.
+// Default (env unset) = shipped to everyone.
 const V2_MARK = "<!--vini:v2-->";
-const V2_TO_CUSTOMERS = String(process.env.V2_TO_CUSTOMERS || "").trim() === "true";
+const V2_TO_CUSTOMERS = String(process.env.V2_TO_CUSTOMERS || "true").trim().toLowerCase() !== "false";
 function isV2(html) { return typeof html === "string" && html.includes(V2_MARK); }
 function isSpyne(email) { return /@spyne\.ai$/i.test(String(email == null ? "" : email).trim().toLowerCase()); }
 // Returns { locked, allowed }. locked=true means a v2-in-testing email; allowed = the @spyne.ai subset.

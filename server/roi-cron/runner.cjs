@@ -518,6 +518,42 @@ async function sendMail(to, subject, html, opts) {
   throw new Error(lastErr);
 }
 
+// ── Slack breakage alert ──────────────────────────────────────────────────────
+// Posts a Slack message when digests genuinely FAIL to send in a pass (not deliberate holds). Styled
+// after the ops alerts the team already uses: 🚨 header · @channel · What · counts · per-rooftop list ·
+// window/env/ran footer. Best-effort: no bot token → log-only; a Slack error never breaks the cron.
+// Reuses the controlTower Slack wiring (SLACK_BOT_TOKEN + SLACK_CHANNEL); SLACK_ALERT_CHANNEL overrides
+// the destination for alerts specifically. Tune the crit threshold with DIGEST_ALERT_CRIT (default 1).
+const SLACK_ALERT_MAX_LIST = 20;
+async function postSlackAlert(failures, out) {
+  if (!Array.isArray(failures) || failures.length === 0) return;
+  const crit = Number(process.env.DIGEST_ALERT_CRIT || 1);
+  if (failures.length < crit) return;
+  const token = process.env.SLACK_BOT_TOKEN;
+  const channel = process.env.SLACK_ALERT_CHANNEL || process.env.SLACK_CHANNEL || "central-analytics-programs";
+  const ranAt = new Date().toISOString();
+  const env = process.env.VERCEL_ENV || process.env.NODE_ENV || "production";
+  const shown = failures.slice(0, SLACK_ALERT_MAX_LIST);
+  const lines = shown.map((f) => `• *${f.rooftop}* [${f.dept}] — ${f.error}`).join("\n");
+  const more = failures.length > shown.length ? `\n…and ${failures.length - shown.length} more.` : "";
+  const text =
+    `:rotating_light: *[Digest · CRITICAL] Daily digest sends failing*\n<!channel>\n\n` +
+    `*What:* ${failures.length} rooftop digest${failures.length === 1 ? "" : "s"} threw on send this pass ` +
+    `(mail gateway / render / unexpected error). Recorded as *error* in roi_digest_runs and shown as *Failed* in the tracker.\n` +
+    `*Failed:* ${failures.length}   ·   *Sent OK:* ${out ? out.sent : "?"}   ·   *Threshold:* crit ≥ ${crit}\n` +
+    `*Window:* daily digest send pass  ·  *env:* ${env}  ·  *ran:* ${ranAt}\n\n` +
+    `*Failed sends:*\n${lines}${more}`;
+  if (!token) { console.log(`  ⚠ SLACK_BOT_TOKEN not set — alert not posted. Would post to #${channel}:\n${text}`); return; }
+  const res = await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel, text, unfurl_links: false, unfurl_media: false }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!j.ok) throw new Error(`slack ${j.error || res.status}`);
+  console.log(`  🔔 Slack breakage alert posted to #${channel} (${failures.length} failed)`);
+}
+
 async function runOnce() {
   const ts = new Date().toISOString();
   console.log(`\n── ROI cron pass @ ${ts} · DRY_RUN=${DRY_RUN} ──`);
@@ -542,6 +578,7 @@ async function runOnce() {
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0 };
+  const failures = []; // genuine send failures this pass → the Slack breakage alert (postSlackAlert)
   // optional scoping for targeted dry-runs:
   //   ONLY_TEAMS=team1,team2   → run only these team_ids
   //   IGNORE_SEND_HOUR=true    → skip the local send-hour gate (render now regardless of time)
@@ -648,8 +685,19 @@ async function runOnce() {
       console.log(`  ✓ SENT ${name} [${L.department}] → ${emails.join(", ")}`);
     } catch (e) {
       out.errors++;
-      console.log(`  ✗ ${name} [${L.department}] error: ${String(e).slice(0, 160)}`);
-      try { await upsert({ status: "not_sent", reason: "error", reason_detail: String(e).slice(0, 400) }); } catch { /* swallow — one failure must not halt the pass */ }
+      const code = e && e.code;
+      // Deliberate business holds (no-value gate / v2 spyne-lock) are NOT failures — record as not_sent.
+      // Anything else is a genuine send failure → status="error" so the tracker shows a red "Failed" and
+      // it feeds the Slack breakage alert below.
+      const isHold = code === "BLOCKED_NO_VALUE" || code === "V2_SPYNE_ONLY";
+      const detail = String(e && e.message ? e.message : e).slice(0, 400);
+      console.log(`  ✗ ${name} [${L.department}] ${isHold ? "held" : "FAILED"}: ${detail.slice(0, 160)}`);
+      try {
+        await upsert(isHold
+          ? { status: "not_sent", reason: code === "BLOCKED_NO_VALUE" ? "no_value" : "v2_spyne_only", reason_detail: detail }
+          : { status: "error", reason: "error", reason_detail: detail });
+      } catch { /* swallow — one failure must not halt the pass */ }
+      if (!isHold) failures.push({ rooftop: name, dept: L.department, error: detail.slice(0, 200) });
     }
   };
   // Concurrency pool — fit the whole pass inside the serverless time limit.
@@ -659,6 +707,8 @@ async function runOnce() {
     while (_i < targets.length) { const L = targets[_i++]; await processOne(L); }
   }));
   console.log("  summary:", JSON.stringify(out));
+  // Breakage alert → Slack when any digest genuinely failed to send this pass. Best-effort; never throws.
+  await postSlackAlert(failures, out).catch((e) => console.warn("[roi-cron] slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
 

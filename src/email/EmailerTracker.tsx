@@ -1779,6 +1779,19 @@ function SendStatusCell({
           Scheduled
         </span>
       );
+    case "error":
+      // Send genuinely FAILED (mail gateway / render / unexpected throw). Loud red so it's not mistaken
+      // for a deliberate not-sent hold; click opens the drawer with the failure reason + a retry.
+      return (
+        <button
+          type="button"
+          onClick={onOpen}
+          title={`Send failed${cell.reason ? ` · ${NOT_SENT_REASON_LABEL[cell.reason]}` : ""} · click to view + retry`}
+          className="inline-flex w-full items-center justify-center gap-1 rounded-md border border-negative/50 bg-negative text-white px-2 py-1 text-[11px] font-semibold hover:opacity-90"
+        >
+          ⚠ Failed
+        </button>
+      );
   }
 }
 
