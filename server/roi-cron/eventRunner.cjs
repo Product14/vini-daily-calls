@@ -29,6 +29,7 @@ const emailValue = require("./emailValue.cjs");
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 // Per-recipient subscription matrix + role-tiered ("assigned salesperson → parent") routing.
 const { isSubscribed, pickTieredRecipients } = require("./subscriptions.cjs");
+const { postBreakageAlert } = require("./slackAlert.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -190,6 +191,7 @@ async function runOnce() {
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0 };
+  const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
@@ -411,7 +413,7 @@ async function runOnce() {
         const messageId = await sendMail(emails, job.subject, html);
         await finish(id, { status: "sent", subject: job.subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
         out.sent++;
-      } catch (e) { out.errors++; if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
+      } catch (e) { out.errors++; failures.push({ rooftop: name, dept: job.type || dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
     }
 
     // ── SMS channel — same events, texted to the type's subscribed + role-tiered phones ──
@@ -453,6 +455,10 @@ async function runOnce() {
   }
   console.log("  events summary:", JSON.stringify(out));
   console.log(`  sms summary: sent=${out.sms_sent} suppressed=${out.sms_suppressed} dupe=${out.sms_dupe} no_recipients=${out.sms_no_recipients} errors=${out.sms_errors}`);
+  // Breakage alert → Slack when transactional emails genuinely failed to send this pass (same tiered
+  // warn/crit thresholds + channel as the digest alert). Best-effort; never throws.
+  await postBreakageAlert({ source: "Transactional email", failures, sentOk: out.sent, windowLabel: `event email pass (~${POLL_MINUTES}m)` })
+    .catch((e) => console.warn("[roi-event] slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
 
