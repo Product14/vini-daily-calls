@@ -367,7 +367,7 @@ export async function loadEventCounts(): Promise<EventCounts> {
 }
 
 /** One recipient of a team, with BOTH department memberships + the global enabled flag. */
-export type TeamRecipient = { email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean; phone: string | null; sms_enabled: boolean; role: string | null; subscriptions: import("./mockData").Subscriptions | null };
+export type TeamRecipient = { email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean; phone: string | null; sms_enabled: boolean; role: string | null; subscriptions: import("./mockData").Subscriptions | null; verified_at: string | null };
 
 /** All recipients for a team (both departments) — powers the ConfigDrawer's side-by-side Sales /
  * Service recipient lists. Each RooftopRow only carries its own department's recipients, so the
@@ -376,7 +376,7 @@ export async function loadTeamRecipients(teamId: string): Promise<TeamRecipient[
   if (!isSupabaseConfigured || !supabase || !teamId) return [];
   const { data, error } = await supabase
     .from("roi_recipients")
-    .select("email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions")
+    .select("email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at")
     .eq("team_id", teamId);
   if (error) { console.warn("[tracker] team recipients read failed:", error.message); return []; }
   return (data ?? []) as TeamRecipient[];

@@ -73,6 +73,11 @@ async function sendWithOverridePrompt(doPost: (override?: string) => Promise<Res
 export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabled: boolean; channel?: "email" | "sms" }) =>
   postJson("/api/recipients/toggle", { teamId: opts.teamId, email: opts.email, enabled: opts.enabled, channel: opts.channel });
 
+/** Verify (or un-verify) a recipient for its rooftop. Unverified recipients are HELD — never emailed —
+ * so a wrong-rooftop address can't leak another rooftop's data. Confirm the person belongs here first. */
+export const verifyRecipientNow = (opts: { teamId?: string; email: string; verified: boolean }) =>
+  postJson("/api/recipients/verify", { teamId: opts.teamId, email: opts.email, verified: opts.verified });
+
 /** Set (or clear) a recipient's phone number for the SMS channel. */
 export const setRecipientPhoneNow = (opts: { teamId?: string; dept?: DeptKind; email: string; phone: string }) =>
   addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, phone: opts.phone });

@@ -184,7 +184,7 @@ async function runOnce() {
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
@@ -210,11 +210,14 @@ async function runOnce() {
     // Per-TYPE recipient selection: dept + per-channel master + the subscription matrix, then
     // role-tiered (salesperson → bdc → gm; whole rooftop when no roles set). Transactional events
     // are lead-ish, so they route to the tier; a rooftop with no roles behaves exactly as before.
+    // GATE: only recipients a human has verified for THIS rooftop (verified_at set) can be emailed —
+    // the guarantee against a wrong-rooftop address ever receiving another rooftop's data. Unverified
+    // rows are held; the daily audit alert surfaces them for a human to verify.
     const emailsForType = (type) =>
-      pickTieredRecipients(recs.filter((r) => deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
+      pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
     const smsForType = (type) =>
       c.sms_enabled
-        ? pickTieredRecipients(recs.filter((r) => deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
+        ? pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
         : [];
     const base = { team_id: L.team_id, enterprise_id: c.enterprise_id, department: dept };
     const dry = DRY_RUN || L.dry_run === true;

@@ -2728,6 +2728,29 @@ app.post("/api/recipients/toggle", async (req, res) => {
   }
 });
 
+// ── Verify / unverify a recipient for its rooftop (the cross-rooftop send gate) ──
+// A recipient is only ever emailed after a human confirms it belongs to THIS rooftop
+// (roi_recipients.verified_at). This is the guarantee against a wrong-rooftop address
+// receiving another rooftop's data. verified=false clears it (re-holds the recipient).
+app.post("/api/recipients/verify", async (req, res) => {
+  try {
+    const { teamId, email, verified } = req.body ?? {};
+    const addr = String(email || "").trim();
+    if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const verified_at = verified === false ? null : new Date().toISOString();
+    const { error } = await sb.from("roi_recipients").update({ verified_at }).eq("team_id", teamId).ilike("email", addr);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, email: addr, verified_at });
+  } catch (err) {
+    console.error("POST /api/recipients/verify error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "verify failed" });
+  }
+});
+
 // ── Set ONE cell of a recipient's subscription matrix (type × channel) ───────
 // body { teamId, email, type, channel, enabled }. Merges into roi_recipients.subscriptions
 // (read-modify-write). Enabling SMS requires a phone on file (same guard as the master switch).

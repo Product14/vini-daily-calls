@@ -32,15 +32,17 @@ const { isSubscribed } = require("./subscriptions.cjs");
 
 // Digest recipients for a channel, filtered by dept + per-channel master + the subscription matrix.
 // Digests are rooftop summaries → NO role tiering (everyone subscribed gets them).
+// GATE (r.verified_at): a rooftop only emails recipients a human verified for it — the guarantee
+// against cross-rooftop leaks. Unverified rows are held; the daily audit alert surfaces them.
 function subscribedEmails(recips, dept, type) {
   return (recips ?? [])
-    .filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
+    .filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
     .map((r) => r.email);
 }
 function subscribedSmsRecips(recips, dept, type, rooftopSmsEnabled) {
   if (!rooftopSmsEnabled) return [];
   return (recips ?? [])
-    .filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))
+    .filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))
     .map((r) => ({ phone: r.phone, role: r.role }));
 }
 // Send a digest SMS with its own dedupe (roi_event_sms, one per team+dept+cadence+day). Never
@@ -553,6 +555,36 @@ async function eventPipelineHeartbeat() {
   } catch (e) { console.warn("[roi-cron] heartbeat skipped:", String(e).slice(0, 140)); }
 }
 
+// ── Recipient-verification audit ───────────────────────────────────────────────
+// The other half of the cross-rooftop guard: the send gate HOLDS enabled-but-unverified
+// recipients (a newly-added address stays unverified until a human confirms it for that rooftop).
+// This surfaces them so they don't sit silently un-emailed — a daily Slack digest of every recipient
+// that is enabled + subscribed-capable but not yet verified, grouped by rooftop. WARNING (no @channel):
+// it's a to-do, not an outage. Rides this reliable hourly cron; gated to one UTC hour so it's daily.
+const RECIPIENT_AUDIT_UTC_HOUR = Number(process.env.RECIPIENT_AUDIT_UTC_HOUR || 15);
+async function recipientVerificationAudit() {
+  try {
+    if (new Date().getUTCHours() !== RECIPIENT_AUDIT_UTC_HOUR) return;
+    const { data, error } = await sb.from("roi_recipients")
+      .select("team_id,email,email_enabled,sms_enabled,verified_at")
+      .is("verified_at", null);
+    if (error) return;
+    const pending = (data || []).filter((r) => r.email_enabled || r.sms_enabled);
+    if (!pending.length) return; // all clear
+    const byTeam = new Map();
+    for (const r of pending) { const a = byTeam.get(r.team_id) || []; a.push(r.email); byTeam.set(r.team_id, a); }
+    const failures = [...byTeam.entries()].map(([team, emails]) => ({
+      rooftop: team, dept: "recipients", error: `${emails.length} unverified & held: ${emails.slice(0, 8).join(", ")}${emails.length > 8 ? "…" : ""}`,
+    }));
+    await postBreakageAlert({
+      source: "Recipient verification",
+      failures,
+      sentOk: null,
+      windowLabel: "daily recipient audit — verify each recipient belongs to its rooftop before it can be emailed",
+    });
+  } catch (e) { console.warn("[roi-cron] recipient audit skipped:", String(e).slice(0, 140)); }
+}
+
 async function runOnce() {
   const ts = new Date().toISOString();
   console.log(`\n── ROI cron pass @ ${ts} · DRY_RUN=${DRY_RUN} ──`);
@@ -562,7 +594,7 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
     const e = liveRes.error || cfgRes.error || recRes.error;
@@ -731,6 +763,8 @@ async function runOnce() {
     .catch((e) => console.warn("[roi-cron] digest sms slack alert skipped:", String(e).slice(0, 140)));
   // Dead-man's-switch: ride this reliable hourly cron to catch a silently-dead events pipeline.
   await eventPipelineHeartbeat();
+  // Daily audit: surface any enabled recipient still awaiting rooftop verification (held by the gate).
+  await recipientVerificationAudit();
   return out;
 }
 
@@ -755,7 +789,7 @@ async function backfill(start, end) {
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template,digest_focus"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
@@ -955,7 +989,7 @@ async function generateAndSendNow(opts) {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template,digest_focus"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
@@ -1066,7 +1100,7 @@ async function runCadence(cadence) {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,${enabledCol}`),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions"),
+    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
