@@ -1,38 +1,56 @@
-import { useState, type ReactNode, type FormEvent } from "react";
+import { useEffect, useState, type ReactNode, type FormEvent } from "react";
 
 // ── Email-tracker access gate ──────────────────────────────────────────────────
-// The tracker shows customer PII (names, phones, conversation summaries), so it sits behind a
-// simple ID + password prompt. NOTE: this is a client-side gate — obfuscation, not real security.
-// The credentials ship in the bundle and the backend PII endpoints are not themselves protected by
-// it. For true protection the /api/email/* routes need server-side auth. Credentials are overridable
-// via VITE_TRACKER_USER / VITE_TRACKER_PASS at build time; defaults below.
-const TRACKER_USER = (import.meta.env.VITE_TRACKER_USER as string) || "spyne-devansh";
-const TRACKER_PASS = (import.meta.env.VITE_TRACKER_PASS as string) || "SPYNE";
-const AUTH_KEY = "vini-tracker-auth";
-// Token derived from the credentials so a stored token is invalidated if the credentials change.
-const token = () => btoa(`${TRACKER_USER}:${TRACKER_PASS}`);
-
-export function isTrackerAuthed(): boolean {
-  try { return localStorage.getItem(AUTH_KEY) === token(); } catch { return false; }
-}
+// The tracker shows customer PII, so it sits behind a sign-in. The password is validated on the
+// SERVER (POST /api/tracker/login) and is NOT shipped in this bundle; on success the server returns
+// a short HMAC-signed token we store and re-check via /api/tracker/verify.
+// NOTE: intentionally light for now — it does not yet gate the /api/email/* endpoints or enable
+// Supabase RLS (the anon key can still read roi_* directly). That deeper hardening is deferred.
+const TOKEN_KEY = "vini-tracker-token";
 
 export function TrackerAuthGate({ children }: { children: ReactNode }) {
-  const [authed, setAuthed] = useState(isTrackerAuthed);
+  const [authed, setAuthed] = useState<boolean | null>(null); // null = still checking a stored token
   const [id, setId] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
+  // On mount, re-validate any stored token against the server (so a forged localStorage value fails).
+  useEffect(() => {
+    let live = true;
+    const token = (() => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } })();
+    if (!token) { setAuthed(false); return; }
+    fetch("/api/tracker/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }),
+    })
+      .then((r) => r.json())
+      .then((j) => { if (live) setAuthed(!!j.ok); })
+      .catch(() => { if (live) setAuthed(false); });
+    return () => { live = false; };
+  }, []);
+
+  if (authed === null) return <div className="flex h-screen w-full items-center justify-center bg-surface-background text-[13px] text-text-muted">Loading…</div>;
   if (authed) return <>{children}</>;
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (id.trim() === TRACKER_USER && pass === TRACKER_PASS) {
-      try { localStorage.setItem(AUTH_KEY, token()); } catch { /* private mode → session-only */ }
-      setErr("");
-      setAuthed(true);
-    } else {
-      setErr("Incorrect ID or password.");
-      setPass("");
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch("/api/tracker/login", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id.trim(), password: pass }),
+      });
+      const j = await r.json();
+      if (r.ok && j.ok && j.token) {
+        try { localStorage.setItem(TOKEN_KEY, j.token); } catch { /* private mode → session only */ }
+        setAuthed(true);
+      } else {
+        setErr(j.error || "Incorrect ID or password.");
+        setPass("");
+      }
+    } catch {
+      setErr("Couldn't reach the server. Try again.");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -66,9 +84,10 @@ export function TrackerAuthGate({ children }: { children: ReactNode }) {
         {err ? <div className="mb-2 mt-1 text-[12px] font-medium text-red-600">{err}</div> : null}
         <button
           type="submit"
-          className="mt-3 w-full rounded-lg bg-brand-primary px-3 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90"
+          disabled={busy}
+          className="mt-3 w-full rounded-lg bg-brand-primary px-3 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60"
         >
-          Sign in
+          {busy ? "Signing in…" : "Sign in"}
         </button>
         <div className="mt-5 border-t border-border-subtle pt-4 text-[12px] leading-relaxed text-text-muted">
           Need access or having trouble? Reach out to <span className="font-semibold text-text-secondary">Devansh Hasija</span> on Slack or email{" "}
