@@ -6,6 +6,7 @@ import AgentsDashboard from "./agents/AgentsDashboard.tsx";
 import DreamDashboard from "./dream/DreamDashboard.tsx";
 import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
 import { EmailerTracker } from "./email/EmailerTracker.tsx";
+import { TrackerAuthGate } from "./email/TrackerAuthGate.tsx";
 import { Analytics } from "@vercel/analytics/react";
 
 function Router() {
@@ -33,7 +34,9 @@ function Router() {
   if (path === "/email-tracker" || path.startsWith("/email-tracker/")) {
     return (
       <div style={{ height: "100vh", width: "100%" }}>
-        <EmailerTracker />
+        <TrackerAuthGate>
+          <EmailerTracker />
+        </TrackerAuthGate>
       </div>
     );
   }
