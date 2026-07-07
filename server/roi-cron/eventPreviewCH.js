@@ -311,6 +311,14 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
 // conversation was agent-initiated (outboundTask/followup); appointments inherit their booking call's.
 const CALL_DIR = (col) => "if(positionCaseInsensitive(ifNull(" + col + ",''),'out')>0,'outbound','inbound')";
 const SMS_DIR = "if(notEmpty(cv.outboundTaskId) OR notEmpty(cv.followupId),'outbound','inbound')";
+// A post_conversation SMS event requires a REAL customer reply — at least one human INBOUND
+// message. An all-AI outbound blast with no reply isn't a "conversation" (mirrors eventRunner's
+// `!cv.hasReply → skip` gate + the canonical spec), so it must never appear as a sendable
+// candidate or inflate the tracker counts. Correlated by conversationId; direction-agnostic
+// (an inbound-initiated thread trivially has a human inbound message, so it passes too).
+const SMS_HAS_REPLY =
+  "cv.conversationId IN (SELECT conversationId FROM dealer_leads.smsMessages" +
+  " WHERE __deleted=0 AND lower(authorType)='human' AND lower(direction)='in')";
 const APPT_DIR_JOIN =
   " LEFT JOIN (SELECT callId, any(report_inOutType) dir FROM dealer_leads.endcallreports WHERE __deleted=0 GROUP BY callId) ecr ON ecr.callId=m.call_id";
 
@@ -370,6 +378,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " coalesce(nullIf(dm.dept,''),'sales') dept, " + SMS_DIR + " direction FROM dealer_leads.conversations cv" + CONV_IDENTITY +
       " LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
       " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since + dfilt(SMS_DIR) +
+      " AND " + SMS_HAS_REPLY +
       " ORDER BY cv.createdAt DESC LIMIT 1 BY cv.conversationId LIMIT " + (off + lim);
     const sms = (await runClickhouse(smsSql)).filter((r) => r.dept === dept).map((r) => {
       const who = displayName(r);
@@ -445,6 +454,7 @@ export async function countEventsCH({ sinceDays = 120 } = {}) {
     " " + SMS_DIR + " direction, uniqExact(cv.conversationId) total, toString(max(cv.createdAt)) last_at" +
     " FROM dealer_leads.conversations cv LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
     " WHERE cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since +
+    " AND " + SMS_HAS_REPLY +
     " GROUP BY team_id, department, direction"), "total");
   for (const [k, v] of convAgg) { const [team_id, department, direction] = k.split("::"); out.push({ team_id, department, direction, email_type: "post_conversation", total: v.total, last_at: v.last_at }); }
   // action items (curated actionItems feed) — count distinct LEADS (one email per lead), split by the
