@@ -81,17 +81,19 @@ async function fetchJson(url, apiKey, attempt = 0) {
 // Paginate /observability/calls until we either fall past `sinceIso` or run
 // out of data. Returns the array of call summaries within the window.
 async function fetchCallsSince(apiKey, sinceIso, hardCap = 2000) {
+  // The API filters by the `from` query param and returns calls in ASCENDING
+  // (oldest-first) order from that timestamp. The old code omitted `from` and
+  // assumed newest-first, so it hit the project's oldest call, saw it was older
+  // than the window, and bailed with zero — which is why Sales IB / Service IB
+  // read empty even though recent calls existed (Superbryn team, 7-Jul). Pass
+  // `from` and page forward; every row is already >= sinceIso.
   const calls = [];
   let cursor = null;
   while (calls.length < hardCap) {
-    const url = `${BASE_URL}/observability/calls?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const url = `${BASE_URL}/observability/calls?limit=100&from=${encodeURIComponent(sinceIso)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     const page = await fetchJson(url, apiKey);
     if (!Array.isArray(page.data) || page.data.length === 0) break;
-    for (const c of page.data) {
-      // API returns newest-first; once we see a call older than sinceIso, stop.
-      if (c.created_at < sinceIso) return calls;
-      calls.push(c);
-    }
+    for (const c of page.data) calls.push(c);
     if (!page.has_more || !page.next_cursor) break;
     cursor = page.next_cursor;
   }
