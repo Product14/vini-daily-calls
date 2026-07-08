@@ -75,7 +75,9 @@ const DRY_RUN = process.env.DRY_RUN !== "false";               // default ON
 const REPORTING_API_BASE = process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app";
 // The reporting-vini read API requires a credential (it returns PII). Forward the trusted service
 // secret (preferred) or the Spyne token so server-to-server calls authorize; else they 401.
-const REPORTING_AUTH = process.env.CRON_SECRET || process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
+// canonical: reporting-vini authorizes on ITS service secret — prefer a dedicated REPORTING_CRON_SECRET
+// (= reporting-vini's secret), NOT necessarily this app's CRON_SECRET. Falls back to the old chain.
+const REPORTING_AUTH = process.env.REPORTING_CRON_SECRET || process.env.CRON_SECRET || process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
 
 // ── Per-appointment dollar value (whiteboard spec) ───────────────────────────
 // Same per-category rates as the Programs dashboard (src/agents/AgentsDashboard.tsx):
