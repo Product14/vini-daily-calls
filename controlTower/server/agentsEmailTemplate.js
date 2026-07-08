@@ -333,10 +333,11 @@ function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
     if (k === "d2" || k === "d3" || k === "m2" || k === "m3") return `border-left:1px solid ${PALETTE.border};`;
     return "";
   };
+  // Sub-labels ("yesterday", "2 days ago", …) removed per user 8-Jul — the
+  // date labels (Jul 7, Jun, …) already make the columns obvious.
   const th = (label, sub, isMTD, k) => `
     <th style="padding:10px 8px; text-align:right; font-size:11px; font-weight:700; letter-spacing:0.02em; color:${isMTD ? PALETTE.text : PALETTE.muted}; background:${isMTD ? "#fff5e6" : PALETTE.bg}; border-bottom:2px solid ${isMTD ? PALETTE.amber : PALETTE.border}; vertical-align:bottom; ${sepBorderH(k)}">
       <div>${label}</div>
-      ${sub ? `<div style="font-size:9px; font-weight:500; color:${PALETTE.soft}; margin-top:2px; letter-spacing:0; text-transform:none;">${sub}</div>` : ""}
     </th>`;
 
   const renderAgent = (agent) => {

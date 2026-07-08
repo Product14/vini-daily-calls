@@ -1,0 +1,69 @@
+name: Vini Daily Control Tower
+
+# 11:00 IST = 05:30 UTC. GitHub cron is UTC and may drift a few minutes.
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:          # manual "Run workflow" for testing
+    inputs:
+      dry_run:
+        description: "Build only, do not send (1 = dry)"
+        required: false
+        default: "0"
+
+concurrency:
+  group: vini-daily
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install deps (incl. puppeteer Chromium)
+        run: npm ci
+
+      - name: Generate + send daily report (guardrailed)
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+          CLICKHOUSE_HOST:     ${{ secrets.CLICKHOUSE_HOST }}
+          CLICKHOUSE_PORT:     ${{ secrets.CLICKHOUSE_PORT }}
+          CLICKHOUSE_USER:     ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          SPYNE_MAIL_COOKIE:   ${{ secrets.SPYNE_MAIL_COOKIE }}
+          SPYNE_MAIL_TEMPLATE: ${{ secrets.SPYNE_MAIL_TEMPLATE }}
+          MAIL_TO:             ${{ secrets.MAIL_TO }}
+          MAIL_CC:             ${{ secrets.MAIL_CC }}
+          MAIL_BCC:            ${{ secrets.MAIL_BCC }}
+          SLACK_BOT_TOKEN:     ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL:       ${{ secrets.SLACK_CHANNEL }}
+          SLACK_ALERT_CHANNEL: ${{ secrets.SLACK_ALERT_CHANNEL }}
+          ROI_SUPABASE_URL:         ${{ secrets.ROI_SUPABASE_URL }}
+          ROI_SUPABASE_SERVICE_KEY: ${{ secrets.ROI_SUPABASE_SERVICE_KEY }}
+          SUPERBRYN_KEY_SALES_IB:    ${{ secrets.SUPERBRYN_KEY_SALES_IB }}
+          SUPERBRYN_KEY_SALES_IB_2:  ${{ secrets.SUPERBRYN_KEY_SALES_IB_2 }}
+          SUPERBRYN_KEY_SALES_OB:    ${{ secrets.SUPERBRYN_KEY_SALES_OB }}
+          SUPERBRYN_KEY_SERVICE_IB:  ${{ secrets.SUPERBRYN_KEY_SERVICE_IB }}
+          SUPERBRYN_KEY_SERVICE_OB:  ${{ secrets.SUPERBRYN_KEY_SERVICE_OB }}
+        run: node controlTower/scripts/dailyReport.js
+
+      # Backstop: if the job fails BEFORE the script could post its own alert
+      # (e.g. npm ci / checkout died), still notify the alerting channel.
+      - name: Alert on infrastructure failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN:     ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_ALERT_CHANNEL: ${{ secrets.SLACK_ALERT_CHANNEL }}
+        run: |
+          curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"$SLACK_ALERT_CHANNEL\",\"text\":\":rotating_light: *Vini daily control tower — workflow failed* (setup/infra step). No report sent. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            > /dev/null || true
