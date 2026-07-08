@@ -229,9 +229,26 @@ async function apiMetrics(teamId, dept, start, end) {
   };
 }
 async function apiActionItems(teamId, dept, start, end) {
+  // REAL action items from dealer_leads.actionItems, created in the report window, grouped by intent.
+  // Fetched via reporting-vini /api/action-items?scope=created — the faithful successor to the old
+  // getActionItems() "createdAt BETWEEN start/end GROUP BY intent" query.
+  //   Was: ib.report.intent (INBOUND conversation-intent) — a different, much smaller signal that
+  //   under-counted by 3-5× and read 0 on quiet-inbound days despite dozens of real CRM action items.
+  const svc = dept === "service" ? "service" : "sales";
   try {
-    const { ib } = apiPickDept(await apiReport(teamId, start, end), dept);
-    const items = ((ib.report || {}).intent || []).map((i) => ({ intent: i.label, count: Number(i.value) || 0 })).filter((i) => i.count > 0);
+    const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=created&start=${start}&end=${end}&limit=200`;
+    const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {} });
+    if (!res.ok) throw new Error(`action-items ${res.status} (${teamId} ${start}..${end})`);
+    const j = await res.json();
+    if (j && j.degraded) throw new Error(`action-items degraded (${teamId})`);
+    // Group the row-level items by intent → [{intent, count}] (blank intents already dropped server-side).
+    const byIntent = new Map();
+    for (const it of j.actionItems || []) {
+      const k = (it.intent || "").trim();
+      if (!k) continue;
+      byIntent.set(k, (byIntent.get(k) || 0) + 1);
+    }
+    const items = [...byIntent.entries()].map(([intent, count]) => ({ intent, count })).sort((a, b) => b.count - a.count);
     return { total: items.reduce((s, i) => s + i.count, 0), items };
   } catch { return { total: 0, items: [] }; }
 }
