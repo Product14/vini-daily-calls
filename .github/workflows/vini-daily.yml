@@ -44,6 +44,9 @@ jobs:
           MAIL_BCC:            ${{ secrets.MAIL_BCC }}
           SLACK_BOT_TOKEN:     ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL:       ${{ secrets.SLACK_CHANNEL }}
+          SLACK_ALERT_CHANNEL: ${{ secrets.SLACK_ALERT_CHANNEL }}
+          ROI_SUPABASE_URL:         ${{ secrets.ROI_SUPABASE_URL }}
+          ROI_SUPABASE_SERVICE_KEY: ${{ secrets.ROI_SUPABASE_SERVICE_KEY }}
           SUPERBRYN_KEY_SALES_IB:    ${{ secrets.SUPERBRYN_KEY_SALES_IB }}
           SUPERBRYN_KEY_SALES_IB_2:  ${{ secrets.SUPERBRYN_KEY_SALES_IB_2 }}
           SUPERBRYN_KEY_SALES_OB:    ${{ secrets.SUPERBRYN_KEY_SALES_OB }}
@@ -56,11 +59,11 @@ jobs:
       - name: Alert on infrastructure failure
         if: failure()
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL:   ${{ secrets.SLACK_CHANNEL }}
+          SLACK_BOT_TOKEN:     ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_ALERT_CHANNEL: ${{ secrets.SLACK_ALERT_CHANNEL }}
         run: |
           curl -s -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"channel\":\"$SLACK_CHANNEL\",\"text\":\":rotating_light: *Vini daily control tower — workflow failed* (setup/infra step). No report sent. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            -d "{\"channel\":\"$SLACK_ALERT_CHANNEL\",\"text\":\":rotating_light: *Vini daily control tower — workflow failed* (setup/infra step). No report sent. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
             > /dev/null || true
