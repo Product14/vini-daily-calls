@@ -106,7 +106,11 @@ function smsSessions(msgs, gapMin) {
 // The reporting-vini read API now requires a credential (it returns per-customer PII). Forward the
 // trusted service secret (preferred) or the Spyne token so these server-to-server calls authorize;
 // without this the conversations/action-items/reports/meetings calls return 401.
-const REPORTING_AUTH = process.env.CRON_SECRET || SPYNE_TOKEN || "";
+// canonical: reporting-vini's read API authorizes on ITS OWN service secret. That is NOT necessarily
+// this app's CRON_SECRET (which guards our Vercel crons). Prefer a dedicated REPORTING_CRON_SECRET
+// (set to reporting-vini's secret) so our calls authorize once reporting enforces auth; fall back to
+// the old chain so nothing changes where the dedicated var isn't set.
+const REPORTING_AUTH = process.env.REPORTING_CRON_SECRET || process.env.CRON_SECRET || SPYNE_TOKEN || "";
 // Set when any feed response comes back degraded (e.g. reporting-vini missing CLICKHOUSE_* → empty
 // feed). Surfaced loudly at the end of runOnce so a misconfig can't silently disable all transactional
 // email for days. Reset at the start of each pass.
