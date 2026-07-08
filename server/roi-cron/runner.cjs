@@ -252,13 +252,30 @@ async function apiActionItems(teamId, dept, start, end) {
     return { total: items.reduce((s, i) => s + i.count, 0), items };
   } catch { return { total: 0, items: [] }; }
 }
+// Action-item scoreboard (scope=stats): current-state `overdue` + `completed` (closed within [start,end)).
+// Feeds the digest's "N overdue" chip and "N closed <period>" note — both previously unwired (silent 0).
+// De-duped to latest CDC row per _id server-side. Degrades to zeros; never throws into the pipeline.
+async function apiActionItemStats(teamId, dept, start, end) {
+  const svc = dept === "service" ? "service" : "sales";
+  try {
+    const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=stats&start=${start}&end=${end}`;
+    const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {} });
+    if (!res.ok) throw new Error(`action-items stats ${res.status} (${teamId})`);
+    const j = await res.json();
+    if (j && j.degraded) throw new Error(`action-items stats degraded (${teamId})`);
+    const s = (j && j.stats) || {};
+    return { overdue: Number(s.overdue) || 0, closedYesterday: Number(s.completed) || 0 };
+  } catch { return { overdue: 0, closedYesterday: 0 }; }
+}
 async function apiCampaigns(teamId, dept, start, end) {
   try {
     const { ob } = apiPickDept(await apiReport(teamId, start, end), dept);
     const mapped = ((ob.report || {}).activeCampaigns || []).map((c) => {
       const dials = Number(c.enrolled) || 0, appts = Number(c.appts) || 0;
       const conversion = c.apptRate != null ? `${Number(c.apptRate).toFixed(1)}%` : dials > 0 ? `${((appts * 100) / dials).toFixed(1)}%` : "0%";
-      return { name: (c.name || "").trim() || "Campaign", dials, appts, conversion };
+      // warmLeads = distinct enrolled leads with a buying-intent outcome (reporting-vini canonical);
+      // MUST carry through or the digest's "Warm" stat reads 0.
+      return { name: (c.name || "").trim() || "Campaign", dials, appts, conversion, warm: Number(c.warmLeads) || 0 };
     }).filter((c) => c.dials > 0);
     // dedupe by name (keep the highest-enrolled row), then surface the most productive — sorted by
     // appts desc then enrolled desc, capped — so a long recall list can't bloat the email.
@@ -269,7 +286,13 @@ async function apiCampaigns(teamId, dept, start, end) {
 }
 // metric fetchers — Reporting API only (day window = apiStart..apiEnd, MTD = apiMonthStart..apiEnd)
 const getMetrics = (teamId, dept, w, win) => apiMetrics(teamId, dept, win === "mtd" ? w.apiMonthStart : w.apiStart, w.apiEnd);
-const getActionItems = (teamId, dept, w) => apiActionItems(teamId, dept, w.apiStart, w.apiEnd);
+const getActionItems = async (teamId, dept, w) => {
+  const [items, stats] = await Promise.all([
+    apiActionItems(teamId, dept, w.apiStart, w.apiEnd),
+    apiActionItemStats(teamId, dept, w.apiStart, w.apiEnd),
+  ]);
+  return { ...items, overdue: stats.overdue, closedYesterday: stats.closedYesterday };
+};
 const getCampaigns = (teamId, dept, w) => apiCampaigns(teamId, dept, w.apiStart, w.apiEnd);
 
 // ── guardrails ──────────────────────────────────────────────────────────────
@@ -677,10 +700,13 @@ async function runOnce() {
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
       const m = {
-        ...day, actionItemsTotal: ai.total,
+        ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday,
         appointmentsYesterdayMTD: mtd.appointmentsYesterday,
         warmTransfersMTD: mtd.warmTransfers,
         inboundUniqueLeadsMTD: mtd.inboundUniqueLeads,
+        // real-conversations MTD drives the hero's "…this month" pop-out; without it the hero
+        // silently falls back to "leads worked this month" on conversation-focus rooftops.
+        conversationsReachedMTD: mtd.conversationsReached,
         outboundUniqueReachedMTD: mtd.outboundUniqueReached,
         outboundConnectRateMTD: mtd.outboundConnectRate,
         outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet,
@@ -835,7 +861,7 @@ async function backfill(start, end) {
         const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
         const ai = await getActionItems(L.team_id, L.department, w);
         const camps = await getCampaigns(L.team_id, L.department, w);
-        const m = { ...dayM, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
+        const m = { ...dayM, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, conversationsReachedMTD: mtd.conversationsReached, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
         const tpl = pickTemplate(c, "daily");
         const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day, daily_template: tpl, digest_focus: pickFocus(c, m) };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
@@ -1044,7 +1070,7 @@ async function generateAndSendNow(opts) {
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
-      const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
       const tpl = pickTemplate(c, cadence);
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const g = guardrailFor(tpl, m);
@@ -1103,7 +1129,7 @@ async function previewDigestNow(opts) {
   const day = await getMetrics(teamId, department, w, "day");
   const mtd = await getMetrics(teamId, department, w, "mtd");
   const ai = await getActionItems(teamId, department, w);
-  const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+  const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
   const tpl = pickTemplate(cfg, cadence);
   const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(cfg, m) };
   const g = guardrailFor(tpl, m);
@@ -1154,7 +1180,7 @@ async function runCadence(cadence) {
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
-      const m = { ...day, actionItemsTotal: ai.total, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
       const tpl = pickTemplate(c, cadence); // weekly/monthly → always v2
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const subject = `${L.department === "service" ? "Service" : "Sales"} ${cadence === "weekly" ? "Weekly" : "Monthly"} Digest — ${name}`;

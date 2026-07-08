@@ -379,7 +379,7 @@ function renderDigestHtml(metrics, opts) {
       '<div style="font-size:10px;color:' + FAINT + ';margin-top:5px;">' + esc(sub) + '</div>' +
       '</td></tr></table></td>';
   };
-  var rateRow = '<tr><td class="pad" style="padding:2px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+  var rateRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' +
     rateTile("Hand-offs to team", fmtInt(sHandoffs), fmtInt(sTransfers) + " transfers · " + fmtInt(sCallbacks) + " callbacks") +
     rateTile("Turn rate", rateFrac(qualified, sConvos), "qualified ÷ conversations") +
     rateTile("Close rate", apptsAny > 0 ? rateFrac(apptsAny, qualified) : "—", apptsAny > 0 ? "appointments ÷ qualified" : (qualified > 0 ? fmtInt(qualified) + " qualified to close" : "no bookings yet")) +
@@ -412,17 +412,15 @@ function renderDigestHtml(metrics, opts) {
   if (appointments.length) {
     var apptTotal = num(m.appointmentsUpcomingTotal) || apptAll.length;
     var rows = appointments.map(function (a) {
-      var est = a.estValue != null ? a.estValue : (dollarRate > 0 ? dollarRate : 0);
       var why = a.intent ? humanize(a.intent) : "";
       var sub = [a.vehicle && a.vehicle !== "—" ? esc(a.vehicle) : "", a.phone ? esc(a.phone) : "", why ? esc(why) : ""].filter(Boolean).join(" · ");
       return '<tr>' +
         '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;color:' + INK + ';"><span style="font-weight:700;">' + esc(a.customer || "Customer") + "</span>" + (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:2px;">' + sub + "</div>" : "") + "</td>" +
-        '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:600;color:' + BODY + ';white-space:nowrap;">' + esc(a.sched || "") + "</td>" +
-        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:800;color:' + INK + ';white-space:nowrap;">' + (est > 0 ? money(est) : "") + "</td></tr>";
+        '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:600;color:' + BODY + ';white-space:nowrap;">' + esc(a.sched || "") + "</td></tr>";
     }).join("");
     apptSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Appointments booked · " + pn, L.appointments || consoleUrl) +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' +
-      '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Customer · vehicle · reason</td><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">When</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Est. value</td></tr>' +
+      '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Customer · vehicle · reason</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">When</td></tr>' +
       rows + "</table>" +
       '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(apptTotal) + "</span> AI-booked " + esc(pn) + " &nbsp;·&nbsp; " +
       '<a href="' + esc(L.appointments || consoleUrl) + '" target="_blank" rel="noopener noreferrer" style="color:' + BRAND + ';font-weight:700;text-decoration:none;">View all &#8594;</a></div></td></tr>';
@@ -646,14 +644,6 @@ function renderDigestHtml(metrics, opts) {
       var fr = [["Leads dialed", funnel.contacted], ["Real conversations", funnel.connected], ["Qualified leads", funnel.qualified], ["Appointments — AI-booked", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + panel('<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
     }
-    // AI-handle callout — share of conversations the agent closed without a transfer
-    var transfers = num(m.warmTransfers), transferTotal = num(m.transferTotalCalls);
-    var handlePct = transferTotal > 0 ? Math.round(((transferTotal - transfers) / transferTotal) * 100) : 0;
-    var handleMsg = handlePct > 0
-      ? person + " resolved <b>" + handlePct + "% of conversations</b> without a human hand-off" + (transfers > 0 ? ", routing only <b>" + fmtInt(transfers) + "</b> warm transfer" + (transfers === 1 ? "" : "s") + " to your team." : ".")
-      : "Outbound reached <b>" + fmtInt(num(m.outboundUniqueReached)) + "</b> unique leads at a <b>" + Math.round(num(m.outboundConnectRate)) + "%</b> connect rate.";
-    var handleCallout = calloutBox("✦", "AI handle rate", handleMsg, "lavender");
-
     outboundSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Outbound " + Dept.toLowerCase() + " performance") +
       panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       '<td valign="top"><div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(obBig.label) + "</div>" +
@@ -666,7 +656,7 @@ function renderDigestHtml(metrics, opts) {
       // VINI agent device card removed per Jun-2026 review.
       "</tr></table>" +
       ((callOut + smsOut + chatOut) > 0 ? '<div style="margin-top:18px;">' + eyebrow("Channel engaged") + channelBar(callOut, smsOut, chatOut) + "</div>" : "")) +
-      outcomesHtml + handleCallout + "</td></tr>";
+      outcomesHtml + "</td></tr>";
   }
 
   // ── TOP CAMPAIGN (spec §6 — most appointments, fallback most warm) ──────────
@@ -675,16 +665,15 @@ function renderDigestHtml(metrics, opts) {
   if (camps.length) {
     var best = camps.slice().sort(function (a, b) { return (num(b.appts) - num(a.appts)) || (num(b.warm) - num(a.warm)) || (num(b.enrolled || b.dials) - num(a.enrolled || a.dials)); })[0];
     var enrolled = num(best.enrolled || best.dials), cappts = num(best.appts), warm = num(best.warm);
-    var rate = best.conversion != null ? best.conversion : (best.apptRate != null ? num(best.apptRate) + "%" : (enrolled > 0 ? ((cappts * 100) / enrolled).toFixed(1) + "%" : "0%"));
     var img = campImgs[0];
-    var stat = function (val, lbl, col) { return '<td width="25%" valign="top"><div style="font-size:19px;font-weight:800;color:' + (col || INK) + ';">' + esc(val) + '</div><div style="font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;margin-top:3px;">' + esc(lbl) + "</div></td>"; };
+    var stat = function (val, lbl, col) { return '<td width="33%" valign="top"><div style="font-size:19px;font-weight:800;color:' + (col || INK) + ';">' + esc(val) + '</div><div style="font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;margin-top:3px;">' + esc(lbl) + "</div></td>"; };
     var imgCell = img ? '<td class="col" width="190" valign="top" style="font-size:0;line-height:0;"><img src="' + esc(img) + '" width="190" alt="" style="display:block;width:190px;max-width:190px;height:auto;border-radius:12px;" /></td><td width="16" class="col" style="font-size:0;">&nbsp;</td>' : "";
     campSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Top campaign", consoleUrl) +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;"><tr><td style="padding:16px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       imgCell +
       '<td valign="middle"><div><span style="font-size:9px;font-weight:800;letter-spacing:.06em;color:' + POS + ";background:" + POS_BG + ';border-radius:6px;padding:2px 8px;">ACTIVE</span></div>' +
       '<div style="font-size:15px;font-weight:800;color:' + INK + ';margin-top:9px;">' + esc(best.name) + "</div>" +
-      '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;"><tr>' + stat(fmtInt(enrolled), "Enrolled", BRAND) + stat(fmtInt(cappts), "Appts", INK) + stat(rate, "Appt rate", POS) + stat(fmtInt(warm), "Warm", WARM) + "</tr></table>" +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;"><tr>' + stat(fmtInt(enrolled), "Enrolled", BRAND) + stat(fmtInt(cappts), "Appts", INK) + stat(fmtInt(warm), "Warm", WARM) + "</tr></table>" +
       "</td></tr></table></td></tr></table></td></tr>";
   }
 
@@ -711,13 +700,13 @@ function renderDigestHtml(metrics, opts) {
     '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(opts.dateLabel) + "</div></td>" +
     "</tr></table></td></tr>" +
     // glance
-    hero + kpiRow + rateRow + upsellSection +
+    hero + kpiRow + upsellSection +
     // sections — appointment-focus leads with the appointment list; conversation-focus leads with the
     // work funnel (action items / intents → inbound conversations → outbound) and demotes appointments
     // to a down-funnel widget that only appears when there are any.
     (focus === "conversation"
-      ? warmSection + fuSection + inboundSection + midCta + outboundSection + apptSection + tvSection + campSection
-      : apptSection + warmSection + fuSection + tvSection + inboundSection + midCta + outboundSection + campSection) +
+      ? warmSection + fuSection + inboundSection + midCta + outboundSection + apptSection + rateRow + tvSection + campSection
+      : apptSection + rateRow + warmSection + fuSection + tvSection + inboundSection + midCta + outboundSection + campSection) +
     breakdown +
     // footer
     '<tr><td class="pad" style="padding:24px 28px 28px;" align="center"><div style="font-size:11px;color:' + FAINT + ';line-height:1.7;">Reporting period: ' + esc(opts.dateLabel) + ' &nbsp;·&nbsp; Next report: ' + esc(nextReport) + '<br/>© Spyne · Vini · 2026</div></td></tr>' +
