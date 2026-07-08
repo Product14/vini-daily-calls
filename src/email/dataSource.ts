@@ -415,6 +415,51 @@ export async function loadEventEmails(
   return { rows: stored, hasMore: stored.length === limit };
 }
 
+/** One eligible event from ClickHouse (history + live), via /api/email/roi-event-list. */
+type CHEvent = { eventKey: string; customer?: string; phone?: string; createdAt: string; direction?: string; label?: string; sub?: string };
+
+/** The transactional drill-down FEED: every eligible event from ClickHouse (all dates, history
+ * included), each filed under the date it was supposed to go, with real send-status overlaid from
+ * roi_event_emails where an email actually got produced. This is the "show ALL data, grouped by
+ * intended date" view — not just the sparse generated rows. An event that never produced an email
+ * shows as status `eligible` (id="" → the drawer live-renders + offers Send/Ignore on click).
+ *
+ * Pages purely on the ClickHouse stream (newest-first) so the drawer's offset=rows.length stays
+ * valid. Falls back to the stored-rows-only view (loadEventEmails) if the CH endpoint is down. */
+export async function loadEventFeed(
+  teamId: string, department: string, emailType: string,
+  opts: { limit?: number; offset?: number; direction?: string | null } = {},
+): Promise<EventEmailPage> {
+  const limit = opts.limit ?? 50;
+  const offset = Math.max(0, opts.offset ?? 0);
+  const direction = opts.direction ?? null;
+  // 1) eligible events from ClickHouse (all dates)
+  let ch: CHEvent[] | null = null;
+  try {
+    const qs = new URLSearchParams({ teamId, department: department || "", emailType, sinceDays: "365", limit: String(limit), offset: String(offset) });
+    if (direction) qs.set("direction", direction);
+    const r = await fetch(`/api/email/roi-event-list?${qs.toString()}`, { cache: "no-store" });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && Array.isArray((j as { events?: unknown }).events)) ch = (j as { events: CHEvent[] }).events;
+  } catch { /* fall through to stored-only */ }
+  if (ch === null) return loadEventEmails(teamId, department, emailType, { limit, offset, direction });
+  // 2) overlay real send-status from roi_event_emails, matched by event_key
+  const stored = (await loadEventEmails(teamId, department, emailType, { limit: 200, offset: 0, direction })).rows;
+  const byKey = new Map(stored.map((s) => [s.event_key, s]));
+  const rows: EventEmailRow[] = ch.map((ev) => {
+    const s = byKey.get(ev.eventKey);
+    if (s) return s; // a real generated/sent email — keep its exact status / html / opens
+    return {
+      id: "", email_type: emailType, status: "eligible",
+      subject: ev.label || null, recipients: null, sent_at: null,
+      created_at: (ev.createdAt || "").replace(" ", "T"), // CH DateTime → ISO-ish for Date()
+      opened_at: null, open_count: 0, reason: ev.sub || null,
+      rendered_html: null, event_key: ev.eventKey, message_id: null,
+    };
+  });
+  return { rows, hasMore: ch.length === limit };
+}
+
 /** Persist a per-rooftop email-type toggle (roi_rooftop_config). Browser write — RLS is off
  * on this project and anon has been granted UPDATE, so the tracker writes directly. */
 // Persist rooftop config (email-type toggles + daily template) through the backend

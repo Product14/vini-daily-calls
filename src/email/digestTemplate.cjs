@@ -179,8 +179,14 @@ var INTENT_LABELS = {
   // — sales —
   checkvehicleavailability: "Vehicle availability", checkvehicleprice: "Pricing questions", inquiretradeinvalue: "Trade-in value",
   inquirefinancestatus: "Financing questions", salesconnecttofinance: "Finance hand-offs", scheduletestdrive: "Test-drive requests",
-  scheduleappointment: "Appointments to schedule", salesscheduleshowroomvisit: "Showroom visits to schedule",
-  salessendvehicleinfo: "Vehicle info to send", salesfollowupwithquote: "Quotes to follow up", saleslostlead: "Lost leads to review", salesescalatetomanager: "Manager escalations",
+  scheduleappointment: "Appointments to schedule", salesscheduleappointment: "Appointments to schedule", salesscheduleshowroomvisit: "Showroom visits to schedule",
+  salessendvehicleinfo: "Vehicle info to send", sendvehicleinformation: "Vehicle info to send", salesfollowupwithquote: "Quotes to follow up",
+  saleslostlead: "Lost leads to review", salesescalatetomanager: "Manager escalations",
+  salesleftvoicemail: "Voicemails left", salesschedulecallback: "Callbacks to schedule", salesscheduletestdrive: "Test-drive requests",
+  salestradeinfollowup: "Trade-in follow-ups", salesfollowupbeback: "Be-back follow-ups", rescheduleappointment: "Appointments to reschedule",
+  inquirewarranty: "Warranty questions", inquireinsuranceoptions: "Insurance questions", inquireleaseoptions: "Lease questions",
+  inquiredeliverystatus: "Delivery-status questions", inquirevehiclehistory: "Vehicle-history questions", checkvehiclefeatures: "Feature questions",
+  sendvehiclecatalog: "Catalogs to send", sendvehiclecatalogimages: "Catalogs to send", sendvehicleoptions: "Vehicle options to send",
   // — service —
   servicescheduleappointment: "Service appointments to schedule", servicerecallfollowup: "Recall follow-ups", recallresponse: "Recall responses",
   servicestatusupdate: "Repair-status updates", pendingstatusupdate: "Pending repair-order status", serviceescalatetoadvisor: "Advisor escalations",

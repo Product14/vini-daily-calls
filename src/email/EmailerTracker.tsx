@@ -18,7 +18,7 @@ import {
   type SubType,
   type SendCell,
 } from "./mockData";
-import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventEmails, loadTeamRecipients, type EventCounts, type EventEmailRow, type TeamRecipient } from "./dataSource";
+import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventFeed, loadTeamRecipients, type EventCounts, type EventEmailRow, type TeamRecipient } from "./dataSource";
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
@@ -808,10 +808,10 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   useEffect(() => {
     if (!entry) { setRows(null); setPreview(null); setHasMore(false); return; }
     setRows(null); setPreview(null); setSendMsg(""); setGenState("idle"); setHasMore(false);
-    void loadEventEmails(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction }).then((page) => {
+    void loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction }).then((page) => {
       setRows(page.rows); setHasMore(page.hasMore);
-      // NOTE: an empty list no longer auto-opens a synthetic preview — the drill-down is a record
-      // of real sends only. Generating a preview is an explicit action (empty-state button below).
+      // Shows ALL eligible events (from ClickHouse, every date) filed under the date each was
+      // supposed to go, with real send-status overlaid — not just the sparse generated rows.
     });
   }, [entry]);
   const loadMore = useCallback(async () => {
@@ -819,7 +819,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     setLoadingMore(true);
     try {
       const offset = rows?.length ?? 0;
-      const page = await loadEventEmails(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset, direction: entry.direction });
+      const page = await loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset, direction: entry.direction });
       setRows((prev) => [...(prev ?? []), ...page.rows]);
       setHasMore(page.hasMore);
     } finally { setLoadingMore(false); }
