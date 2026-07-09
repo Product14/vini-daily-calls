@@ -19,6 +19,7 @@ import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { fetchDailyRows } from "./agentsSource.js";
+import { COST_PER_APPT, PREMIUM_APPT_VALUE, PREMIUM_ACCOUNTS } from "./viniAgentTracker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SNAP_DIR  = join(__dirname, "..", "data", "snapshots");
@@ -172,7 +173,7 @@ function readSuperbrynHistory() {
  *   so we can include today's % All Clear without needing a saved snapshot.
  * @returns {Promise<{ byAgent: object, asOfDate: string, dates: object }>}
  */
-export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSummary } = {}) {
+export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSummary, liveRows = [] } = {}) {
   const today = todayIST();
   const d1 = addDays(today, -1);
   const d2 = addDays(today, -2);
@@ -184,6 +185,39 @@ export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSu
 
   const dailyRows = await fetchDaily();
   const dailyIdx  = aggregateDailyMetabase(dailyRows);
+
+  // Per-(rooftop, agent) daily appointments — lets ROI Multiple be computed for
+  // EVERY column (D-2/D-3 + prior months), not just today. Keyed team|agent →
+  // day → appts. (Older code stuffed one window-value into mtd+d1 only, leaving
+  // the rest blank — the "older data not printing" bug, user 10-Jul.)
+  const apptByTeamDay = new Map();
+  for (const r of dailyRows) {
+    const ag = AGENT_LABELS[r.agent_type]; if (!ag || !r.team_id) continue;
+    const k = `${r.team_id}|${ag}`;
+    if (!apptByTeamDay.has(k)) apptByTeamDay.set(k, {});
+    apptByTeamDay.get(k)[r.day] = (apptByTeamDay.get(k)[r.day] || 0) + Number(r.appointments || 0);
+  }
+  const cpaOf = (row) =>
+    (PREMIUM_ACCOUNTS.has(row.account) || PREMIUM_ACCOUNTS.has(row.rooftop)) ? PREMIUM_APPT_VALUE
+    : (COST_PER_APPT[row.agentShort] ?? null);
+  const apptsInRange = (teamId, agent, from, to) => {
+    const days = apptByTeamDay.get(`${teamId}|${agent}`); if (!days) return 0;
+    let s = 0; for (const [d, n] of Object.entries(days)) if (d >= from && d <= to) s += n; return s;
+  };
+  const liveByAgent = {};
+  for (const row of liveRows) (liveByAgent[row.agentShort] ||= []).push(row);
+  // ARR-weighted ROI (appts × cost-per-appt ÷ MRR) for an agent-type over a window.
+  const roiForRange = (agent, from, to) => {
+    const rows = liveByAgent[agent]; if (!rows || !rows.length) return null;
+    let arrSum = 0, roiW = 0;
+    for (const row of rows) {
+      const cpa = cpaOf(row), mrr = Number(row.mrr) || 0, arr = Number(row.arr) || 0;
+      if (cpa == null || mrr <= 0 || arr <= 0) continue;
+      const roi = (apptsInRange(row.teamId, agent, from, to) * cpa) / mrr;
+      roiW += roi * arr; arrSum += arr;
+    }
+    return arrSum > 0 ? roiW / arrSum : null;
+  };
   const { snaps, raw: rawSnaps } = readSnapshots();
   const superHist = readSuperbrynHistory();
 
@@ -312,6 +346,7 @@ export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSu
       pctBlocked:     {},   // % Blocked in OB (from In_Ob)
       arrBlocked:     {},   // $ ARR blocked in OB (from In_Ob.upsideArr)
       abr:            {},   // appts / leads
+      roiMultiple:    {},   // ARR-weighted (appts × cost-per-appt ÷ MRR), per period
       pctRooftopsAppt:{},   // rooftops w/ appt / rooftops w/ activity
       callConnection: {},   // leads_with_calls / total_calls
       smsReply:       {},   // leads_with_sms / total_sms
@@ -366,6 +401,10 @@ export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSu
       out.pctBlocked[key]     = null;     // filled from today's In_Ob below
       out.arrBlocked[key]     = arrBlockedFromSnap(from, to);
       out.abr[key]            = r.abr;
+      // ROI Multiple = appts × cost ÷ MONTHLY mrr, so it only reads sensibly at
+      // month scale. Fill MTD + prior-month columns; dash single-day columns
+      // (one day ÷ a month's MRR would show a misleading ~0.1×).
+      out.roiMultiple[key]    = (from === to) ? null : roiForRange(agent, from, to);
       out.pctRooftopsAppt[key]= r.pctRooftopsAppt;
       out.callConnection[key] = r.callConnection;
       out.smsReply[key]       = r.smsReply;

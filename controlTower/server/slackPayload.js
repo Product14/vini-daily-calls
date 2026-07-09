@@ -36,7 +36,8 @@ export async function assembleSlackPayload() {
   ]);
 
   const todaySnap = { ragByAgent: vini.byAgentType.map(b => ({ label: b.label, live: b.live, green: b.green })) };
-  const historical = await buildHistoricalMetrics({ todaySnapshot: todaySnap, todayQuality: quality, obSummary });
+  // liveRows drive the period-aware ROI Multiple (every column, not just today).
+  const historical = await buildHistoricalMetrics({ todaySnapshot: todaySnap, todayQuality: quality, obSummary, liveRows: liveChurn.live.rows });
 
   const perAgentArr = {};
   for (const agent of AGENT_ORDER) {
@@ -45,17 +46,6 @@ export async function assembleSlackPayload() {
     const liveB = vini.byAgentType.find(b => b.label === agent);
     const liveArr = liveB ? (liveB.greenArr || 0) + (liveB.amberArr || 0) + (liveB.redArr || 0) : 0;
     perAgentArr[agent] = { cArr, obArr, liveArr };
-
-    let arrSum = 0, roiW = 0;
-    for (const a of scored) {
-      if (a.agentShort !== agent) continue;
-      if (a.roiMultiple == null || a.arr == null) continue;
-      roiW += a.roiMultiple * a.arr; arrSum += a.arr;
-    }
-    const roi = arrSum > 0 ? roiW / arrSum : null;
-    if (historical?.byAgent?.[agent]) {
-      historical.byAgent[agent].roiMultiple = { mtd: roi, d1: roi, d2: null, d3: null, m1: null, m2: null, m3: null };
-    }
   }
 
   // Day-on-day ARR movement vs the most recent prior snapshot.
