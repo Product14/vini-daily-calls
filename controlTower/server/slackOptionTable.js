@@ -85,7 +85,7 @@ export function buildTableHtml(p) {
     { label: "Warm leads",   fmt: num,   key: "warmLeads", showMtd: true, overall: num(sumD1("warmLeads")), overallMtd: num(sumMtd("warmLeads")) },
     { label: "Appointments", fmt: num,   key: "appts",  cond: "appts", showMtd: true, overall: num(sumD1("appts")), overallVal: sumD1("appts"), overallMtd: num(sumMtd("appts")) },
     { label: "ABR",          fmt: pct1,  key: "abr",    cond: "abr",   showMtd: true, overall: pct1(sumD1("leads") ? sumD1("appts") / sumD1("leads") : null), overallVal: sumD1("leads") ? sumD1("appts") / sumD1("leads") : null, overallMtd: pct1(sumMtd("leads") ? sumMtd("appts") / sumMtd("leads") : null) },
-    { label: "ROI Multiple", fmt: mult,  key: "roiMultiple",overall: "—" },
+    { label: "ROI Multiple", fmt: mult,  key: "roiMultiple", useMtd: true, overall: "—" },
     { label: "% All Clear",  fmt: pct,   key: "pctAllClear",overall: "—" },
     { label: "Blocked ARR",  fmt: money, key: "arrBlocked", overall: money(sumD1("arrBlocked")) },
   ];
@@ -102,7 +102,9 @@ export function buildTableHtml(p) {
   const bodyRows = rows.map((r, i) => {
     const bg = i % 2 === 1 ? PAL.rowAlt : PAL.card;
     const cells = AGENTS.map(a => {
-      const v = r.arrKey ? A[a]?.[r.arrKey] : d1(a, r.key);
+      // ROI is a monthly-scale metric — show MTD (a single day ÷ monthly MRR is
+      // meaningless). Everything else shows yesterday (D-1).
+      const v = r.arrKey ? A[a]?.[r.arrKey] : (r.useMtd ? mtd(a, r.key) : d1(a, r.key));
       const sub = r.arrKey ? ddLine(p.arrDeltas?.[a]?.[r.arrKey])
                 : r.showMtd ? mtdLine(r.fmt(mtd(a, r.key))) : "";
       const cColor = r.cond ? (condColor(r.cond, v, a) || PAL.text) : PAL.text;

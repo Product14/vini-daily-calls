@@ -277,6 +277,7 @@ try {
     todaySnapshot: todaySnap,
     todayQuality:  quality,
     obSummary,
+    liveRows: liveAndChurn.live.rows,   // period-aware ROI Multiple (all columns)
   });
 
   // Per-agent funnel ARRs for the trend-card header (CEO 18-Jun: "CARR → in
@@ -301,15 +302,8 @@ try {
       arrSum += a.arr;
     }
     payload.perAgentRoi[agent] = arrSum > 0 ? roiW / arrSum : null;
-    // Stuff today's portfolio ROI into the historical matrix so the
-    // per-agent trend table picks it up as a row (D-1 + MTD slots).
-    if (payload.historical?.byAgent?.[agent]) {
-      payload.historical.byAgent[agent].roiMultiple = {
-        mtd: payload.perAgentRoi[agent],
-        d1:  payload.perAgentRoi[agent],
-        d2: null, d3: null, m1: null, m2: null, m3: null,
-      };
-    }
+    // ROI Multiple in the trend table now comes period-aware from
+    // buildHistoricalMetrics (every column) — no longer overwritten here.
   }
   console.log(`  Historical: MTD/D-1..3/M-1..3 computed for ${Object.keys(payload.historical.byAgent).length} agents`);
 } catch (e) {
