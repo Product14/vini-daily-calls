@@ -20,6 +20,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { fetchDailyRows } from "./agentsSource.js";
 import { COST_PER_APPT, PREMIUM_APPT_VALUE, PREMIUM_ACCOUNTS } from "./viniAgentTracker.js";
+import { fetchAgentPeriodDistinct } from "./periodDistinct.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SNAP_DIR  = join(__dirname, "..", "data", "snapshots");
@@ -88,6 +89,12 @@ function aggregateDailyMetabase(rows) {
     v.leads          += Number(r.touched_leads || 0);
     v.qualified      += Number(r.qualified_leads || 0);
     v.appts          += ap;
+    // Service OB's campaigns now end in a voucher claim (dealer_leads.voucher),
+    // not a booked meeting — a claim is the appointment-equivalent completed
+    // outcome for this agent type, so it's folded straight into `appts` here.
+    // Every downstream consumer (ABR, the "Appointments booked" row) reads off
+    // `appts`, so this single fold-in point is enough — no separate bookkeeping.
+    if (ag === "Service OB") v.appts += Number(r.voucher_claims || 0);
     v.totalCalls     += Number(r.total_calls || 0);
     v.leadsWithCalls += Number(r.leads_with_calls || 0);
     v.totalSms       += Number(r.total_sms_conversations || 0);
@@ -220,6 +227,19 @@ export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSu
   };
   const { snaps, raw: rawSnaps } = readSnapshots();
   const superHist = readSuperbrynHistory();
+
+  // TRUE distinct-lead counts for every multi-day column (MTD + prior months).
+  // Summing the daily rows double-counts leads worked on >1 day, so those
+  // columns are overridden below with these deduped-over-the-range figures.
+  // Single-day columns (D-1/D-2/D-3) keep the daily rows (already correct).
+  const distinctPeriods = {
+    mtd: [`${thisMonth}-01`, today],
+    m1:  [`${m1}-01`, `${m1}-31`],
+    m2:  [`${m2}-01`, `${m2}-31`],
+    m3:  [`${m3}-01`, `${m3}-31`],
+  };
+  const trueDist = await fetchAgentPeriodDistinct(distinctPeriods)
+    .catch((e) => { console.error("✗ true-distinct query failed, monthly leads stay summed:", e.message); return {}; });
 
   // ─── Per-agent metric assembly ───────────────────────────────────────────
   const byAgent = {};
@@ -417,6 +437,20 @@ export async function buildHistoricalMetrics({ todaySnapshot, todayQuality, obSu
       out.appts[key]          = r.appts          || null;
       out.totalCalls[key]     = r.totalCalls     || null;
       out.totalSms[key]       = r.totalSms       || null;
+
+      // Multi-day columns: replace the summed (double-counted) distinct metrics
+      // with the true deduped-over-range figures. Recompute ABR & Transfer %
+      // against the corrected denominators. (appts is a sum → already correct.)
+      const td = trueDist?.[agent]?.[key];
+      if (td && from !== to) {
+        out.leads[key]     = td.leads     || null;
+        out.qualified[key] = td.qualified || null;
+        out.warmLeads[key] = td.warmLeads || null;
+        const usesQualified = agent === "Sales OB" || agent === "Service IB";
+        const denom = usesQualified ? td.qualified : td.leads;
+        out.abr[key]          = denom > 0 ? (r.appts || 0) / denom : null;
+        out.transferRate[key] = td.leads > 0 ? td.transfers / td.leads : null;
+      }
     }
 
     // Today's snapshot + today's quality fill the d1 slot if missing.
