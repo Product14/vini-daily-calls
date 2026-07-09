@@ -71,6 +71,10 @@ const MAIL_URL = process.env.MAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/sen
 const MAIL_TEMPLATE = process.env.MAIL_TEMPLATE || "email-control-tower-report";
 const MAIL_TOKEN = process.env.MAIL_TOKEN || "";
 const DRY_RUN = process.env.DRY_RUN !== "false";               // default ON
+// Domain reputation: stagger mail sends between rooftops to avoid ISP filtering on burst delivery.
+// Default 3s between rooftop sends (~3.5 min for 67 rooftops, completes well within the hourly cron).
+// Set MAIL_SEND_DELAY_MS=0 to disable or tune for faster/slower sends.
+const MAIL_SEND_DELAY_MS = Number(process.env.MAIL_SEND_DELAY_MS ?? 3000);
 // Metrics source: the Reporting API (Supabase-backed) at reporting-vini. Metabase has been removed.
 const REPORTING_API_BASE = process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app";
 // The reporting-vini read API requires a credential (it returns PII). Forward the trusted service
@@ -532,7 +536,26 @@ function guardrailFor(tpl, m) {
   return guardrailV1(m1);
 }
 
-async function sendMail(to, subject, html, opts) {
+// ── Send queue: serialize mail sends with domain-reputation protection delays ──────────────────
+// Rendering/metrics fetch happens in parallel (that's expensive), but the actual mail send
+// goes through a single queue with delays between rooftops to avoid ISP filtering on bursts.
+let _sendQueue = Promise.resolve();
+let _lastSendAt = 0;
+function enqueueSend(to, subject, html, opts) {
+  _sendQueue = _sendQueue.then(async () => {
+    const now = Date.now();
+    const elapsed = now - _lastSendAt;
+    if (MAIL_SEND_DELAY_MS > 0 && _lastSendAt > 0 && elapsed < MAIL_SEND_DELAY_MS) {
+      const wait = MAIL_SEND_DELAY_MS - elapsed;
+      await new Promise(r => setTimeout(r, wait));
+    }
+    _lastSendAt = Date.now();
+    return sendMailRaw(to, subject, html, opts);
+  });
+  return _sendQueue;
+}
+
+async function sendMailRaw(to, subject, html, opts) {
   // Anti-churn gate: refuse to send a no-value digest (stamped by the renderer)
   // unless the caller passes { force: true } (a deliberate DANGER override). The
   // marker is stripped so a customer never sees it.
@@ -565,6 +588,11 @@ async function sendMail(to, subject, html, opts) {
     await new Promise((r) => setTimeout(r, attempt * 1500));
   }
   throw new Error(lastErr);
+}
+
+// Public sendMail routes through the send queue for domain reputation protection.
+function sendMail(to, subject, html, opts) {
+  return enqueueSend(to, subject, html, opts);
 }
 
 // Slack breakage alert — shared with eventRunner.cjs (transactional emails) so BOTH pipelines alert the
