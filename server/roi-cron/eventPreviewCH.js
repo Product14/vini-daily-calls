@@ -469,3 +469,86 @@ export async function countEventsCH({ sinceDays = 120 } = {}) {
   await aiCount("overdue", "action_item_overdue");
   return out;
 }
+
+// ── PER-DAY mini-report counts for ONE (team × dept × type), live from ClickHouse ──
+// Powers the tracker drill-down's per-day header ("Created · Closed · Eligible" + Sent overlaid
+// from Supabase in the endpoint). Days are bucketed in the DEALER's local zone (canonical
+// windowing) so the header dates line up with the dealer's day, not UTC or the CSM's browser.
+//   created  = source items that appeared that day (appointments booked / conversations had /
+//              action items created). For action items this is the raw created count.
+//   closed   = ACTION ITEMS ONLY — items marked complete that day (bucketed on updatedAt, when the
+//              is_completed flag flipped). N/A (0) for appointments/conversations (no completion state).
+//   eligible = sendable candidates filed under that day, matching listEventsCH's population exactly
+//              (so the header total agrees with the rows shown below it).
+// Returns { 'YYYY-MM-DD': { created, closed, eligible } }. Sent is merged in by the endpoint.
+export async function countEventsByDayCH({ teamId, department, emailType, tz = "America/New_York", sinceDays = 120 }) {
+  if (!hasClickhouseCreds()) throw new Error("ClickHouse not configured on this server");
+  if (!teamId) throw new Error("teamId required");
+  const dept = department === "service" ? "service" : "sales";
+  const since = "now() - INTERVAL " + (Number(sinceDays) || 120) + " DAY";
+  const Z = lit(tz || "America/New_York");
+  const day = (col) => "toString(toDate(toTimeZone(" + col + ", " + Z + ")))"; // dealer-local calendar date
+  const days = new Map(); // 'YYYY-MM-DD' → { created, closed, eligible }
+  const bump = (rows, field) => {
+    for (const r of rows) {
+      const d = String(r.day || "");
+      if (!d || d === "1970-01-01") continue;
+      const o = days.get(d) || { created: 0, closed: 0, eligible: 0 };
+      o[field] += Number(r.n) || 0;
+      days.set(d, o);
+    }
+  };
+
+  if (emailType === "post_appointment") {
+    // Every VINI-booked appointment is a sendable candidate → created == eligible.
+    const rows = await runClickhouse(
+      "SELECT " + day("m.created_at") + " day, uniqExact(m.meeting_id) n" +
+      " FROM dealer_leads.meetings m" +
+      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" +
+      " AND if(m.service_type='service','service','sales')=" + lit(dept) +
+      " AND m.created_at >= " + since + " GROUP BY day");
+    bump(rows, "created"); bump(rows, "eligible");
+  } else if (emailType === "post_conversation") {
+    // created == eligible = completed AI calls (this dept) + SMS threads with a real customer reply.
+    const calls = await runClickhouse(
+      "SELECT " + day("e.createdAt") + " day, uniqExact(e.callId) n" +
+      " FROM dealer_leads.endcallreports e" +
+      " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)" +
+      " AND lower(e.callDetails_agentInfo_agentType)=" + lit(dept) + " AND e.createdAt >= " + since + " GROUP BY day");
+    bump(calls, "created"); bump(calls, "eligible");
+    const sms = await runClickhouse(
+      "SELECT " + day("cv.createdAt") + " day, uniqExact(cv.conversationId) n" +
+      " FROM dealer_leads.conversations cv LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
+      " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId)" +
+      " AND coalesce(nullIf(dm.dept,''),'sales')=" + lit(dept) + " AND cv.createdAt >= " + since +
+      " AND " + SMS_HAS_REPLY + " GROUP BY day");
+    bump(sms, "created"); bump(sms, "eligible");
+  } else {
+    // action_item / action_item_overdue
+    const aiScope = emailType === "action_item_overdue" ? "overdue" : "open";
+    // created — raw items created that day (deduped to the latest _version per _id).
+    const created = await runClickhouse(
+      "SELECT " + day("createdAt") + " day, count() n FROM (" +
+      "SELECT _id, createdAt FROM dealer_leads.actionItems" +
+      " WHERE is_active=1 AND __deleted=0 AND team_id=" + lit(teamId) +
+      " AND " + AI_DEPT + "=" + lit(dept) + " AND createdAt >= " + since +
+      " ORDER BY _version DESC LIMIT 1 BY _id) GROUP BY day");
+    bump(created, "created");
+    // closed — items completed that day (bucketed on updatedAt, when is_completed flipped).
+    const closed = await runClickhouse(
+      "SELECT " + day("updatedAt") + " day, count() n FROM (" +
+      "SELECT _id, updatedAt FROM dealer_leads.actionItems" +
+      " WHERE is_active=1 AND __deleted=0 AND is_completed=1 AND team_id=" + lit(teamId) +
+      " AND " + AI_DEPT + "=" + lit(dept) + " AND updatedAt >= " + since +
+      " ORDER BY _version DESC LIMIT 1 BY _id) GROUP BY day");
+    bump(closed, "closed");
+    // eligible — distinct open/overdue leads, filed under the lead's latest item day (matches listEventsCH).
+    const elig = await runClickhouse(
+      "SELECT " + day("lastAt") + " day, uniqExact(leadId) n FROM (" +
+      "SELECT leadId, max(createdAt) lastAt FROM (" + aiBaseSql({ teamId, dept, scope: aiScope, since }) + ") GROUP BY leadId) GROUP BY day");
+    bump(elig, "eligible");
+  }
+  const outObj = {};
+  for (const [d, o] of days) outObj[d] = o;
+  return outObj;
+}

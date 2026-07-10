@@ -103,6 +103,33 @@ function withPixel(html, id) {
   return html.includes("</body>") ? html.replace("</body>", `${img}</body>`) : html + img;
 }
 
+// Per-recipient open attribution (Option B) — see runner.cjs for the full rationale. Most event
+// emails go to a single recipient (already exactly attributable), so this only matters for the few
+// multi-recipient types. DEFAULT OFF; flip with PER_RECIPIENT_PIXEL to fan out one attributed copy
+// per recipient (pixel keyed &r=<email>, which the track-open edge fn flips per person).
+const PER_RECIPIENT_PIXEL = /^(1|true|yes)$/i.test(String(process.env.PER_RECIPIENT_PIXEL || ""));
+function withRecipientPixel(html, email) {
+  if (!html || !email) return html;
+  const enc = encodeURIComponent(email);
+  return html.replace(/(https?:\/\/[^"']*\/functions\/v1\/track-open\?[^"']*?)(["'])/i, (_m, url, q) =>
+    (/[?&]r=/.test(url) ? url : `${url}&r=${enc}`) + q);
+}
+async function sendMailAttributed(emails, subject, html, opts) {
+  if (!PER_RECIPIENT_PIXEL || !Array.isArray(emails) || emails.length <= 1) {
+    return sendMail(emails, subject, html, opts);
+  }
+  let firstId = null;
+  for (const em of emails) {
+    try {
+      const id = await sendMail([em], subject, withRecipientPixel(html, em), opts);
+      if (!firstId) firstId = id;
+    } catch (e) {
+      console.warn(`  ⚠ per-recipient event send skipped ${em}: ${String((e && e.message) || e).slice(0, 120)}`);
+    }
+  }
+  return firstId;
+}
+
 const IS_CLI = require.main === module;
 if (IS_CLI && (!SB_URL || !SB_KEY)) { console.error("Set ROI_SUPABASE_URL + ROI_SUPABASE_SERVICE_KEY"); process.exit(1); }
 const sb = createClient(SB_URL || "http://invalid.local", SB_KEY || "noop", { auth: { persistSession: false } });
@@ -273,8 +300,11 @@ async function runOnce() {
     // GATE: only recipients a human has verified for THIS rooftop (verified_at set) can be emailed —
     // the guarantee against a wrong-rooftop address ever receiving another rooftop's data. Unverified
     // rows are held; the daily audit alert surfaces them for a human to verify.
+    // isRealEmail excludes the phone-only placeholder (…@phone.invalid) so a phone-only
+    // recipient is never emailed (SMS only).
+    const isRealEmail = (e) => /\S+@\S+\.\S+/.test(String(e || "")) && !/@phone\.invalid$/i.test(String(e || ""));
     const emailsForType = (type) =>
-      pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
+      pickTieredRecipients(recs.filter((r) => r.verified_at && isRealEmail(r.email) && deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
     const smsForType = (type) =>
       c.sms_enabled
         ? pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
@@ -477,7 +507,7 @@ async function runOnce() {
         if (!emails.length) { await finish(id, { status: "not_sent", reason: "recipients_missing", subject: job.subject, rendered_html: html }); out.no_recipients++; continue; }
         if (dry) { await finish(id, { status: "suppressed", reason: "dry_run", subject: job.subject, rendered_html: html, recipients: emails.map((e) => ({ email: e })) }); out.suppressed++; continue; }
         const sentAt = new Date().toISOString();
-        const messageId = await sendMail(emails, job.subject, html);
+        const messageId = await sendMailAttributed(emails, job.subject, html);
         await finish(id, { status: "sent", subject: job.subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
         out.sent++;
       } catch (e) { out.errors++; failures.push({ rooftop: name, dept: job.type || dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }

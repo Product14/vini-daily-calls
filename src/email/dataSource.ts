@@ -368,7 +368,7 @@ export async function loadEventCounts(): Promise<EventCounts> {
 }
 
 /** One recipient of a team, with BOTH department memberships + the global enabled flag. */
-export type TeamRecipient = { email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean; phone: string | null; sms_enabled: boolean; role: string | null; subscriptions: import("./mockData").Subscriptions | null; verified_at: string | null };
+export type TeamRecipient = { id: string; email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean; phone: string | null; sms_enabled: boolean; role: string | null; subscriptions: import("./mockData").Subscriptions | null; verified_at: string | null };
 
 /** All recipients for a team (both departments) — powers the ConfigDrawer's side-by-side Sales /
  * Service recipient lists. Each RooftopRow only carries its own department's recipients, so the
@@ -377,7 +377,7 @@ export async function loadTeamRecipients(teamId: string): Promise<TeamRecipient[
   if (!isSupabaseConfigured || !supabase || !teamId) return [];
   const { data, error } = await supabase
     .from("roi_recipients")
-    .select("email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at")
+    .select("id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at")
     .eq("team_id", teamId);
   if (error) { console.warn("[tracker] team recipients read failed:", error.message); return []; }
   return (data ?? []) as TeamRecipient[];
@@ -413,6 +413,83 @@ export async function loadEventEmails(
     stored = (data ?? []) as EventEmailRow[];
   }
   return { rows: stored, hasMore: stored.length === limit };
+}
+
+/** A produced transactional email carrying its team + department, for the cross-rooftop
+ * per-day analytics modal (the plain EventEmailRow drops both). */
+export type EventEmailDayRow = EventEmailRow & { team_id: string; department: string };
+
+/** Every produced transactional email of ONE type across the given teams — newest first,
+ * bounded. Powers the transactional Sent/Opened analytics modal: its per-day trend and the
+ * per-day drill-down. Reads roi_event_emails directly, the same "what actually got produced"
+ * record the Sent (status='sent') and Opened (opened_at) KPI numerators are computed from, so
+ * the modal's counts reconcile with the KPI chips. `direction` is intentionally NOT filtered —
+ * roi_event_emails has no direction column and the `sent`/`opened` numerators aren't
+ * direction-split either (see loadEventEmails). */
+export async function loadEventEmailsByType(
+  teamIds: string[], emailType: string,
+  opts: { department?: string | null; limit?: number } = {},
+): Promise<EventEmailDayRow[]> {
+  if (!isSupabaseConfigured || !supabase || teamIds.length === 0) return [];
+  let q = supabase
+    .from("roi_event_emails")
+    .select("id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
+    .in("team_id", teamIds)
+    .eq("email_type", emailType)
+    .order("created_at", { ascending: false })
+    .limit(opts.limit ?? 3000);
+  if (opts.department) q = q.eq("department", opts.department);
+  const { data, error } = await q;
+  if (error) { console.warn("[tracker] event emails by type read failed:", error.message); return []; }
+  return (data ?? []) as EventEmailDayRow[];
+}
+
+/** Per-day mini-report counts for ONE (team×dept×type): Created / Closed (action items only) /
+ * Eligible (from ClickHouse, dealer-local days) + Sent (from roi_event_emails). Keyed by the
+ * dealer-local 'YYYY-MM-DD'. Returns {} if the endpoint is unavailable (drawer falls back to the
+ * plain "N emails" header). */
+export type EventDayCount = { created: number; closed: number; eligible: number; sent: number };
+export type EventDayCounts = Record<string, EventDayCount>;
+export async function loadEventDayCounts(
+  teamId: string, department: string, emailType: string, tz?: string,
+): Promise<EventDayCounts> {
+  if (!teamId || !emailType) return {};
+  try {
+    const qs = new URLSearchParams({ teamId, department: department || "", emailType });
+    if (tz) qs.set("tz", tz);
+    const r = await fetch(`/api/email/roi-event-daycounts?${qs.toString()}`, { cache: "no-store" });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j && typeof (j as { days?: unknown }).days === "object") return (j as { days: EventDayCounts }).days || {};
+  } catch { /* fall through */ }
+  return {};
+}
+
+/** Lifetime count of SENT digest runs for the given rooftops — all-time, not just the loaded
+ * window. Optionally scoped to a cadence (to match the modal's current daily/weekly/monthly view)
+ * and a department. Uses a head-only exact count (no rows fetched). */
+export async function countDigestSent(teamIds: string[], opts: { cadence?: string; department?: string | null } = {}): Promise<number> {
+  if (!isSupabaseConfigured || !supabase || teamIds.length === 0) return 0;
+  let q = supabase.from("roi_digest_runs").select("id", { count: "exact", head: true })
+    .in("team_id", teamIds).eq("status", "sent");
+  if (opts.cadence) q = q.eq("cadence", opts.cadence);
+  if (opts.department) q = q.eq("department", opts.department);
+  const { count, error } = await q;
+  if (error) { console.warn("[tracker] lifetime digest-sent count failed:", error.message); return 0; }
+  return count ?? 0;
+}
+
+/** Lifetime count of a transactional type's produced emails for the given rooftops — all-time.
+ * metric 'sent' = status='sent'; 'opened' = an open was recorded (opened_at set). Head-only count. */
+export async function countEventByMetric(teamIds: string[], emailType: string, metric: "sent" | "opened", opts: { department?: string | null } = {}): Promise<number> {
+  if (!isSupabaseConfigured || !supabase || teamIds.length === 0) return 0;
+  let q = supabase.from("roi_event_emails").select("id", { count: "exact", head: true })
+    .in("team_id", teamIds).eq("email_type", emailType);
+  if (metric === "opened") q = q.not("opened_at", "is", null);
+  else q = q.eq("status", "sent");
+  if (opts.department) q = q.eq("department", opts.department);
+  const { count, error } = await q;
+  if (error) { console.warn("[tracker] lifetime event count failed:", error.message); return 0; }
+  return count ?? 0;
 }
 
 /** One eligible event from ClickHouse (history + live), via /api/email/roi-event-list. */

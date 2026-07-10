@@ -18,11 +18,28 @@ import {
   type SubType,
   type SendCell,
 } from "./mockData";
-import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventFeed, loadTeamRecipients, type EventCounts, type EventEmailRow, type TeamRecipient } from "./dataSource";
+import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
 import { supabase } from "./supabaseClient";
 import { RooftopCellDrawer } from "./RooftopCellDrawer";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
-import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow } from "./sendDigest";
+
+/** Pretty-print a phone for display + storage. US numbers (10 digits, or 11 with a leading 1) →
+ * "+1 (555) 123-4567". Anything else keeps a leading "+" and its digits, so international / partial
+ * numbers aren't mangled. Empty in → empty out. */
+function formatPhone(raw: string): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const hadPlus = s.startsWith("+");
+  let d = s.replace(/\D/g, "");
+  if (d.length === 11 && d[0] === "1") d = d.slice(1);
+  if (d.length === 10) return `+1 (${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  return hadPlus ? `+${d}` : d; // non-US / incomplete — leave the digits, preserve a typed "+"
+}
+/** A phone-only recipient's synthetic placeholder email — never shown as a real address. */
+function isPlaceholderEmail(email: string | null | undefined): boolean {
+  return /@phone\.invalid$/i.test(String(email ?? ""));
+}
 
 export function EmailerTracker() {
   const [cadence, setCadence] = useState<Cadence>("daily");
@@ -45,6 +62,8 @@ export function EmailerTracker() {
   const [anchor, setAnchor] = useState<string | null>(null);
   // Which KPI chip's analytics modal is open (null = closed).
   const [analyticsMetric, setAnalyticsMetric] = useState<AnalyticsMetric | null>(null);
+  // Which transactional KPI (type × sent|opened) has its per-day analytics modal open.
+  const [txAnalytics, setTxAnalytics] = useState<{ type: string; label: string; metric: "sent" | "opened" } | null>(null);
 
   // Live data from roi_digest_runs (+ mailservice engagement). No mock fallback — empty until loaded.
   const [rooftops, setRooftops] = useState<RooftopRow[]>([]);
@@ -178,6 +197,9 @@ export function EmailerTracker() {
   // The 4-agent filter → a direction (inbound/outbound) for transactional counts + drill-down.
   // "all" = both directions (the department total). sales_ib/service_ib → inbound; *_ob → outbound.
   const prodDir: "inbound" | "outbound" | null = productFilter === "all" ? null : productFilter.endsWith("ib") ? "inbound" : "outbound";
+  // Department the product filter narrows to (sales/service), or null for both — used to scope
+  // the transactional analytics modal's roi_event_emails read to the same rows the KPI counts.
+  const prodDept: "sales" | "service" | null = productFilter === "all" ? null : productFilter.startsWith("sales") ? "sales" : "service";
 
   const cellKey = (r: RooftopRow, c: SendCell) => `${r.rooftop_id}::${c.cadence}::${c.date}`;
   const colCount = cadence === "daily" ? 10 : cadence === "weekly" ? 8 : 6;
@@ -224,6 +246,16 @@ export function EmailerTracker() {
     });
   }, [rooftops, search, csmFilter, productFilter, reasonFilter]);
 
+  // Distinct team_ids behind the current filter — the scope for the transactional analytics
+  // modal's cross-rooftop read. Memoised so the modal's load effect doesn't re-fire each render.
+  const txTeamIds = useMemo(() => Array.from(new Set(filtered.map((r) => r.team_id).filter(Boolean))) as string[], [filtered]);
+  // team_id::department → rooftop name, for labelling the modal's per-day drill-down rows.
+  const nameByKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rooftops) m.set(`${r.team_id}::${r.department}`, r.name);
+    return m;
+  }, [rooftops]);
+
   // Per-column tallies shown above each date: sent / not-sent / not-eligible.
   // not-eligible = not_subscribed OR scheduled — neither is a send failure: not_subscribed has
   // no run that day, and scheduled is a pending/future run that hasn't come due. Only genuine
@@ -248,14 +280,33 @@ export function EmailerTracker() {
   const trend = useMemo<TrendPoint[]>(() => {
     const cellsOf = (r: RooftopRow) => (cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly);
     const isOpened = (c: SendCell) => (c.runs ?? []).some((run) => run.openedAt || (run.openCount ?? 0) > 0 || (run.recipients ?? []).some((x) => x.opened));
+    // Recipient emails for a send (the run that actually carries the recipient list), lower-cased.
+    const recipEmails = (c: SendCell) => {
+      const run = (c.runs ?? []).find((x) => (x.recipients ?? []).length) ?? (c.runs ?? [])[0];
+      return (run?.recipients ?? []).map((x) => String(x.email || "").toLowerCase()).filter(Boolean);
+    };
+    // Classify a send by its recipient-list domain composition (Option A proxy): a send to only
+    // @spyne.ai is internal, only non-spyne is a dealer send, a blend is ambiguous on a shared pixel.
+    const cohortOf = (emails: string[]): keyof Cohort | null => {
+      if (!emails.length) return null;
+      const spyne = emails.filter((e) => e.endsWith("@spyne.ai")).length;
+      return spyne === emails.length ? "internal" : spyne === 0 ? "dealer" : "mixed";
+    };
     return Array.from({ length: colCount }, (_, i) => {
       const sent: RooftopRow[] = [], notSent: RooftopRow[] = [], opened: RooftopRow[] = [];
+      const cohort: Cohort = { internal: { sent: 0, opened: 0 }, dealer: { sent: 0, opened: 0 }, mixed: { sent: 0, opened: 0 } };
       let date = "";
       for (const r of filtered) {
         const c = cellsOf(r)[i];
         if (!c) continue;
         date = c.date;
-        if (c.status === "sent") { sent.push(r); if (isOpened(c)) opened.push(r); }
+        if (c.status === "sent") {
+          sent.push(r);
+          const isOp = isOpened(c);
+          if (isOp) opened.push(r);
+          const k = cohortOf(recipEmails(c));
+          if (k) { cohort[k].sent++; if (isOp) cohort[k].opened++; }
+        }
         else if (c.status === "not_subscribed" || c.status === "scheduled") { /* not eligible */ }
         else notSent.push(r);
       }
@@ -266,6 +317,7 @@ export function EmailerTracker() {
         sent, notSent, opened, eligible,
         sentRate: eligible ? Math.round((sent.length / eligible) * 100) : 0,
         openRate: sent.length ? Math.round((opened.length / sent.length) * 100) : 0,
+        cohort,
       };
     });
   }, [filtered, cadence, colCount, today]);
@@ -605,8 +657,16 @@ export function EmailerTracker() {
           <Stat label="Sales / Service" value={`${salesRows} / ${serviceRows}`} />
           <span className="mx-1 w-px self-stretch bg-border-subtle" />
           {view === "transactional" ? (
-            /* Per-type sent rate + open rate — one card per transactional email type. */
-            txTypeStats.map((s) => <TxTypeStat key={s.key} s={s} />)
+            /* Per-type sent rate + open rate — one card per transactional email type.
+               Sent / Opened each open a per-day analytics modal. */
+            txTypeStats.map((s) => (
+              <TxTypeStat
+                key={s.key}
+                s={s}
+                onSent={() => setTxAnalytics({ type: s.key, label: s.label, metric: "sent" })}
+                onOpened={() => setTxAnalytics({ type: s.key, label: s.label, metric: "opened" })}
+              />
+            ))
           ) : (
             <>
               <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} />
@@ -779,7 +839,20 @@ export function EmailerTracker() {
       <EventListDrawer entry={eventList} onClose={() => setEventList(null)} />
 
       {analyticsMetric ? (
-        <AnalyticsModal metric={analyticsMetric} trend={trend} cadence={cadence} onClose={() => setAnalyticsMetric(null)} />
+        <AnalyticsModal metric={analyticsMetric} trend={trend} cadence={cadence} teamIds={txTeamIds} department={prodDept} onClose={() => setAnalyticsMetric(null)} />
+      ) : null}
+
+      {txAnalytics ? (
+        <TxAnalyticsModal
+          type={txAnalytics.type}
+          label={txAnalytics.label}
+          metric={txAnalytics.metric}
+          teamIds={txTeamIds}
+          department={prodDept}
+          direction={prodDir}
+          rooftopName={(teamId, dept) => nameByKey.get(`${teamId}::${dept}`) ?? teamId}
+          onClose={() => setTxAnalytics(null)}
+        />
       ) : null}
     </div>
   );
@@ -802,17 +875,23 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   const [liveState, setLiveState] = useState<"idle" | "loading" | "error">("idle");
   const [liveErr, setLiveErr] = useState("");
   const [genState, setGenState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  // Per-day mini-report counts (Created · Closed · Eligible · Sent), keyed by dealer-local YYYY-MM-DD.
+  const [dayCounts, setDayCounts] = useState<EventDayCounts>({});
   // A synthetic "preview" row (no id) for a type with no stored events — live-renders the
   // latest design for the rooftop's most-recent matching customer, then Send-to-customer/Ignore.
   const synthetic = (): EventEmailRow => ({ id: "", email_type: entry?.type ?? "", status: "preview", subject: null, recipients: null, sent_at: null, created_at: new Date().toISOString(), opened_at: null, open_count: 0, reason: null, rendered_html: null, event_key: "", message_id: null });
   useEffect(() => {
-    if (!entry) { setRows(null); setPreview(null); setHasMore(false); return; }
-    setRows(null); setPreview(null); setSendMsg(""); setGenState("idle"); setHasMore(false);
+    if (!entry) { setRows(null); setPreview(null); setHasMore(false); setDayCounts({}); return; }
+    setRows(null); setPreview(null); setSendMsg(""); setGenState("idle"); setHasMore(false); setDayCounts({});
     void loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction }).then((page) => {
       setRows(page.rows); setHasMore(page.hasMore);
       // Shows ALL eligible events (from ClickHouse, every date) filed under the date each was
       // supposed to go, with real send-status overlaid — not just the sparse generated rows.
     });
+    // Per-day mini-report (Created/Closed/Eligible/Sent) — independent of the paged row feed, so the
+    // day-header totals are complete even for days not fully loaded in the list below.
+    void loadEventDayCounts(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, entry.rooftop.timezone ?? undefined)
+      .then(setDayCounts);
   }, [entry]);
   const loadMore = useCallback(async () => {
     if (!entry || loadingMore) return;
@@ -889,14 +968,18 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   const fmtTime = (iso: string) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); } catch { return iso; } };
   // The timestamp a row is filed under: when it was sent, else when the row was created.
   const rowTime = (r: EventEmailRow) => r.sent_at || r.created_at;
-  // Local-day key + human label ("Today" / "Yesterday" / "Mon, Jul 6") for day grouping.
-  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const dayKey = (iso: string) => { const d = new Date(iso); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
-  const dayLabel = (iso: string) => {
-    const d = new Date(iso);
-    const diff = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
-    if (diff === 0) return "Today";
-    if (diff === 1) return "Yesterday";
+  // Day bucketing uses the DEALER's local zone so the header dates (and their keys) line up with the
+  // per-day counts from the server (which bucket in the same zone) — not the CSM's browser zone.
+  const drawerTz = entry.rooftop.timezone || "America/New_York";
+  const dayKeyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: drawerTz, year: "numeric", month: "2-digit", day: "2-digit" });
+  const dayKey = (iso: string) => { try { return dayKeyFmt.format(new Date(iso)); } catch { return iso.slice(0, 10); } }; // 'YYYY-MM-DD'
+  const todayKey = dayKey(new Date().toISOString());
+  const yesterdayKey = dayKey(new Date(Date.now() - 86400000).toISOString());
+  const dayLabel = (key: string) => {
+    if (key === todayKey) return "Today";
+    if (key === yesterdayKey) return "Yesterday";
+    // key is 'YYYY-MM-DD' → render at noon UTC to avoid an off-by-one from tz shifts.
+    const d = new Date(key + "T12:00:00Z");
     return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
   };
   // Group the loaded rows into consecutive same-day buckets (rows are already newest-first).
@@ -907,10 +990,13 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
       const k = dayKey(iso);
       const last = out[out.length - 1];
       if (last && last.key === k) last.rows.push(r);
-      else out.push({ key: k, label: dayLabel(iso), iso, rows: [r] });
+      else out.push({ key: k, label: dayLabel(k), iso, rows: [r] });
     }
     return out;
   })();
+  // Whether "Closed" applies to this type (action items only — appointments/conversations have no
+  // completion state, so we hide the Closed chip for them rather than always showing 0).
+  const showClosed = entry.type === "action_item" || entry.type === "action_item_overdue";
   const recipientsOf = (r: EventEmailRow) => (r.recipients ?? []).map((x) => x.email).join(", ");
   // Who actually opened (recipients flagged by the tracking pixel).
   const openedRecips = (r: EventEmailRow) => (r.recipients ?? []).filter((x) => x.opened).map((x) => x.email);
@@ -1079,10 +1165,27 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
               <>
                 {dayGroups.map((g) => (
                   <div key={g.key}>
-                    {/* sticky day header — "what got sent, what day" */}
-                    <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle bg-surface-subtle/95 px-5 py-1.5 backdrop-blur">
-                      <span className="text-[11px] font-bold uppercase tracking-wide text-text-secondary">{g.label}</span>
-                      <span className="text-[10px] font-semibold tabular text-text-muted">{g.rows.length} email{g.rows.length === 1 ? "" : "s"}</span>
+                    {/* sticky day header — per-day mini report: Created · Closed · Eligible · Sent */}
+                    <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-border-subtle bg-surface-subtle/95 px-5 py-1.5 backdrop-blur">
+                      <span className="shrink-0 text-[11px] font-bold uppercase tracking-wide text-text-secondary">{g.label}</span>
+                      {(() => {
+                        const dc = dayCounts[g.key];
+                        const sent = dc?.sent ?? g.rows.filter((r) => r.status === "sent").length;
+                        const chip = (label: string, val: number, tone: string) => (
+                          <span className={`inline-flex items-baseline gap-1 ${tone}`} title={`${label} on ${g.label}`}>
+                            <span className="text-[11px] font-bold tabular">{val}</span>
+                            <span className="text-[9px] font-semibold uppercase tracking-wide opacity-70">{label}</span>
+                          </span>
+                        );
+                        return (
+                          <span className="flex items-center gap-3">
+                            {dc ? chip("Created", dc.created, "text-text-secondary") : null}
+                            {dc && showClosed ? chip("Closed", dc.closed, "text-text-muted") : null}
+                            {dc ? chip("Eligible", dc.eligible, "text-brand-primary") : null}
+                            {chip("Sent", sent, "text-positive")}
+                          </span>
+                        );
+                      })()}
                     </div>
                     {g.rows.map((r) => (
                       <button
@@ -1235,13 +1338,34 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, sms_enabled: !next } : r))); setErr(res.error || "Save failed"); return; }
     onSaved();
   };
-  // Save/clear a recipient's phone. Optimistic; reverts on failure.
-  const saveRecipPhone = async (email: string, d: DeptKind, phone: string): Promise<{ ok: boolean; error?: string }> => {
-    const prevPhone = teamRecips.find((r) => r.email === email)?.phone ?? null;
-    setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, phone } : r)));
-    const res = await setRecipientPhoneNow({ teamId: rooftop?.team_id, dept: d, email, phone });
-    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, phone: prevPhone } : r))); setErr(res.error || "Save failed"); }
+  // Save/clear a recipient's phone (by row id, so it works for phone-only rows too). Optimistic.
+  const saveRecipPhone = async (id: string, phone: string): Promise<{ ok: boolean; error?: string }> => {
+    const prevPhone = teamRecips.find((r) => r.id === id)?.phone ?? null;
+    setTeamRecips((prev) => prev.map((r) => (r.id === id ? { ...r, phone } : r)));
+    const res = await updateRecipientNow({ teamId: rooftop?.team_id, id, phone });
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.id === id ? { ...r, phone: prevPhone } : r))); setErr(res.error || "Save failed"); }
     else onSaved();
+    return res;
+  };
+  // Save a recipient's display name (by row id). Optimistic.
+  const saveRecipName = async (id: string, name: string): Promise<{ ok: boolean; error?: string }> => {
+    const prevName = teamRecips.find((r) => r.id === id)?.name ?? null;
+    setTeamRecips((prev) => prev.map((r) => (r.id === id ? { ...r, name } : r)));
+    const res = await updateRecipientNow({ teamId: rooftop?.team_id, id, name });
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.id === id ? { ...r, name: prevName } : r))); setErr(res.error || "Save failed"); }
+    else onSaved();
+    return res;
+  };
+  // Rename a recipient's email (by row id). Reloads after so all the email-keyed actions
+  // (verify / toggle / subscription) pick up the new address. Optimistic.
+  const saveRecipEmail = async (id: string, email: string): Promise<{ ok: boolean; error?: string }> => {
+    const prevEmail = teamRecips.find((r) => r.id === id)?.email ?? "";
+    setTeamRecips((prev) => prev.map((r) => (r.id === id ? { ...r, email } : r)));
+    setRecipBusy(id); setErr("");
+    const res = await updateRecipientNow({ teamId: rooftop?.team_id, id, email });
+    setRecipBusy(null);
+    if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.id === id ? { ...r, email: prevEmail } : r))); setErr(res.error || "Save failed"); }
+    else { onSaved(); void reloadRecips(); }
     return res;
   };
   // Set a recipient's role (salesperson|bdc|gm|null) — role-tiered transactional fallback. Optimistic.
@@ -1364,64 +1488,73 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
             Changes save immediately and gate the cron (digests + transactional sends). Daily/weekly/monthly also need a send-hour; transactional types fire on the poll.
           </div>
 
-          {/* Sales AND Service recipient lists, side by side — different people can receive each. */}
+          {/* Sales AND Service recipient lists — different people can receive each. Each dept is its
+             own bordered section with a bold, dept-coloured header so the two are clearly divided. */}
           {([
             { dept: "sales" as DeptKind, label: "Sales", list: salesRecips },
             { dept: "service" as DeptKind, label: "Service", list: serviceRecips },
           ]).map(({ dept: d, label, list }) => (
-            <div key={d}>
-              <div className="mb-2 mt-6 text-[11px] font-semibold uppercase tracking-widest text-text-muted">
-                Recipients · {label}
+            <div key={d} className="mt-6 rounded-xl border border-border-subtle bg-surface-background/60 p-3">
+              <div className={`mb-3 flex items-center gap-2 border-b-2 pb-2 ${d === "sales" ? "border-info/40" : "border-positive/40"}`}>
+                <span className={`h-2.5 w-2.5 rounded-full ${d === "sales" ? "bg-info" : "bg-positive"}`} />
+                <span className="text-[16px] font-extrabold tracking-tight text-text-primary">{label}</span>
+                <span className="text-[13px] font-semibold text-text-muted">Recipients</span>
+                <span className="ml-auto rounded-full bg-surface-subtle px-2 py-0.5 text-[11px] font-semibold tabular text-text-secondary">{list.length}</span>
               </div>
               {list.length === 0 ? (
                 <p className="mb-2 text-[12px] text-warning">No {label.toLowerCase()} recipients yet — add at least one below, then turn it on.</p>
               ) : (
                 <ul className="mb-2">
                   {list.map((r) => (
-                    <li key={r.email} className="border-b border-border-subtle py-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          {r.name ? <div className="truncate text-[13px] text-text-primary">{r.name}</div> : null}
-                          <div className="truncate text-[12px] text-text-muted">{r.email}</div>
-                          {r.receives_sales && r.receives_service ? (
-                            <div className="text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
-                          ) : null}
-                          {!r.verified_at ? (
-                            <div className="mt-0.5 text-[10px] font-semibold text-amber-600">⚠ Unverified — held, not emailed until verified</div>
-                          ) : null}
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          {/* Verification gate — an unverified recipient is never emailed (cross-rooftop guard). */}
-                          {r.verified_at ? (
-                            <button
-                              type="button"
-                              disabled={recipBusy === r.email}
-                              onClick={() => void verifyRecip(r.email, false)}
-                              title={`Verified for ${rooftop.name} — click to un-verify (holds all their emails)`}
-                              className="shrink-0 rounded-md border border-emerald-300 px-1.5 py-1 text-[10px] font-semibold text-emerald-600 hover:bg-emerald-50"
-                            >✓ Verified</button>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={recipBusy === r.email}
-                              onClick={() => void verifyRecip(r.email, true)}
-                              title="Confirm this person belongs to this rooftop, then they can receive emails"
-                              className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-1.5 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-100"
-                            >Verify</button>
-                          )}
-                          {/* Role — drives the salesperson → BDC → GM fallback for transactional alerts. */}
-                          <select
-                            value={r.role ?? ""}
+                    <li key={r.id} className="mb-2 rounded-lg border border-border-subtle bg-surface-card p-3">
+                      {/* Identity — Name / Email / Phone, each full width so nothing is clipped. */}
+                      <RecipientIdentity
+                        recip={r}
+                        busy={recipBusy === r.id}
+                        onSaveName={(name) => saveRecipName(r.id, name)}
+                        onSaveEmail={(email) => saveRecipEmail(r.id, email)}
+                        onSavePhone={(phone) => saveRecipPhone(r.id, phone)}
+                      />
+                      {r.receives_sales && r.receives_service ? (
+                        <div className="mt-1 text-[10px] text-text-muted">Also on {d === "sales" ? "Service" : "Sales"} list</div>
+                      ) : null}
+                      {!r.verified_at ? (
+                        <div className="mt-1 text-[10px] font-semibold text-amber-600">⚠ Unverified — held, not emailed until verified</div>
+                      ) : null}
+                      {/* Controls — verify · role · email on/off — on their own row with room to breathe. */}
+                      <div className="mt-2 flex items-center gap-2 border-t border-border-subtle pt-2">
+                        {r.verified_at ? (
+                          <button
+                            type="button"
                             disabled={recipBusy === r.email}
-                            onChange={(e) => void setRole(r.email, d, (e.target.value || null) as "salesperson" | "bdc" | "gm" | null)}
-                            title="Role for transactional routing (salesperson → BDC → GM fallback)"
-                            className="rounded-md border border-border-subtle bg-surface-background px-1.5 py-1 text-[10px] text-text-secondary focus:border-brand-primary focus:outline-none"
-                          >
-                            <option value="">No role</option>
-                            <option value="salesperson">Salesperson</option>
-                            <option value="bdc">BDC</option>
-                            <option value="gm">GM</option>
-                          </select>
+                            onClick={() => void verifyRecip(r.email, false)}
+                            title={`Verified for ${rooftop.name} — click to un-verify (holds all their emails)`}
+                            className="shrink-0 rounded-md border border-emerald-300 px-2 py-1 text-[11px] font-semibold text-emerald-600 hover:bg-emerald-50"
+                          >✓ Verified</button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={recipBusy === r.email}
+                            onClick={() => void verifyRecip(r.email, true)}
+                            title="Confirm this person belongs to this rooftop, then they can receive emails"
+                            className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
+                          >Verify</button>
+                        )}
+                        {/* Role — drives the salesperson → BDC → GM fallback for transactional alerts. */}
+                        <select
+                          value={r.role ?? ""}
+                          disabled={recipBusy === r.email}
+                          onChange={(e) => void setRole(r.email, d, (e.target.value || null) as "salesperson" | "bdc" | "gm" | null)}
+                          title="Role for transactional routing (salesperson → BDC → GM fallback)"
+                          className="rounded-md border border-border-subtle bg-surface-background px-1.5 py-1 text-[11px] text-text-secondary focus:border-brand-primary focus:outline-none"
+                        >
+                          <option value="">No role</option>
+                          <option value="salesperson">Salesperson</option>
+                          <option value="bdc">BDC</option>
+                          <option value="gm">GM</option>
+                        </select>
+                        <div className="ml-auto flex items-center gap-1.5">
+                          <span className={`text-[10px] font-semibold ${r.email_enabled ? "text-positive" : "text-text-muted"}`}>{r.email_enabled ? "On" : "Off"}</span>
                           <button
                             type="button"
                             role="switch"
@@ -1438,8 +1571,7 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                       {smsMaster ? (
                         <RecipientSmsControls
                           recip={r}
-                          busy={recipBusy === r.email}
-                          onSavePhone={(phone) => saveRecipPhone(r.email, d, phone)}
+                          busy={recipBusy === r.id}
                           onToggleSms={(next) => void toggleRecipSms(r.email, next)}
                         />
                       ) : null}
@@ -1519,49 +1651,132 @@ function RecipientSubscriptions({ recip, smsMaster, disabled, onSetSub }: {
   );
 }
 
-/* Add a recipient (name + email) to roi_recipients for this rooftop+department.
- * Added paused (email_enabled=false) — the user flips the On toggle to start sending. */
-/* SMS sub-row for a recipient: phone editor (saves on blur/Enter) + an SMS On/Off toggle.
- * Shown only when the rooftop SMS master switch is on. Enabling SMS requires a saved phone. */
-function RecipientSmsControls({ recip, busy, onSavePhone, onToggleSms }: {
+/* Inline identity editor for a recipient — Name, Email and Phone are all editable (save on blur/Enter).
+ * Each field is a full-width labelled row so nothing is clipped in the narrow drawer. Email or phone
+ * alone is enough; a phone-only recipient shows an empty email field (its stored address is a hidden
+ * placeholder). Phone is normalised to "+1 (555) 123-4567" on save. Clearing BOTH email and phone is
+ * blocked. */
+function RecipientIdentity({ recip, busy, onSaveName, onSaveEmail, onSavePhone }: {
   recip: TeamRecipient;
   busy: boolean;
+  onSaveName: (name: string) => Promise<{ ok: boolean; error?: string }>;
+  onSaveEmail: (email: string) => Promise<{ ok: boolean; error?: string }>;
   onSavePhone: (phone: string) => Promise<{ ok: boolean; error?: string }>;
-  onToggleSms: (next: boolean) => void;
 }) {
+  const realEmail = isPlaceholderEmail(recip.email) ? "" : recip.email;
+  const [name, setName] = useState(recip.name ?? "");
+  const [email, setEmail] = useState(realEmail);
   const [phone, setPhone] = useState(recip.phone ?? "");
+  const [nState, setNState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [eState, setEState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [pState, setPState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const smsOn = recip.sms_enabled === true;
-  const hasPhone = !!(recip.phone && recip.phone.trim());
-  const phoneValid = /\+?[\d][\d\s().-]{6,}/.test(phone.trim());
-  const save = async () => {
-    const p = phone.trim();
-    if (p === (recip.phone ?? "")) return; // unchanged
-    if (p && !phoneValid) { setPState("error"); return; }
+  // Re-sync when the row changes underneath us (e.g. reload after a save).
+  useEffect(() => { setName(recip.name ?? ""); }, [recip.name]);
+  useEffect(() => { setEmail(isPlaceholderEmail(recip.email) ? "" : recip.email); }, [recip.email]);
+  useEffect(() => { setPhone(recip.phone ?? ""); }, [recip.phone]);
+
+  const emailValid = (v: string) => /\S+@\S+\.\S+/.test(v.trim());
+  const saveName = async () => {
+    const v = name.trim();
+    if (v === (recip.name ?? "")) return; // unchanged
+    setNState("saving");
+    const r = await onSaveName(v);
+    setNState(r.ok ? "saved" : "error");
+    if (r.ok) setTimeout(() => setNState("idle"), 1500);
+  };
+  const saveEmail = async () => {
+    const v = email.trim();
+    if (v === realEmail) return; // unchanged
+    if (v && !emailValid(v)) { setEState("error"); return; }
+    if (!v && !phone.trim()) { setEState("error"); return; } // can't clear both channels
+    setEState("saving");
+    const r = await onSaveEmail(v);
+    setEState(r.ok ? "saved" : "error");
+    if (r.ok) setTimeout(() => setEState("idle"), 1500);
+  };
+  const savePhone = async () => {
+    const formatted = formatPhone(phone);
+    if (formatted !== phone) setPhone(formatted); // reflect the normalised form in the field
+    if (formatted === (recip.phone ?? "")) return; // unchanged
+    if (!formatted && !realEmail && !email.trim()) { setPState("error"); return; } // can't clear both
     setPState("saving");
-    const r = await onSavePhone(p);
+    const r = await onSavePhone(formatted);
     setPState(r.ok ? "saved" : "error");
     if (r.ok) setTimeout(() => setPState("idle"), 1500);
   };
+  const stat = (s: string) => s === "saving" ? "…" : s === "saved" ? "✓" : s === "error" ? "!" : "";
+  const label = "w-12 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted";
+  const field = "min-w-0 flex-1 rounded-md border bg-surface-background px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-muted focus:outline-none";
+  const statCls = (s: string) => `w-3 shrink-0 text-right text-[12px] ${s === "error" ? "text-negative" : "text-positive"}`;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <span className={label}>Name</span>
+        <input
+          type="text"
+          value={name}
+          disabled={busy}
+          onChange={(e) => { setName(e.target.value); if (nState === "error") setNState("idle"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") void saveName(); }}
+          onBlur={() => void saveName()}
+          placeholder="Full name (optional)"
+          className={`${field} border-border-subtle focus:border-brand-primary`}
+        />
+        <span className={statCls(nState)}>{stat(nState)}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className={label}>Email</span>
+        <input
+          type="email"
+          value={email}
+          disabled={busy}
+          onChange={(e) => { setEmail(e.target.value); if (eState === "error") setEState("idle"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") void saveEmail(); }}
+          onBlur={() => void saveEmail()}
+          placeholder="name@dealer.com"
+          className={`${field} ${eState === "error" ? "border-[#DC2626]" : "border-border-subtle focus:border-brand-primary"}`}
+        />
+        <span className={statCls(eState)}>{stat(eState)}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className={label}>Phone</span>
+        <input
+          type="tel"
+          value={phone}
+          disabled={busy}
+          onChange={(e) => { setPhone(e.target.value); if (pState === "error") setPState("idle"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") void savePhone(); }}
+          onBlur={() => void savePhone()}
+          placeholder="+1 (000) 000-0000"
+          className={`${field} ${pState === "error" ? "border-[#DC2626]" : "border-border-subtle focus:border-brand-primary"}`}
+        />
+        <span className={statCls(pState)}>{stat(pState)}</span>
+      </div>
+    </div>
+  );
+}
+
+/* Add a recipient (name + email and/or phone) to roi_recipients for this rooftop+department.
+ * Added paused (email_enabled=false) — the user verifies + flips the On toggle to start sending. */
+/* SMS sub-row for a recipient: an SMS On/Off toggle. Shown only when the rooftop SMS master switch
+ * is on. Enabling SMS requires a phone (edited in the identity block above). */
+function RecipientSmsControls({ recip, busy, onToggleSms }: {
+  recip: TeamRecipient;
+  busy: boolean;
+  onToggleSms: (next: boolean) => void;
+}) {
+  const smsOn = recip.sms_enabled === true;
+  const hasPhone = !!(recip.phone && recip.phone.trim());
   return (
     <div className="mt-1.5 flex items-center gap-2 pl-0.5">
-      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted">SMS</span>
-      <input
-        type="tel"
-        value={phone}
-        onChange={(e) => { setPhone(e.target.value); if (pState === "error") setPState("idle"); }}
-        onKeyDown={(e) => { if (e.key === "Enter") void save(); }}
-        onBlur={() => void save()}
-        placeholder="+1 555 123 4567"
-        className={`min-w-0 flex-1 rounded-md border bg-surface-background px-2 py-1 text-[12px] placeholder:text-text-muted focus:outline-none ${pState === "error" ? "border-[#DC2626]" : "border-border-subtle focus:border-brand-primary"}`}
-      />
-      <span className="w-8 shrink-0 text-right text-[10px] text-text-muted">{pState === "saving" ? "…" : pState === "saved" ? "✓" : pState === "error" ? "bad" : ""}</span>
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted">SMS alerts</span>
+      <span className="flex-1 text-[10px] text-text-muted">{hasPhone ? (smsOn ? "On" : "Off") : "Add a phone above to enable"}</span>
       <button
         type="button"
         role="switch"
         aria-checked={smsOn}
         disabled={busy || !hasPhone}
-        onClick={() => (hasPhone ? onToggleSms(!smsOn) : setPState("error"))}
+        onClick={() => { if (hasPhone) onToggleSms(!smsOn); }}
         title={!hasPhone ? "Add a phone first" : smsOn ? "SMS on — click to pause" : "SMS off — click to enable"}
         className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-40 ${smsOn ? "bg-brand-primary" : "bg-border-subtle"}`}
       >
@@ -1574,43 +1789,74 @@ function RecipientSmsControls({ recip, busy, onSavePhone, onToggleSms }: {
 function AddRecipientRow({ teamId, dept, onAdded }: { teamId?: string; dept: DeptKind; onAdded: () => void }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
   const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
   const submit = async () => {
-    if (!/\S+@\S+\.\S+/.test(email.trim())) { setState("error"); setMsg("Enter a valid email."); return; }
+    const e = email.trim();
+    const p = formatPhone(phone);
+    if (p !== phone) setPhone(p); // show the normalised form
+    // Either channel alone is enough; only reject when both are empty or the email is malformed.
+    if (!e && !p) { setState("error"); setMsg("Add an email or a phone."); return; }
+    if (e && !/\S+@\S+\.\S+/.test(e)) { setState("error"); setMsg("Enter a valid email."); return; }
     setState("saving"); setMsg("");
-    const r = await addRecipientNow({ teamId, dept, email: email.trim(), name: name.trim() || undefined, emailEnabled: false });
-    if (r.ok) { setState("done"); setMsg("Added (paused) — flip the On toggle to start sending."); setName(""); setEmail(""); onAdded(); setTimeout(() => setState("idle"), 1800); }
+    const r = await addRecipientNow({ teamId, dept, email: e, phone: p || undefined, name: name.trim() || undefined, emailEnabled: false });
+    if (r.ok) { setState("done"); setMsg("Added (paused) — verify, then flip On to start sending."); setName(""); setEmail(""); setPhone(""); onAdded(); setTimeout(() => setState("idle"), 1800); }
     else { setState("error"); setMsg(r.error || "Add failed"); }
   };
+  const label = "w-12 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-text-muted";
+  const inputCls = "min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-background px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none";
   return (
-    <div>
-      <div className="flex items-center gap-1.5">
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Name (optional)"
-          className="min-w-0 w-28 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
-        />
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => { setEmail(e.target.value); if (state === "error") setState("idle"); }}
-          onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
-          placeholder="name@dealer.com"
-          className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px] text-text-primary placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
-        />
+    <div className="mt-1 rounded-lg border border-dashed border-border-subtle bg-surface-background/50 p-3">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">Add {dept === "sales" ? "Sales" : "Service"} recipient</div>
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <span className={label}>Name</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Full name (optional)"
+            className={inputCls}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={label}>Email</span>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => { setEmail(e.target.value); if (state === "error") setState("idle"); }}
+            onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
+            placeholder="name@dealer.com"
+            className={inputCls}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={label}>Phone</span>
+          <input
+            type="tel"
+            value={phone}
+            onChange={(e) => { setPhone(e.target.value); if (state === "error") setState("idle"); }}
+            onKeyDown={(e) => { if (e.key === "Enter") void submit(); }}
+            onBlur={() => setPhone((p) => formatPhone(p))}
+            placeholder="+1 (000) 000-0000"
+            className={inputCls}
+          />
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <p className={`text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>
+          {msg || "Email, phone, or both. Phone-only = SMS alerts only."}
+        </p>
         <button
           type="button"
           onClick={() => void submit()}
           disabled={state === "saving"}
-          className="flex-shrink-0 rounded-md bg-brand-primary px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60"
+          className="flex-shrink-0 rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60"
         >
           {state === "saving" ? "Adding…" : state === "done" ? "Added ✓" : "+ Add"}
         </button>
       </div>
-      {msg ? <p className={`mt-1 text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</p> : null}
     </div>
   );
 }
@@ -1649,8 +1895,13 @@ function Stat({
 }
 
 /* Compact per-transactional-type KPI card — sent rate (sent ÷ eligible) stacked over
-   open rate (opened ÷ sent). Used in the KPI strip when the Transactional view is active. */
-function TxTypeStat({ s }: { s: { label: string; eligible: number; sent: number; opened: number; sentRate: number; openRate: number } }) {
+   open rate (opened ÷ sent). Used in the KPI strip when the Transactional view is active.
+   The Sent and Opened halves are each buttons that open a per-day analytics modal. */
+function TxTypeStat({ s, onSent, onOpened }: {
+  s: { label: string; eligible: number; sent: number; opened: number; sentRate: number; openRate: number };
+  onSent?: () => void;
+  onOpened?: () => void;
+}) {
   const sentTone = s.eligible === 0 ? "text-text-muted" : s.sentRate >= 50 ? "text-positive" : "text-negative";
   const openTone = s.sent === 0 ? "text-text-muted" : s.openRate >= 40 ? "text-positive" : s.opened > 0 ? "text-text-primary" : "text-text-muted";
   return (
@@ -1659,16 +1910,30 @@ function TxTypeStat({ s }: { s: { label: string; eligible: number; sent: number;
       className="rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[128px]"
     >
       <div className="text-[9px] font-semibold uppercase tracking-widest text-text-secondary">{s.label}</div>
-      <div className="mt-1 flex items-baseline justify-between gap-2">
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Sent</span>
-        <span className={`text-[15px] font-extrabold tabular leading-none ${sentTone}`}>{s.sentRate}%</span>
-      </div>
-      <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.sent} of {s.eligible} eligible</div>
-      <div className="mt-1 flex items-baseline justify-between gap-2 border-t border-border-subtle pt-1">
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Opened</span>
-        <span className={`text-[15px] font-extrabold tabular leading-none ${openTone}`}>{s.openRate}%</span>
-      </div>
-      <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.opened} of {s.sent} sent</div>
+      <button
+        type="button"
+        onClick={onSent}
+        title="Click for the day-by-day Sent history"
+        className="mt-1 block w-full rounded-md px-1 py-0.5 text-left transition-colors hover:bg-brand-primary/10"
+      >
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Sent ›</span>
+          <span className={`text-[15px] font-extrabold tabular leading-none ${sentTone}`}>{s.sentRate}%</span>
+        </div>
+        <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.sent} of {s.eligible} eligible</div>
+      </button>
+      <button
+        type="button"
+        onClick={onOpened}
+        title="Click for the day-by-day Opened history"
+        className="mt-1 block w-full rounded-md border-t border-border-subtle px-1 pb-0.5 pt-1 text-left transition-colors hover:bg-brand-primary/10"
+      >
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Opened ›</span>
+          <span className={`text-[15px] font-extrabold tabular leading-none ${openTone}`}>{s.openRate}%</span>
+        </div>
+        <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.opened} of {s.sent} sent</div>
+      </button>
     </div>
   );
 }
@@ -1973,7 +2238,9 @@ function Select({
 
 /** KPI chips that open the analytics modal. */
 type AnalyticsMetric = "sent" | "notSent" | "sentRate" | "openRate";
-type TrendPoint = { date: string; label: string; sent: RooftopRow[]; notSent: RooftopRow[]; opened: RooftopRow[]; eligible: number; sentRate: number; openRate: number };
+type CohortTally = { sent: number; opened: number };
+type Cohort = { internal: CohortTally; dealer: CohortTally; mixed: CohortTally };
+type TrendPoint = { date: string; label: string; sent: RooftopRow[]; notSent: RooftopRow[]; opened: RooftopRow[]; eligible: number; sentRate: number; openRate: number; cohort: Cohort };
 
 const METRIC_META: Record<AnalyticsMetric, { title: string; kind: "count" | "rate"; pick: (p: TrendPoint) => number; drill: (p: TrendPoint) => { title: string; rooftops: RooftopRow[] }[] }> = {
   sent: { title: "Sent", kind: "count", pick: (p) => p.sent.length, drill: (p) => [{ title: "Sent", rooftops: p.sent }, { title: "Not sent", rooftops: p.notSent }] },
@@ -1984,20 +2251,50 @@ const METRIC_META: Record<AnalyticsMetric, { title: string; kind: "count" | "rat
 
 /** Analytics modal for a KPI chip: a trend of the metric over the loaded window + the drill-down
  * list of rooftops behind the latest (right-most) column. Uses ONLY already-loaded cell data. */
-function AnalyticsModal({ metric, trend, cadence, onClose }: { metric: AnalyticsMetric; trend: TrendPoint[]; cadence: Cadence; onClose: () => void }) {
+function AnalyticsModal({ metric, trend, cadence, teamIds, department, onClose }: { metric: AnalyticsMetric; trend: TrendPoint[]; cadence: Cadence; teamIds: string[]; department: "sales" | "service" | null; onClose: () => void }) {
   const meta = METRIC_META[metric];
+  // Lifetime SENT — all-time count of sent digest runs (this cadence + dept scope), not just the
+  // loaded window. null = still loading. Runs once per open; the window bars stay window-scoped.
+  const [lifetimeSent, setLifetimeSent] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setLifetimeSent(null);
+    void countDigestSent(teamIds, { cadence, department }).then((n) => { if (alive) setLifetimeSent(n); });
+    return () => { alive = false; };
+  }, [teamIds, cadence, department]);
   // Oldest → newest for the chart (trend is newest-first).
   const series = useMemo(() => [...trend].reverse(), [trend]);
   const maxVal = Math.max(1, ...series.map((p) => meta.pick(p)));
-  const latest = trend[0];
   const suffix = meta.kind === "rate" ? "%" : "";
-  const drill = latest ? meta.drill(latest) : [];
+  // Which column's breakdown is shown — click a bar to drill into that day. Defaults to the
+  // latest (right-most) column. Re-clamped to the newest when the metric/window changes.
+  const [selIdx, setSelIdx] = useState(series.length - 1);
+  useEffect(() => { setSelIdx(series.length - 1); }, [metric, series.length]);
+  const sel = series[Math.min(selIdx, series.length - 1)] ?? null;
+  const drill = sel ? meta.drill(sel) : [];
+  // Dealer-vs-Spyne open attribution (open-rate view only): aggregate each send's cohort across
+  // the whole loaded window. Dealer-only + Spyne-only opens are exact; mixed lists share one pixel
+  // so they can't be attributed until per-recipient tracking (PER_RECIPIENT_PIXEL) is enabled.
+  const cohortTotals = useMemo(() => {
+    if (metric !== "openRate") return null;
+    const acc: Cohort = { internal: { sent: 0, opened: 0 }, dealer: { sent: 0, opened: 0 }, mixed: { sent: 0, opened: 0 } };
+    for (const p of series) for (const k of ["internal", "dealer", "mixed"] as const) {
+      acc[k].sent += p.cohort?.[k]?.sent ?? 0;
+      acc[k].opened += p.cohort?.[k]?.opened ?? 0;
+    }
+    return acc;
+  }, [series, metric]);
   return createPortal(
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
       <div className="flex max-h-[85vh] w-[720px] max-w-full flex-col overflow-hidden rounded-xl bg-surface-card shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
           <div>
-            <div className="text-[14px] font-semibold text-text-primary">{meta.title} · history</div>
+            <div className="flex items-center gap-2">
+              <span className="text-[14px] font-semibold text-text-primary">{meta.title} · history</span>
+              <span className="rounded-full bg-positive/10 px-2 py-0.5 text-[11px] font-semibold tabular text-positive" title="All-time sent digests for the current filter + cadence">
+                Lifetime sent · {lifetimeSent === null ? "…" : lifetimeSent.toLocaleString()}
+              </span>
+            </div>
             <div className="text-[11px] text-text-muted">Per {cadence === "daily" ? "day" : cadence === "weekly" ? "week" : "month"} over the loaded window · move the date window for older history</div>
           </div>
           <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary">✕</button>
@@ -2005,22 +2302,53 @@ function AnalyticsModal({ metric, trend, cadence, onClose }: { metric: Analytics
         <div className="overflow-auto px-5 py-4">
           {/* Trend bars */}
           <div className="flex items-end gap-2" style={{ height: 160 }}>
-            {series.map((p) => {
+            {series.map((p, i) => {
               const v = meta.pick(p);
               const h = Math.round((v / maxVal) * 130);
+              const active = i === Math.min(selIdx, series.length - 1);
               return (
-                <div key={p.date || p.label} className="flex flex-1 flex-col items-center justify-end gap-1" title={`${p.label}: ${v}${suffix}`}>
-                  <div className="text-[10px] font-bold tabular text-text-secondary">{v}{suffix}</div>
-                  <div className="w-full rounded-t bg-brand-primary/70" style={{ height: Math.max(2, h) }} />
-                  <div className="mt-0.5 w-full truncate text-center text-[9px] text-text-muted">{p.label}</div>
-                </div>
+                <button
+                  type="button"
+                  key={p.date || p.label}
+                  onClick={() => setSelIdx(i)}
+                  className="flex flex-1 flex-col items-center justify-end gap-1 rounded-md px-0.5 pb-0.5 hover:bg-surface-subtle"
+                  title={`${p.label}: ${v}${suffix} · click for this ${cadence === "daily" ? "day" : cadence === "weekly" ? "week" : "month"}'s breakdown`}
+                >
+                  <div className={`text-[10px] font-bold tabular ${active ? "text-brand-primary" : "text-text-secondary"}`}>{v}{suffix}</div>
+                  <div className={`w-full rounded-t ${active ? "bg-brand-primary" : "bg-brand-primary/40"}`} style={{ height: Math.max(2, h) }} />
+                  <div className={`mt-0.5 w-full truncate text-center text-[9px] ${active ? "font-semibold text-brand-primary" : "text-text-muted"}`}>{p.label}</div>
+                </button>
               );
             })}
           </div>
-          {/* Drill-down for the latest column */}
+          {/* Dealer-vs-Spyne open attribution (open-rate view only) */}
+          {cohortTotals ? (
+            <div className="mt-4 rounded-lg border border-border-subtle bg-surface-subtle/40 px-4 py-3">
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Who's opening · dealer vs Spyne</div>
+              <div className="mb-2 text-[10px] leading-snug text-text-muted">By each send's recipient list, whole window. Dealer-only &amp; Spyne-only are exact; mixed lists (a Spyne CSM + the dealer share one open pixel) can't be split until per-recipient tracking is on.</div>
+              <div className="grid grid-cols-3 gap-3">
+                {([
+                  { k: "dealer", label: "Dealer only", tone: "text-positive" },
+                  { k: "internal", label: "Spyne only", tone: "text-text-secondary" },
+                  { k: "mixed", label: "Mixed · ambiguous", tone: "text-warning" },
+                ] as const).map(({ k, label, tone }) => {
+                  const c = cohortTotals[k];
+                  const pct = c.sent ? Math.round((c.opened / c.sent) * 100) : 0;
+                  return (
+                    <div key={k} className="rounded-md bg-surface-card px-3 py-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">{label}</div>
+                      <div className={`tabular text-[18px] font-bold ${c.sent ? tone : "text-text-muted"}`}>{c.sent ? `${pct}%` : "—"}</div>
+                      <div className="text-[10px] text-text-muted">{c.opened} of {c.sent} opened</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+          {/* Drill-down for the selected column */}
           <div className="mt-5 border-t border-border-subtle pt-3">
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-muted">
-              {latest ? `Breakdown · ${latest.label}` : "Breakdown"}
+              {sel ? `Breakdown · ${sel.label}` : "Breakdown"}
             </div>
             <div className="grid grid-cols-2 gap-4">
               {drill.map((col) => (
@@ -2041,6 +2369,160 @@ function AnalyticsModal({ metric, trend, cadence, onClose }: { metric: Analytics
               ))}
             </div>
           </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** Per-day analytics modal for a transactional KPI (a type's Sent or Opened). Loads every
+ * produced email of that type across the filtered rooftops, buckets them by day, and shows a
+ * clickable trend — click any day to drill into that day's individual emails. Sourced from
+ * roi_event_emails (the Sent/Opened KPI numerator), so counts reconcile with the KPI chips. */
+function TxAnalyticsModal({ type, label, metric, teamIds, department, direction, rooftopName, onClose }: {
+  type: string;
+  label: string;
+  metric: "sent" | "opened";
+  teamIds: string[];
+  department: "sales" | "service" | null;
+  direction: "inbound" | "outbound" | null;
+  rooftopName: (teamId: string, dept: string) => string;
+  onClose: () => void;
+}) {
+  const [rows, setRows] = useState<EventEmailDayRow[] | null>(null);
+  const [selKey, setSelKey] = useState<string | null>(null); // selected day (local YYYY-MM-DD)
+  // Lifetime count for the current metric — all-time (head-only), independent of the loaded window.
+  const [lifetime, setLifetime] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setRows(null); setSelKey(null); setLifetime(null);
+    void loadEventEmailsByType(teamIds, type, { department }).then((r) => { if (alive) setRows(r); });
+    void countEventByMetric(teamIds, type, metric, { department }).then((n) => { if (alive) setLifetime(n); });
+    return () => { alive = false; };
+  }, [teamIds, type, department, metric]);
+
+  const metricLabel = metric === "opened" ? "Opened" : "Sent";
+  const rowTime = (r: EventEmailDayRow) => r.sent_at || r.created_at;
+  const isSent = (r: EventEmailDayRow) => r.status === "sent" || !!r.sent_at;
+  const isOpened = (r: EventEmailDayRow) => !!r.opened_at || (r.open_count ?? 0) > 0;
+  const dayKey = (iso: string) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+  const dayShort = (key: string) => { const [y, m, d] = key.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
+  const dayLong = (key: string) => {
+    const [y, m, d] = key.split("-").map(Number);
+    const dt = new Date(y, m - 1, d);
+    const now = new Date();
+    const diff = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - dt.getTime()) / 86400000);
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Yesterday";
+    return dt.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: dt.getFullYear() === now.getFullYear() ? undefined : "numeric" });
+  };
+  const fmtTime = (iso: string) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); } catch { return iso; } };
+  const recipientsOf = (r: EventEmailDayRow) => (r.recipients ?? []).map((x) => x.email).join(", ");
+
+  // Only rows that qualify for the chosen metric (Sent → produced+sent; Opened → opened).
+  const relevant = useMemo(() => (rows ?? []).filter((r) => (metric === "opened" ? isOpened(r) : isSent(r))), [rows, metric]);
+  // Bucket by local day, oldest → newest for the chart.
+  const days = useMemo(() => {
+    const m = new Map<string, EventEmailDayRow[]>();
+    for (const r of relevant) {
+      const k = dayKey(rowTime(r));
+      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
+    }
+    return Array.from(m.entries()).map(([key, rs]) => ({ key, rows: rs })).sort((a, b) => (a.key < b.key ? -1 : 1));
+  }, [relevant]);
+  useEffect(() => { if (days.length && selKey === null) setSelKey(days[days.length - 1].key); }, [days, selKey]);
+
+  const maxVal = Math.max(1, ...days.map((d) => d.rows.length));
+  const sel = days.find((d) => d.key === selKey) ?? null;
+  // Keep only the last ~30 buckets so the bar chart stays legible.
+  const shown = days.slice(-30);
+  const total = relevant.length;
+  const scopeNote = `${department ? (department === "sales" ? "Sales" : "Service") : "All depts"}${direction ? ` · ${direction === "inbound" ? "Inbound" : "Outbound"}` : ""} · ${teamIds.length} rooftop${teamIds.length === 1 ? "" : "s"}`;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
+      <div className="flex max-h-[85vh] w-[720px] max-w-full flex-col overflow-hidden rounded-xl bg-surface-card shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border-subtle px-5 py-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[14px] font-semibold text-text-primary">{label} · {metricLabel} history</span>
+              <span className="rounded-full bg-positive/10 px-2 py-0.5 text-[11px] font-semibold tabular text-positive" title={`All-time ${metricLabel.toLowerCase()} for the current filter`}>
+                Lifetime {metricLabel.toLowerCase()} · {lifetime === null ? "…" : lifetime.toLocaleString()}
+              </span>
+            </div>
+            <div className="text-[11px] text-text-muted">Per day · {scopeNote} · {total} {metricLabel.toLowerCase()} in window</div>
+          </div>
+          <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary">✕</button>
+        </div>
+        <div className="overflow-auto px-5 py-4">
+          {rows === null ? (
+            <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-text-muted">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-border-subtle border-t-brand-primary" /> Loading {metricLabel.toLowerCase()} history…
+            </div>
+          ) : days.length === 0 ? (
+            <div className="py-16 text-center text-[13px] text-text-muted">No {label.toLowerCase()} emails {metric === "opened" ? "opened" : "sent"} in this window.</div>
+          ) : (
+            <>
+              {/* Trend bars — click a day to drill in */}
+              <div className="flex items-end gap-2" style={{ height: 160 }}>
+                {shown.map((d) => {
+                  const v = d.rows.length;
+                  const h = Math.round((v / maxVal) * 130);
+                  const active = d.key === selKey;
+                  return (
+                    <button
+                      type="button"
+                      key={d.key}
+                      onClick={() => setSelKey(d.key)}
+                      className="flex flex-1 flex-col items-center justify-end gap-1 rounded-md px-0.5 pb-0.5 hover:bg-surface-subtle"
+                      title={`${dayLong(d.key)}: ${v} ${metricLabel.toLowerCase()} · click to drill in`}
+                    >
+                      <div className={`text-[10px] font-bold tabular ${active ? "text-brand-primary" : "text-text-secondary"}`}>{v}</div>
+                      <div className={`w-full rounded-t ${active ? "bg-brand-primary" : "bg-brand-primary/40"}`} style={{ height: Math.max(2, h) }} />
+                      <div className={`mt-0.5 w-full truncate text-center text-[9px] ${active ? "font-semibold text-brand-primary" : "text-text-muted"}`}>{dayShort(d.key)}</div>
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Drill-down for the selected day */}
+              <div className="mt-5 border-t border-border-subtle pt-3">
+                <div className="mb-2 flex items-baseline justify-between">
+                  <div className="text-[11px] font-semibold uppercase tracking-widest text-text-muted">
+                    {sel ? `${metricLabel} · ${dayLong(sel.key)}` : metricLabel}
+                  </div>
+                  {sel ? <div className="text-[11px] font-semibold tabular text-text-secondary">{sel.rows.length} email{sel.rows.length === 1 ? "" : "s"}</div> : null}
+                </div>
+                {!sel || sel.rows.length === 0 ? (
+                  <div className="text-[12px] text-text-muted">None.</div>
+                ) : (
+                  <ul className="max-h-[300px] space-y-0.5 overflow-auto">
+                    {sel.rows.map((r) => (
+                      <li key={r.id || r.event_key} className="flex items-center justify-between gap-3 rounded-md border-b border-border-subtle px-1 py-2">
+                        <div className="min-w-0">
+                          <div className="truncate text-[12px] font-medium text-text-primary">
+                            {rooftopName(r.team_id, r.department)} <span className="font-normal text-text-muted">· {r.department}</span>
+                          </div>
+                          <div className="mt-0.5 truncate text-[11px] text-text-muted">
+                            {fmtTime(rowTime(r))}{r.subject ? " · " + r.subject : ""}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}
+                          </div>
+                        </div>
+                        <div className="shrink-0">
+                          {isOpened(r) ? (
+                            <span className="rounded-full bg-positive/10 px-2 py-0.5 text-[10px] font-semibold text-positive">
+                              👁 Opened{r.open_count && r.open_count > 1 ? ` · ${r.open_count} views` : ""}
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-muted">Not opened</span>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>,

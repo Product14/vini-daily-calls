@@ -21,7 +21,11 @@ export type SendDigestOpts = {
  *  recipient by email, so it doubles as "set this person's phone / flip their SMS opt-in". */
 export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; email: string; name?: string; emailEnabled?: boolean; phone?: string; smsEnabled?: boolean; role?: "salesperson" | "bdc" | "gm" | null }): Promise<{ ok: boolean; error?: string }> {
   const email = String(opts.email || "").trim();
-  if (!/\S+@\S+\.\S+/.test(email)) return { ok: false, error: "Enter a valid email." };
+  const phone = String(opts.phone || "").trim();
+  // A recipient needs at least one channel: a valid email OR a phone (phone-only → the
+  // server stores a non-deliverable placeholder email as the identity key).
+  if (email && !/\S+@\S+\.\S+/.test(email)) return { ok: false, error: "Enter a valid email." };
+  if (!email && !phone) return { ok: false, error: "Add an email or a phone." };
   try {
     const res = await fetch("/api/recipients", {
       method: "POST",
@@ -81,6 +85,11 @@ export const verifyRecipientNow = (opts: { teamId?: string; email: string; verif
 /** Set (or clear) a recipient's phone number for the SMS channel. */
 export const setRecipientPhoneNow = (opts: { teamId?: string; dept?: DeptKind; email: string; phone: string }) =>
   addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, phone: opts.phone });
+
+/** Edit an existing recipient's identity by row id — email (rename), phone, or name.
+ * Only id-based updates can RENAME the email; the email-keyed upsert path would clone the row. */
+export const updateRecipientNow = (opts: { teamId?: string; id: string; email?: string; phone?: string; name?: string }) =>
+  postJson("/api/recipients/update", { teamId: opts.teamId, id: opts.id, email: opts.email, phone: opts.phone, name: opts.name });
 
 /** Set (or clear) a recipient's role (salesperson|bdc|gm|null) for role-tiered transactional routing. */
 export const setRecipientRoleNow = (opts: { teamId?: string; dept?: DeptKind; email: string; role: "salesperson" | "bdc" | "gm" | null }) =>

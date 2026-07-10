@@ -2425,6 +2425,49 @@ app.get("/api/email/roi-event-list", async (req, res) => {
   }
 });
 
+// ── GET /api/email/roi-event-daycounts — per-day mini-report for ONE (team×dept×type) ──
+// Created / Closed (action items only) / Eligible from ClickHouse (dealer-local days), with
+// Sent overlaid from roi_event_emails. Powers the drill-down's per-day header.
+// Query: ?teamId&department&emailType&tz?&sinceDays?
+app.get("/api/email/roi-event-daycounts", async (req, res) => {
+  try {
+    const { teamId, department, emailType, tz, sinceDays } = req.query;
+    if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
+    const zone = String(tz || "America/New_York");
+    const days = {};
+    if (hasClickhouseCreds()) {
+      const { countEventsByDayCH } = await import("./roi-cron/eventPreviewCH.js");
+      const ch = await countEventsByDayCH({ teamId, department, emailType, tz: zone, sinceDays: Number(sinceDays) || 120 });
+      for (const [d, o] of Object.entries(ch)) days[d] = { created: o.created || 0, closed: o.closed || 0, eligible: o.eligible || 0, sent: 0 };
+    }
+    // Overlay Sent from roi_event_emails (bucketed to the dealer's local day of sent_at).
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (sbUrl && sbKey) {
+      const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+      const sinceIso = new Date(Date.now() - (Number(sinceDays) || 120) * 86400000).toISOString();
+      let q = sb.from("roi_event_emails")
+        .select("sent_at")
+        .eq("team_id", teamId).eq("email_type", emailType).eq("status", "sent")
+        .not("sent_at", "is", null).gte("sent_at", sinceIso);
+      if (department) q = q.eq("department", department);
+      const { data: sentRows, error } = await q;
+      if (!error) {
+        const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
+        for (const r of sentRows || []) {
+          const d = fmt.format(new Date(r.sent_at)); // 'YYYY-MM-DD' in dealer-local zone
+          if (!days[d]) days[d] = { created: 0, closed: 0, eligible: 0, sent: 0 };
+          days[d].sent += 1;
+        }
+      }
+    }
+    return res.json({ ok: true, days });
+  } catch (err) {
+    console.error("GET /api/email/roi-event-daycounts error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "daycounts failed" });
+  }
+});
+
 // ── GET /api/email/roi-event-counts — per (team×dept×type) totals from CH ────
 // Powers the transactional grid totals from REAL events (history + live). Three
 // heavy grouped scans → cached in-process for 5 min. ?refresh=1 bypasses.
@@ -2694,14 +2737,33 @@ app.post("/api/tracker/login", (req, res) => {
 });
 app.post("/api/tracker/verify", (req, res) => res.json({ ok: _trackerValid((req.body ?? {}).token) }));
 
+// A non-deliverable placeholder email for a phone-only recipient. email is roi_recipients'
+// identity (NOT NULL + unique per team), so a phone-only person still needs one; the `.invalid`
+// TLD (RFC 2606) guarantees it never resolves, and the sender skips non-real addresses.
+function placeholderEmailForPhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits ? `ph.${digits}@phone.invalid` : "";
+}
+function isPlaceholderEmail(email) {
+  return /@phone\.invalid$/i.test(String(email || ""));
+}
+
 // ── Add a recipient to a rooftop+department (tracker "Add recipient") ────────
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
 app.post("/api/recipients", async (req, res) => {
   try {
     const { teamId, department, email, name, emailEnabled, phone, smsEnabled, role } = req.body ?? {};
     const dept = department === "service" ? "service" : "sales";
-    const addr = String(email || "").trim();
-    if (!teamId || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId + valid email required" });
+    const rawEmail = String(email || "").trim();
+    const rawPhone = phone === undefined ? undefined : String(phone || "").trim();
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    if (rawEmail && !/\S+@\S+\.\S+/.test(rawEmail)) return res.status(400).json({ error: "enter a valid email" });
+    // A recipient needs at least ONE contact channel. When only a phone is given we synthesize a
+    // non-deliverable placeholder email (email is the row's identity key) — the sender skips it, so
+    // a phone-only recipient receives SMS only. Placeholder is derived from the phone's digits so
+    // it's stable for that person within the team.
+    const addr = rawEmail || (rawPhone ? placeholderEmailForPhone(rawPhone) : "");
+    if (!addr) return res.status(400).json({ error: "add an email or a phone" });
     if (role !== undefined && role !== null && !["salesperson", "bdc", "gm"].includes(role)) return res.status(400).json({ error: "role must be salesperson|bdc|gm|null" });
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -2733,6 +2795,56 @@ app.post("/api/recipients", async (req, res) => {
   } catch (err) {
     console.error("POST /api/recipients error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "add recipient failed" });
+  }
+});
+
+// ── Edit an existing recipient's identity by row id (email / phone / name) ───
+// Keyed on the row id (not email) so the email itself can be RENAMED — the plain
+// /api/recipients upsert is keyed on email and would create a new row instead.
+// Any field omitted is left unchanged. Clearing the email is allowed only when a
+// phone remains (then the identity falls back to a phone placeholder).
+app.post("/api/recipients/update", async (req, res) => {
+  try {
+    const { teamId, id, email, phone, name } = req.body ?? {};
+    if (!teamId || !id) return res.status(400).json({ error: "teamId + id required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data: row, error: selErr } = await sb.from("roi_recipients")
+      .select("id,email,phone").eq("team_id", teamId).eq("id", id).maybeSingle();
+    if (selErr) return res.status(500).json({ error: selErr.message });
+    if (!row) return res.status(404).json({ error: "recipient not found" });
+
+    const patch = {};
+    const nextPhone = phone === undefined ? row.phone : (String(phone || "").trim() || null);
+    if (phone !== undefined) patch.phone = nextPhone;
+    if (name !== undefined) patch.name = name ? String(name).trim() : null;
+    if (email !== undefined) {
+      const addr = String(email || "").trim();
+      if (addr) {
+        if (!/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "enter a valid email" });
+        patch.email = addr;
+      } else {
+        // clearing the email → must keep a phone; fall back to its placeholder identity
+        if (!nextPhone) return res.status(400).json({ error: "keep an email or add a phone" });
+        patch.email = placeholderEmailForPhone(nextPhone);
+      }
+    }
+    if (Object.keys(patch).length === 0) return res.json({ ok: true, id, unchanged: true });
+
+    // Guard the unique(team_id, email) constraint with a friendly message.
+    if (patch.email && patch.email.toLowerCase() !== String(row.email).toLowerCase()) {
+      const { data: clash } = await sb.from("roi_recipients")
+        .select("id").eq("team_id", teamId).ilike("email", patch.email).neq("id", id).maybeSingle();
+      if (clash) return res.status(409).json({ error: "another recipient already uses that email" });
+    }
+    const { error } = await sb.from("roi_recipients").update(patch).eq("id", id).eq("team_id", teamId);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, id, email: patch.email ?? row.email, phone: patch.phone });
+  } catch (err) {
+    console.error("POST /api/recipients/update error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "update failed" });
   }
 });
 

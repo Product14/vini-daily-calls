@@ -34,9 +34,14 @@ const { isSubscribed } = require("./subscriptions.cjs");
 // Digests are rooftop summaries → NO role tiering (everyone subscribed gets them).
 // GATE (r.verified_at): a rooftop only emails recipients a human verified for it — the guarantee
 // against cross-rooftop leaks. Unverified rows are held; the daily audit alert surfaces them.
+// A deliverable email — excludes the phone-only placeholder (…@phone.invalid), so a
+// phone-only recipient is never emailed (they get SMS only).
+function isRealEmail(e) {
+  return /\S+@\S+\.\S+/.test(String(e || "")) && !/@phone\.invalid$/i.test(String(e || ""));
+}
 function subscribedEmails(recips, dept, type) {
   return (recips ?? [])
-    .filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
+    .filter((r) => r.verified_at && isRealEmail(r.email) && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
     .map((r) => r.email);
 }
 function subscribedSmsRecips(recips, dept, type, rooftopSmsEnabled) {
@@ -374,6 +379,42 @@ function pixelUrlFor(team, dept, localDate, cadence) {
 }
 function pixelImg(team, dept, localDate, cadence) {
   return `<img src="${pixelUrlFor(team, dept, localDate, cadence)}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;opacity:0;" />`;
+}
+
+// ── Per-recipient open attribution (Option B) ──────────────────────────────────
+// Digests go to a comma-joined To: with ONE shared body → ONE shared pixel, so an open on a
+// mixed list (a Spyne CSM + the dealer) can't be attributed to a side. When PER_RECIPIENT_PIXEL
+// is on, each recipient instead gets their OWN copy whose pixel is keyed &r=<their email>; the
+// track-open edge fn (already deployed with &r= support) then flips only THAT recipient's opened
+// flag, giving exact dealer-vs-Spyne attribution in the tracker. DEFAULT OFF — flipping it changes
+// outbound sends (N copies instead of 1, and recipients no longer share a To: line). The fan-out
+// happens AFTER the atomic send-claim, so at-most-once idempotency (one digest_run row) is unchanged.
+const PER_RECIPIENT_PIXEL = /^(1|true|yes)$/i.test(String(process.env.PER_RECIPIENT_PIXEL || ""));
+// Append &r=<email> to the single track-open pixel URL already in the html (idempotent — a URL that
+// already carries r= is left as-is). Only touches the pixel <img src>, nothing else in the body.
+function withRecipientPixel(html, email) {
+  if (!html || !email) return html;
+  const enc = encodeURIComponent(email);
+  return html.replace(/(https?:\/\/[^"']*\/functions\/v1\/track-open\?[^"']*?)(["'])/i, (_m, url, q) =>
+    (/[?&]r=/.test(url) ? url : `${url}&r=${enc}`) + q);
+}
+// Send one attributed copy per recipient when the flag is on (else a single shared send — identical
+// to prior behaviour). A per-recipient failure (e.g. the v2 @spyne.ai lock filtering a dealer) is
+// logged and skipped so it never aborts the rooftop's other recipients. Returns the first messageId.
+async function sendMailAttributed(emails, subject, html, opts) {
+  if (!PER_RECIPIENT_PIXEL || !Array.isArray(emails) || emails.length <= 1) {
+    return sendMail(emails, subject, html, opts);
+  }
+  let firstId = null;
+  for (const em of emails) {
+    try {
+      const id = await sendMail([em], subject, withRecipientPixel(html, em), opts);
+      if (!firstId) firstId = id;
+    } catch (e) {
+      console.warn(`  ⚠ per-recipient send skipped ${em}: ${String((e && e.message) || e).slice(0, 120)}`);
+    }
+  }
+  return firstId;
 }
 
 function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
@@ -803,7 +844,7 @@ async function runOnce() {
         if (!claim || !claim.length) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already sent/claimed for ${w.localDate}`); return; }
       }
       // SEND (we own the claim; message_id is now non-null so no other sender will re-send this row)
-      const messageId = await sendMail(emails, subject, html);
+      const messageId = await sendMailAttributed(emails, subject, html);
       const finalId = messageId || lockId;
       await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: finalId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;
@@ -1112,7 +1153,7 @@ async function generateAndSendNow(opts) {
       const dry = forceDry || DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
       const sentAt = new Date().toISOString();
-      const messageId = await sendMail(emails, subject, html, { force });
+      const messageId = await sendMailAttributed(emails, subject, html, { force });
       await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || `manual-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++; note("sent", { recipients: emails.length });
       console.log(`  ✓ SENT (on-demand) ${cadence} ${name} [${L.department}]`);
@@ -1243,7 +1284,7 @@ async function runCadence(cadence) {
         .select("id");
       if (claimErr) throw new Error(`send-claim failed: ${claimErr.message}`);
       if (!claim || !claim.length) { out.already_sent++; return; }
-      const messageId = await sendMail(emails, subject, html);
+      const messageId = await sendMailAttributed(emails, subject, html);
       await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || lockId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;
       console.log(`  ✓ SENT ${cadence} ${name} [${L.department}]`);
