@@ -39,7 +39,18 @@ const MAIL_TOKEN = process.env.MAIL_TOKEN || "";
 const DRY_RUN = process.env.DRY_RUN !== "false";
 const REPORTING_API_BASE = (process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app").replace(/\/$/, "");
 const SPYNE_TOKEN = process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
-const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 20); // look-back window per pass
+// Transactional email timing: during US business hours (9am-5pm EST), batch events tighter
+// (3-5 min windows, 0.3s per-event stagger); after hours, relax to 15 min batches with 1s stagger.
+// Business hours are 9am-5pm US/Eastern (covers EST/EDT). Times are in UTC.
+function isUSBusinessHour() {
+  const now = new Date();
+  const utcHour = now.getUTCHours();
+  // EST = UTC-5, EDT = UTC-4. In March-Nov (EDT), 9am EST = 1pm UTC = 13:00. In Nov-Mar (EST), 9am EST = 2pm UTC = 14:00.
+  // Conservative: check if UTC hour is roughly 13-21 (covers both EST/EDT 9am-5pm with buffer).
+  // 9am EDT = 1pm UTC (hour 13), 5pm EDT = 9pm UTC (hour 21). 9am EST = 2pm UTC (hour 14), 5pm EST = 10pm UTC (hour 22).
+  return utcHour >= 13 && utcHour < 22;
+}
+const POLL_MINUTES = isUSBusinessHour() ? 4 : 20; // 3-5 min during hours, 15+ min after hours
 // SMS post-conversation is batched to END OF DAY (the thread runs all day, so one email per lead/day
 // instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
 const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
@@ -48,6 +59,29 @@ const CONSOLE_BASE = "https://console.spyne.ai/converse-ai";
 // Open-tracking pixel → the track-open Edge Function (keyed by the event-email row id).
 // Override the host with DIGEST_TRACK_BASE if it ever moves.
 const TRACK_OPEN_URL = (process.env.DIGEST_TRACK_BASE || "https://qludnojfibguobgeeujw.supabase.co/functions/v1/track-open").replace(/\/$/, "");
+
+// ── Send queue: transactional events with time-aware rate limiting ───────────────────────────
+// During US business hours: 0.3s per event (tight packing, ~200 events/hour capacity)
+// After hours: 1s per event (conservative, avoid spam at odd times)
+// This spreads transactional load while respecting sender reputation + business context.
+const EVENT_SEND_DELAY_DURING_HOURS_MS = Number(process.env.EVENT_SEND_DELAY_DURING_MS ?? 300);   // 0.3s
+const EVENT_SEND_DELAY_AFTER_HOURS_MS = Number(process.env.EVENT_SEND_DELAY_AFTER_MS ?? 1000);   // 1s
+let _eventSendQueue = Promise.resolve();
+let _lastEventSendAt = 0;
+function enqueueSendEvent(to, subject, html, opts) {
+  _eventSendQueue = _eventSendQueue.then(async () => {
+    const delayMs = isUSBusinessHour() ? EVENT_SEND_DELAY_DURING_HOURS_MS : EVENT_SEND_DELAY_AFTER_HOURS_MS;
+    const now = Date.now();
+    const elapsed = now - _lastEventSendAt;
+    if (delayMs > 0 && _lastEventSendAt > 0 && elapsed < delayMs) {
+      const wait = delayMs - elapsed;
+      await new Promise(r => setTimeout(r, wait));
+    }
+    _lastEventSendAt = Date.now();
+    return sendMailRaw(to, subject, html, opts);
+  });
+  return _eventSendQueue;
+}
 function withPixel(html, id) {
   if (!html || !id) return html;
   const img = `<img src="${TRACK_OPEN_URL}?id=${encodeURIComponent(id)}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;opacity:0;" />`;
@@ -140,7 +174,7 @@ async function apptMTD(team, dept) {
   } catch { return 0; }
 }
 
-async function sendMail(to, subject, html, opts) {
+async function sendMailRaw(to, subject, html, opts) {
   // Anti-churn gate: refuse a no-value email (marker stamped by the renderer)
   // unless { force: true } (DANGER override). Strip the marker off the wire.
   const force = opts && opts.force === true;
@@ -156,6 +190,11 @@ async function sendMail(to, subject, html, opts) {
     await new Promise((r) => setTimeout(r, attempt * 1500));
   }
   throw new Error("mail failed after retries");
+}
+
+// Public sendMail routes through the event send queue for domain reputation protection.
+function sendMail(to, subject, html, opts) {
+  return enqueueSendEvent(to, subject, html, opts);
 }
 
 // Insert the dedupe row FIRST (status 'queued') — the unique (team,type,event_key) guarantees
