@@ -1571,13 +1571,11 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
         <colgroup>
           <col style={{ width: 34 }}  />  {/* Star */}
           <col style={{ width: 50 }}  />  {/* Actual Live (checkbox) */}
-          <col style={{ width: 210 }} />  {/* Rooftop (enterprise name wraps to 2 lines via line-clamp) */}
+          <col style={{ width: 260 }} />  {/* Rooftop — name / enterprise / MRR · Cohort */}
           <col style={{ width: 72 }}  />  {/* Agent */}
-          <col style={{ width: 78 }}  />  {/* MRR */}
           <col style={{ width: 100 }} />  {/* CSM */}
           <col style={{ width: 200 }} />  {/* Tech stack — CRM / Scheduler / DMS stacked */}
           <col style={{ width: 72 }}  />  {/* ROI */}
-          <col style={{ width: 92 }}  />  {/* Cohort */}
           <col style={{ width: 68 }}  />  {/* 30d Leads */}
           <col style={{ width: 68 }}  />  {/* 30d Appts */}
           <col style={{ minWidth: 220 }} />  {/* Next Step — flexes, with floor */}
@@ -1588,11 +1586,9 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
             <Th><span title="Actually Live — drives every aggregate widget on Overview / By Cohort / Email Report. Toggle per row.">Live</span></Th>
             <Th>Rooftop</Th>
             <Th>Agent</Th>
-            <Th right>MRR</Th>
             <Th>CSM</Th>
             <Th>Tech stack</Th>
             <Th right>ROI</Th>
-            <Th>Cohort</Th>
             <Th right>30d Leads</Th>
             <Th right>30d Appts</Th>
             <Th>Next Step · Owner · ETA</Th>
@@ -1640,10 +1636,13 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
                       title={a.enterpriseName}
                       style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
                     >{a.enterpriseName}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: "#111827" }}>{fmtMoney(a.mrr)}</span>
+                      <CohortPill cohort={a.cohort} daysLive={a.daysLive} />
+                    </div>
                   </div>
                 </Td>
                 <Td>{AGENT_LABELS[a.agentType]}</Td>
-                <Td right>{fmtMoney(a.mrr)}</Td>
                 <Td>
                   {(() => {
                     const eff = effectiveCsm(a, s);
@@ -1677,7 +1676,6 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
                   );
                 })()}
                 <Td right><RoiPill roi={a.roi} /></Td>
-                <Td><CohortPill cohort={a.cohort} daysLive={a.daysLive} /></Td>
                 <Td right>{a.touched.toLocaleString()}</Td>
                 <Td right>{a.appts.toLocaleString()}</Td>
                 <Td><NextStepsCell tasks={s.tasks} /></Td>
@@ -1685,7 +1683,7 @@ function AccountTable({ rows, state, rooftopStack, onOpen, onToggleActualLive, o
             );
           })}
           {rows.length === 0 && (
-            <tr><td colSpan={12} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
+            <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>No accounts match current filters.</td></tr>
           )}
         </tbody>
       </table>
