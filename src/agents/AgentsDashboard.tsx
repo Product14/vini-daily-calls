@@ -47,6 +47,11 @@ type AgentRowBase = {
   appointment_intent_leads: number | null;
   transfer_leads: number | null;
   callback_leads: number | null;
+
+  // Service Outbound-only: leads who claimed a service voucher (dealer_leads.voucher),
+  // the outcome that flow's campaigns actually optimize for now instead of a booked
+  // meeting. Null/0 on the other three agent types.
+  voucher_claims: number | null;
 };
 // Index signature for the `pld.` prefixed fields (TS can't express dotted keys
 // in a closed type; we just hand-roll the access).
@@ -96,6 +101,11 @@ const COST_PER_APPT: Record<AgentType, number> = {
 // (higher-value showrooms where each booked visit is worth far more). Editable
 // allowlist — matched case-insensitively against rooftop OR enterprise name.
 const PREMIUM_DEALER_APPT_COST = 750;
+// Service Outbound's flow ends in a service-voucher claim, not a booked
+// appointment. Each claimed voucher is credited $50 of value so it counts
+// toward ROI / RAG (user 10-Jul) — otherwise a voucher-driven rooftop shows
+// 0× ROI and reads red despite delivering.
+const VOUCHER_VALUE = 50;
 const PREMIUM_DEALERS = new Set<string>([
   "mercedes-benz of arlington",
 ]);
@@ -307,6 +317,8 @@ type Bucket = {
   apptIntent: number;
   transfers: number;
   callbacks: number;
+  // Service Outbound-only — see AgentRowBase. Additive like touched.
+  voucherClaims: number;
   // Cost-weighted appointment value = appts × cost-per-appt for THIS row's
   // agent type (or the premium-dealer rate). Kept as a Bucket field so it sums
   // correctly when "All Agents" merges rows of different agent types — each
@@ -318,6 +330,7 @@ const EMPTY: Bucket = {
   totalCalls: 0, totalSms: 0, leadsWithCalls: 0, leadsWithSms: 0,
   newLeads: 0, contactedFromNew: 0,
   apptIntent: 0, transfers: 0, callbacks: 0,
+  voucherClaims: 0,
   roiValue: 0,
 };
 
@@ -336,8 +349,12 @@ function projectRow(r: AnyAgentRow): Bucket {
     apptIntent: num(r.appointment_intent_leads),
     transfers: num(r.transfer_leads),
     callbacks: num(r.callback_leads),
+    voucherClaims: num(r.voucher_claims),
+    // ROI value = booked-appointment value + claimed-voucher value ($50 each,
+    // Service OB only — voucher_claims is 0 for other agent types).
     roiValue: num(r.appointments) *
-      costPerAppt(r.agent_type, String(r.rooftop_name ?? ""), String(r.enterprise_name ?? "")),
+        costPerAppt(r.agent_type, String(r.rooftop_name ?? ""), String(r.enterprise_name ?? "")) +
+      num(r.voucher_claims) * VOUCHER_VALUE,
   };
 }
 function add(a: Bucket, b: Bucket): Bucket {
@@ -355,6 +372,7 @@ function add(a: Bucket, b: Bucket): Bucket {
     apptIntent: a.apptIntent + b.apptIntent,
     transfers: a.transfers + b.transfers,
     callbacks: a.callbacks + b.callbacks,
+    voucherClaims: a.voucherClaims + b.voucherClaims,
     roiValue: a.roiValue + b.roiValue,
   };
 }
@@ -378,6 +396,7 @@ function collapseDailyForRooftop(daily: Bucket[]): Bucket {
     out.apptIntent       += d.apptIntent;
     out.transfers        += d.transfers;
     out.callbacks        += d.callbacks;
+    out.voucherClaims    += d.voucherClaims;
     out.roiValue         += d.roiValue;
     if (d.newLeads         > out.newLeads)         out.newLeads         = d.newLeads;
     if (d.contactedFromNew > out.contactedFromNew) out.contactedFromNew = d.contactedFromNew;
@@ -677,6 +696,42 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
     return out;
   }, [totalsRows]);
 
+  // Per team_id, how many of the account sheet's OWN rows (across all four
+  // agent types) agree on each rooftopName. Used only as a last-resort guard
+  // on the ambiguous-Metabase-name fallback path below (see
+  // sheetNameForAmbiguousRow) — when a team_id's sheet rows disagree with
+  // themselves about its name, the majority is a better bet than a lone
+  // outlier row (a copy-paste error onto just one agent_type's row).
+  const teamSheetNameCounts = useMemo(() => {
+    const perTeam = new Map<string, Map<string, number>>();
+    for (const e of sheetEntries) {
+      if (!e.teamId || !e.rooftopName) continue;
+      let m = perTeam.get(e.teamId);
+      if (!m) { m = new Map(); perTeam.set(e.teamId, m); }
+      m.set(e.rooftopName, (m.get(e.rooftopName) ?? 0) + 1);
+    }
+    return perTeam;
+  }, [sheetEntries]);
+
+  // Best-effort name for a row whose Metabase rooftop_name is ambiguous
+  // (shared by several team_ids for this agent_type — e.g. many World Car
+  // team_ids all raw-named "World Car Auto Group"), so the accounts sheet is
+  // the only source of a specific display name. Prefers this team_id's own
+  // majority name across its other sheet rows over `info`'s single row,
+  // since sheet rows are hand-typed and prone to copy/paste errors between
+  // sibling rooftops under one enterprise. Falls back to `info.rooftopName`
+  // on a genuine tie — we can't tell which is right, and a tie is no worse
+  // than what the sheet itself says.
+  const sheetNameForAmbiguousRow = (tid: string, info: AccountInfo | null): string | null => {
+    if (!info?.rooftopName) return null;
+    const counts = teamSheetNameCounts.get(tid);
+    if (!counts) return info.rooftopName;
+    let best: [string, number] | null = null;
+    for (const pair of counts) if (!best || pair[1] > best[1]) best = pair;
+    if (best && best[1] > (counts.get(info.rooftopName) ?? 0)) return best[0];
+    return info.rooftopName;
+  };
+
   // Per (rooftop × agent_type) lookup. We deliberately do NOT collapse across
   // agent types: Sales-OB stage stays Sales-OB stage, even when Sales-IB on the
   // same rooftop is Live. The user reported a bug where cross-agent precedence
@@ -731,24 +786,39 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   const displayStage = (r: AnyAgentRow): string | null =>
     dataMode === "sheet" ? effectiveStage(r) : (r.rooftop_stage ?? null);
 
-  // Rooftop label override — Metabase's `rooftop_name` is the same string
-  // for several team_ids in some cases (e.g. 5 World Car team_ids all
-  // labeled "World Car Auto Group"), which collapses distinct rooftops in
-  // the table. Three-tier fallback:
-  //   1. Master sheet's rooftopName for this (team_id × agent_type)
-  //   2. Metabase's rooftop_name; suffix a short team_id when the same
-  //      name is shared by multiple Metabase team_ids (the ambiguous case)
-  //   3. The default rooftopLabel chain (enterprise_name → team_id → Unknown)
-  // Applied in both data-modes since it's a purely cosmetic disambiguation.
+  // Rooftop label override. Metabase's `rooftop_name` is tied 1:1 to team_id
+  // by the real conversation pipeline, so whenever it uniquely identifies
+  // this (team_id × agent_type) — i.e. it's NOT one of the ambiguous shared
+  // names below — it's trusted over the accounts sheet outright. The sheet
+  // is a hand-maintained spreadsheet and is prone to copy/paste errors
+  // between sibling rooftops under one enterprise: real incidents found
+  // 2026-07-10 include a Dream Automotive row typed with a sibling's name
+  // ("Dream Nissan Legends" on team_id 7607d0e6f5, whose real, unique
+  // Metabase identity is "Dream Nissan Lawrence") and a Paragon row typed
+  // "Paragon Honda" on team_id e9e19bca63, whose real, unique identity is
+  // "Paragon Acura". Trusting Metabase whenever it's unambiguous closes that
+  // whole class of error without needing to guess which sheet row is wrong.
+  //
+  // The sheet is still the right (only) source when Metabase's own name is
+  // ambiguous — shared by several team_ids for this agent_type (e.g. 5+
+  // World Car team_ids all raw-named "World Car Auto Group") — since
+  // Metabase alone can't tell those rooftops apart. In that case, prefer
+  // this team_id's own majority name across its other sheet rows over a
+  // lone outlier row (sheetNameForAmbiguousRow); on a genuine tie, fall back
+  // to the sheet's row as-is, and finally to an ambiguous-suffixed Metabase
+  // name if the sheet has nothing at all.
   const displayRooftopLabel = (r: AnyAgentRow): string => {
-    const info = accountInfoFor(r);
-    if (info?.rooftopName) return info.rooftopName;
     const name = (r.rooftop_name ?? "").trim();
     const agent = (r.agent_type ?? "").trim().toLowerCase();
-    if (name && ambiguousMetabaseNames.has(`${name.toLowerCase()}::${agent}`)) {
-      const tid = teamId(r);
-      if (tid) return `${name} · ${tid.slice(0, 8)}`;
-    }
+    const tid = teamId(r);
+    const isAmbiguousMetabaseName = !!name && ambiguousMetabaseNames.has(`${name.toLowerCase()}::${agent}`);
+    if (name && !isAmbiguousMetabaseName) return name;
+
+    const info = accountInfoFor(r);
+    const sheetName = tid ? sheetNameForAmbiguousRow(tid, info) : (info?.rooftopName ?? null);
+    if (sheetName) return sheetName;
+    if (name && isAmbiguousMetabaseName && tid) return `${name} · ${tid.slice(0, 8)}`;
+    if (name) return name;
     return rooftopLabel(r);
   };
 
@@ -1460,6 +1530,8 @@ const KPI_INFO: Record<string, string> = {
     "Leads the agent confirmed have real buying intent, ready for follow-up.",
   "Appointments":
     "Leads who booked a visit. This is the headline outcome we optimise for.",
+  "Outcome Achieved":
+    "Leads who booked a visit OR claimed a service voucher — the campaign's completed outcome for Service Outbound, whose flow now ends in a voucher claim rather than a booked meeting.",
   "Total Calls":
     "Every call placed or received in this period. One lead can have many.",
   "Total SMS":
@@ -1505,9 +1577,14 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
   // service-oriented), so it's meaningful on Service IB and the mixed "All"
   // view — not on Sales IB, where it's structurally ~0.
   const showApptIntent = agent === "Service Inbound" || agent === "All";
-  const convNumer = totals.appts;
   const convDenom = usesQualified ? totals.qualified : totals.touched;
   const convDenomLabel = usesQualified ? "qualified" : "touched";
+  // Service Outbound's campaigns now end in a voucher claim, not a booked
+  // meeting — voucher claims are the appointment-equivalent completed outcome
+  // for this agent type, so the headline "Appointments" slot (and ABR, below)
+  // becomes "Outcome Achieved" = appointments + voucher claims here only.
+  const isServiceOutbound = agent === "Service Outbound";
+  const outcomeAchieved = totals.appts + (isServiceOutbound ? totals.voucherClaims : 0);
 
   // V3 funnel: Touched → Qualified → Appointments. The upstream Metabase query
   // also emits a top-of-funnel "New Leads" tier and a "Capture Rate" derived
@@ -1518,9 +1595,9 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
     { label: "Qualified", value: fmtNum(totals.qualified), color: "#0d9488",
       sub: fmtRate(totals.qualified, totals.touched) + " of touched",
       info: KPI_INFO["Qualified"] },
-    { label: "Appointments", value: fmtNum(totals.appts), color: "#22c55e",
-      sub: fmtRate(convNumer, convDenom) + " of " + convDenomLabel,
-      info: KPI_INFO["Appointments"] },
+    { label: isServiceOutbound ? "Outcome Achieved" : "Appointments", value: fmtNum(outcomeAchieved), color: "#22c55e",
+      sub: fmtRate(outcomeAchieved, convDenom) + " of " + convDenomLabel,
+      info: isServiceOutbound ? KPI_INFO["Outcome Achieved"] : KPI_INFO["Appointments"] },
   ];
 
   const accountsSub = `${liveRooftops} live · ${inObRooftops} in OB · ${churnedRooftops} churned`;
@@ -1531,10 +1608,10 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
     { label: "Total SMS", value: fmtNum(totals.totalSms), color: "#0ea5e9",
       sub: totals.leadsWithSms > 0 ? `${fmtNum(totals.leadsWithSms)} unique leads` : undefined,
       info: KPI_INFO["Total SMS"] },
-    { label: "Conversion Rate", value: fmtRate(convNumer, convDenom), color: "#15803d",
-      sub: `appts / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
-    { label: "ABR", value: fmtRate(totals.appts, totals.qualified), color: "#0d9488",
-      sub: "appts / qualified", info: KPI_INFO["ABR"] },
+    { label: "Conversion Rate", value: fmtRate(outcomeAchieved, convDenom), color: "#15803d",
+      sub: `${isServiceOutbound ? "outcomes" : "appts"} / ${convDenomLabel}`, info: KPI_INFO["Conversion Rate"] },
+    { label: "ABR", value: fmtRate(outcomeAchieved, isServiceOutbound ? totals.touched : totals.qualified), color: "#0d9488",
+      sub: isServiceOutbound ? "goals (appt+voucher) / leads" : "appts / qualified", info: KPI_INFO["ABR"] },
     ...(showApptIntent ? [
       { label: "Appt Intent", value: fmtNum(totals.apptIntent), color: "#f59e0b",
         sub: totals.touched > 0 ? `${fmtRate(totals.apptIntent, totals.touched)} of touched` : undefined,
@@ -1658,7 +1735,7 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, 
             <th
               style={{ ...thStyle, ...sortableHeaderStyle("ROI"), textAlign: "center", minWidth: 84 }}
               onClick={() => onSort("ROI")}
-              title="ROI Multiple = (appts × cost-per-appt) ÷ (MRR pro-rated to the selected range). RAG: Green ≥ 3× · Amber 1.5×–3× · Red < 1.5× (or < 100 top-of-funnel leads, or no Metabase data).">
+              title="ROI Multiple = (appts × cost-per-appt + voucher claims × $50) ÷ (MRR pro-rated to the selected range). RAG: Green ≥ 3× · Amber 1.5×–3× · Red < 1.5× (or < 100 top-of-funnel leads, or no Metabase data).">
               ROI{sortIndicator("ROI")}
             </th>
           )}
@@ -1790,12 +1867,18 @@ function columnsFor(agent: ActiveAgent): Col[] {
   const showInboundOutcomes =
     agent === "Sales Inbound" || agent === "Service Inbound" || agent === "All";
   const showApptIntent = agent === "Service Inbound" || agent === "All";
+  // Service Outbound's campaigns now end in a voucher claim, not a booked
+  // meeting — fold voucher claims into the Appts/ABR columns for that tab only.
+  const isServiceOutbound = agent === "Service Outbound";
+  const outcome = (b: Bucket) => b.appts + (isServiceOutbound ? b.voucherClaims : 0);
   return [
     { label: "Leads Attempted", render: b => fmtNum(b.touched), sortValue: b => b.touched, emphasize: true },
     { label: "Qualified", render: b => fmtNum(b.qualified), sortValue: b => b.qualified },
-    { label: "Appts", render: b => fmtNum(b.appts), sortValue: b => b.appts, emphasize: true },
-    { label: "Conv. Rate", render: b => fmtRate(b.appts, convDenom(b)), sortValue: b => safeRate(b.appts, convDenom(b)), minWidth: 90 },
-    { label: "ABR", render: b => fmtRate(b.appts, b.qualified), sortValue: b => safeRate(b.appts, b.qualified), minWidth: 80 },
+    { label: isServiceOutbound ? "Outcome" : "Appts", render: b => fmtNum(outcome(b)), sortValue: outcome, emphasize: true },
+    { label: "Conv. Rate", render: b => fmtRate(outcome(b), convDenom(b)), sortValue: b => safeRate(outcome(b), convDenom(b)), minWidth: 90 },
+    // Service OB books against leads (goals = appt+voucher ÷ leads); everyone
+    // else uses the classic appt ÷ qualified booking rate.
+    { label: "ABR", render: b => fmtRate(outcome(b), isServiceOutbound ? b.touched : b.qualified), sortValue: b => safeRate(outcome(b), isServiceOutbound ? b.touched : b.qualified), minWidth: 80 },
     { label: "Calls / SMS", render: fmtChannelMix, sortValue: b => b.leadsWithCalls + b.leadsWithSms, minWidth: 100 },
     { label: "Total Calls", render: b => fmtNum(b.totalCalls), sortValue: b => b.totalCalls },
     { label: "Total SMS", render: b => fmtNum(b.totalSms), sortValue: b => b.totalSms },

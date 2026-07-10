@@ -73,12 +73,62 @@ GROUP BY GROUPING SETS (
   (team_id, agent_type, activity_day)
 )`;
 
+// Voucher claims — Service Outbound-only outcome, separate from base_fact since
+// dealer_leads.voucher isn't lead-level (no lead_id to join on) and joining by
+// team_id alone onto the lead-grain base_fact would fan out. Scanned once here,
+// merged onto the Service Outbound rows below by (team_id[, day]).
+const voucherSql = () => `
+  SELECT team_id, toString(day) AS day, GROUPING(day) AS is_totals, count() AS voucher_claims
+  FROM (
+    SELECT team_id, toDate(createdAt) AS day
+    FROM dealer_leads.voucher FINAL
+    WHERE __deleted = 0 AND createdAt >= addDays(today(), -${WINDOW_DAYS})
+  )
+  GROUP BY GROUPING SETS ((team_id), (team_id, day))`;
+
+// Merges voucher claim counts onto the Service Outbound row for each (team_id[, day]).
+// Synthesizes a zero-filled Service Outbound row when a team claimed vouchers on a
+// day with no other Service Outbound activity, so claims are never silently dropped.
+function mergeVoucherClaims(rows, voucherRows, { keyed }) {
+  const byKey = new Map();
+  for (const r of rows) {
+    if (r.agent_type !== "Service Outbound") continue;
+    const key = keyed ? `${r.team_id}|${r.day}` : r.team_id;
+    byKey.set(key, r);
+  }
+  for (const v of voucherRows) {
+    const key = keyed ? `${v.team_id}|${v.day}` : v.team_id;
+    const claims = Number(v.voucher_claims) || 0;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.voucher_claims = claims;
+    } else {
+      const zeroed = { team_id: v.team_id, agent_type: "Service Outbound", voucher_claims: claims };
+      if (keyed) zeroed.day = v.day;
+      rows.push(zeroed);
+      byKey.set(key, zeroed);
+    }
+  }
+  for (const r of rows) {
+    if (r.agent_type === "Service Outbound" && r.voucher_claims === undefined) r.voucher_claims = 0;
+  }
+}
+
 // Returns { daily, totals } in the exact shape /api/agents already serves.
 // GROUP BY yields one row per key, so no client-side dedup is needed.
 export async function runAgentRooftops() {
-  const rows = await runClickhouse(combinedSql());
+  const [rows, voucherRows] = await Promise.all([
+    runClickhouse(combinedSql()),
+    runClickhouse(voucherSql()),
+  ]);
   const totals = [];
   const daily = [];
+  const voucherTotals = [];
+  const voucherDaily = [];
+  for (const v of voucherRows) {
+    if (Number(v.is_totals) === 1) voucherTotals.push({ team_id: v.team_id, voucher_claims: v.voucher_claims });
+    else voucherDaily.push(v);
+  }
   for (const r of rows) {
     const { is_totals, ...rest } = r;
     if (Number(is_totals) === 1) {
@@ -90,6 +140,8 @@ export async function runAgentRooftops() {
       daily.push(rest);
     }
   }
+  mergeVoucherClaims(totals, voucherTotals, { keyed: false });
+  mergeVoucherClaims(daily, voucherDaily, { keyed: true });
   return { totals, daily };
 }
 

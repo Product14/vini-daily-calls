@@ -113,11 +113,22 @@ export const abrDenom     = (r: MetricRow, agent: AgentCol): number => denomFor(
 export const abrDenomCall = (r: MetricRow, agent: AgentCol): number => denomFor(r, agent, "leads_qualified_call", "leads_touched_call");
 export const abrDenomSms  = (r: MetricRow, agent: AgentCol): number => denomFor(r, agent, "leads_qualified_sms", "leads_touched_sms");
 
+// Service Outbound's campaigns now end in a voucher claim (dealer_leads.voucher),
+// not a booked meeting — voucher claims are the appointment-equivalent completed
+// outcome for that agent type, so the headline appointments/ABR figures fold them
+// in here only. `voucher_claims` is 0/absent for the other three agent types.
+export const outcomeVal = (r: MetricRow, agent: AgentCol): number =>
+  num(r.appts) + (agent === "Service Outbound" ? num(r.voucher_claims) : 0);
+
 // Per-agent ABR labels so single-agent views (trend matrix, TV wall) name the
 // denominator they actually used. The multi-agent snapshot row stays generic.
 const abrLabelWith = (suffix: string) => (agent: AgentCol): string =>
   ABR_USES_QUALIFIED[agent] ? `ABR${suffix} % (appts / qualified leads)` : `ABR${suffix} % (appts / leads touched)`;
-export const abrLabel     = abrLabelWith("");
+// Service Outbound's headline ABR now includes voucher claims (see outcomeVal
+// below) — the numerator wording reflects that here only; the call/SMS-only
+// breakdowns below aren't part of the voucher fold, so they keep saying "appts".
+export const abrLabel     = (agent: AgentCol): string =>
+  agent === "Service Outbound" ? "ABR % (outcomes / leads touched)" : abrLabelWith("")(agent);
 export const abrLabelCall = abrLabelWith(" (call)");
 export const abrLabelSms  = abrLabelWith(" (SMS)");
 // Compact variant for the narrow TV-wall metric column.
@@ -203,8 +214,9 @@ export const SECTIONS: Section[] = [
       { label: "Unique leads touched", value: (r) => fmtInt(r.leads_touched) },
       { label: "Qualified leads (#)", value: (r) => fmtInt(r.leads_qualified) },
       { label: "% qualified leads", pct: true, value: (r) => fmtPct(r.leads_qualified, r.leads_touched), crit: true, numv: (r) => safeDiv(r.leads_qualified, r.leads_touched), floor: 0.03 },
-      { label: "Appointments (#)", value: (r) => fmtInt(r.appts), emph: true },
-      { label: "ABR %", labelFor: abrLabel, pct: true, value: (r, a) => fmtPct(r.appts, abrDenom(r, a)), crit: true, numv: (r, a) => safeDiv(r.appts, abrDenom(r, a)), floor: 0.02, heat: (r, a) => safeDiv(r.appts, abrDenom(r, a)) },
+      { label: "Appointments (#)", labelFor: (a) => a === "Service Outbound" ? "Outcome Achieved (#)" : "Appointments (#)",
+        value: (r, a) => fmtInt(outcomeVal(r, a)), emph: true },
+      { label: "ABR %", labelFor: abrLabel, pct: true, value: (r, a) => fmtPct(outcomeVal(r, a), abrDenom(r, a)), crit: true, numv: (r, a) => safeDiv(outcomeVal(r, a), abrDenom(r, a)), floor: 0.02, heat: (r, a) => safeDiv(outcomeVal(r, a), abrDenom(r, a)) },
     ],
   },
   {
@@ -248,7 +260,7 @@ export const SECTIONS: Section[] = [
 export type TvMetric = { label: string; labelFor?: (agent: AgentCol) => string; value: (r: MetricRow, agent: AgentCol) => string; pct?: boolean; grp?: boolean; heat?: (r: MetricRow, agent: AgentCol) => number | null; emph?: boolean };
 export const TV_METRICS: TvMetric[] = [
   { label: "% Rooftops w/ appt", pct: true, value: (r) => fmtPct(r.rooftops_appt, r.rooftops_any) },
-  { label: "ABR %", labelFor: abrLabelShort, pct: true, value: (r, a) => fmtPct(r.appts, abrDenom(r, a)), heat: (r, a) => safeDiv(r.appts, abrDenom(r, a)) },
+  { label: "ABR %", labelFor: abrLabelShort, pct: true, value: (r, a) => fmtPct(outcomeVal(r, a), abrDenom(r, a)), heat: (r, a) => safeDiv(outcomeVal(r, a), abrDenom(r, a)) },
   { label: "Transfer %", pct: true, value: (r) => fmtPct(r.transfers, r.total_calls) },
   { label: "Call connection %", pct: true, value: (r) => fmtPct(r.connected_calls, r.total_calls) },
   { label: "SMS reply %", pct: true, value: (r) => fmtPct(r.sms_inbound, r.sms_outbound) },
@@ -263,7 +275,8 @@ export const TV_METRICS: TvMetric[] = [
   // though those agents do qualify on calls. Overall leads_qualified captures
   // whatever channel actually recorded the qualification.
   { label: "Qualified leads", value: (r) => fmtInt(r.leads_qualified) },
-  { label: "Appointments", value: (r) => fmtInt(r.appts), emph: true },
+  { label: "Appointments", labelFor: (a) => a === "Service Outbound" ? "Outcome Achieved" : "Appointments",
+    value: (r, a) => fmtInt(outcomeVal(r, a)), emph: true },
   { label: "Total calls", value: (r) => fmtInt(r.total_calls) },
   { label: "Total SMS outbound", value: (r) => fmtInt(r.sms_outbound) },
 ];

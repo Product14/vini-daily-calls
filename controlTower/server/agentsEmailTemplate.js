@@ -307,7 +307,11 @@ function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
     // Per-agent ABR denominator (user 26-Jun): Sales OB + Service IB use
     // qualified calls; Sales IB + Service OB stay on raw leads.
     const usesQualified = agent === "Sales OB" || agent === "Service IB";
-    const abrLabel = usesQualified ? "ABR (appts ÷ qualified)" : "ABR (appts ÷ leads)";
+    // Service OB's `appts`/`abr` already include voucher claims (folded in at
+    // historicalAggregates.js's aggregateDailyMetabase) — relabel here so the
+    // wording matches what's actually being counted.
+    const isServiceOB = agent === "Service OB";
+    const abrLabel = isServiceOB ? "ABR (outcomes ÷ leads)" : usesQualified ? "ABR (appts ÷ qualified)" : "ABR (appts ÷ leads)";
     return [
       { key: "liveAgents",  label: "Live agents",           color: PALETTE.text },
       // User 26-Jun: % Green right under the rooftop count.
@@ -319,7 +323,7 @@ function perAgentTrends({ historical, perAgentArr, arrDeltas }) {
       // the spine's appointment_intent_leads column.
       { key: "warmLeads",   label: "Warm leads",            color: PALETTE.text },
       isIB && { key: "transferRate", label: "Transfer %",   color: PALETTE.text },
-      { key: "appts",       label: "Appointments booked",   color: PALETTE.accent, cond: "appts", condBg: true },
+      { key: "appts",       label: isServiceOB ? "Outcome Achieved" : "Appointments booked", color: PALETTE.accent, cond: "appts", condBg: true },
       { key: "abr",         label: abrLabel,                color: PALETTE.red,    cond: "abr",   condBg: true },
       { key: "roiMultiple", label: "ROI Multiple",          color: PALETTE.accent, cond: "roiMultiple", condBg: true },
       { key: "pctAllClear", label: "% All Clear (quality)", color: PALETTE.green,  cond: "pctAllClear" },

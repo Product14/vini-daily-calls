@@ -15,8 +15,13 @@ const require = createRequire(import.meta.url);
 // Inbound callbacks driven by an outbound touch are re-attributed to the
 // Outbound agent so the Overall view reconciles with the Rooftop view.
 const QUERIES_RAW = require("./agentMetricsQueries.json");
+// Voucher queries are plain team_id/period scans against dealer_leads.voucher —
+// no conversation-spine callback/direction logic to patch, so they're exempt
+// from the anchor-based rewrite (which throws when its CTE/JOIN/DIR anchors
+// are absent from the SQL).
 const QUERIES = Object.fromEntries(
-  Object.entries(QUERIES_RAW).map(([k, sql]) => [k, applyCallbackOutboundAttribution(sql, k)])
+  Object.entries(QUERIES_RAW).map(([k, sql]) =>
+    [k, k.endsWith("_vouchers") ? sql : applyCallbackOutboundAttribution(sql, k)])
 );
 
 export function hasClickhouseCreds() {
@@ -74,19 +79,35 @@ async function runClickhouseRaw(sql) {
 // Mirror of build_dashboard.py assembly (per-period grouping + intent + Total).
 function assemble(R) {
   const grains = {
-    day: ["day_metrics", "day_intent"],
-    week: ["week_metrics", "week_intent"],
-    month: ["month_metrics", "month_intent"],
+    day: ["day_metrics", "day_intent", "day_vouchers"],
+    week: ["week_metrics", "week_intent", "week_vouchers"],
+    month: ["month_metrics", "month_intent", "month_vouchers"],
   };
   const out = {};
   for (const g of Object.keys(grains)) {
-    const [mk, ik] = grains[g];
+    const [mk, ik, vk] = grains[g];
     const data = {}, periodsSet = new Set();
     for (const row of R[mk]) {
       const p = row.period; if (!p) continue;            // skip ROLLUP grand-total
       periodsSet.add(p);
       const a = row.agent_type || "Total";               // '' rollup -> Total
       (data[p] = data[p] || {})[a] = row;
+    }
+    // Voucher claims — Service Outbound-only outcome (dealer_leads.voucher isn't
+    // in the base_fact spine, queried separately). Merge onto the existing
+    // Service Outbound row for the period, or synthesize one if that period had
+    // no other Service Outbound activity, so claims are never silently dropped.
+    for (const row of R[vk] || []) {
+      const p = row.period; if (!p) continue;
+      periodsSet.add(p);
+      const bucket = (data[p] = data[p] || {});
+      const existing = bucket["Service Outbound"];
+      if (existing) existing.voucher_claims = row.voucher_claims;
+      else bucket["Service Outbound"] = { period: p, agent_type: "Service Outbound", voucher_claims: row.voucher_claims };
+    }
+    for (const p of Object.keys(data)) {
+      if (!data[p]["Service Outbound"]) continue;
+      if (data[p]["Service Outbound"].voucher_claims === undefined) data[p]["Service Outbound"].voucher_claims = 0;
     }
     const intent = {}, totals = {};
     for (const row of R[ik]) {
