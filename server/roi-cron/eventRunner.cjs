@@ -16,8 +16,13 @@
  * SAFETY: DRY_RUN defaults TRUE — records 'suppressed/dry_run', sends nothing. dealership
  * dry_run=true is always held. Same mail proxy + env as runner.cjs.
  *
+ * CADENCE: the Vercel cron (vercel.json) fires this every ~4 min while US dealers are open
+ * (12:00–02:59 UTC) and every 15 min deep-night, so customer-facing events go out fast during
+ * business hours without blasting the mail proxy overnight. The per-pass look-back (POLL_MINUTES)
+ * is constant and wider than the largest cron gap, so dedup absorbs the overlap and nothing drops.
+ *
  *   node eventRunner.cjs            # one pass
- *   node eventRunner.cjs --loop     # every 15 min
+ *   node eventRunner.cjs --loop     # self-paced: ~4 min active window, 15 min deep-night
  */
 const { createClient } = require("@supabase/supabase-js");
 const T = require("../../src/email/transactionalTemplates.cjs");
@@ -30,6 +35,8 @@ const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 // Per-recipient subscription matrix + role-tiered ("assigned salesperson → parent") routing.
 const { isSubscribed, pickTieredRecipients } = require("./subscriptions.cjs");
 const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
+// Self-healing dealer-timezone lookup (live Spyne working-hours API) — see resolveTz.cjs for why.
+const { resolveTz } = require("./resolveTz.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -39,18 +46,24 @@ const MAIL_TOKEN = process.env.MAIL_TOKEN || "";
 const DRY_RUN = process.env.DRY_RUN !== "false";
 const REPORTING_API_BASE = (process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app").replace(/\/$/, "");
 const SPYNE_TOKEN = process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
-// Transactional email timing: during US business hours (9am-5pm EST), batch events tighter
-// (3-5 min windows, 0.3s per-event stagger); after hours, relax to 15 min batches with 1s stagger.
-// Business hours are 9am-5pm US/Eastern (covers EST/EDT). Times are in UTC.
-function isUSBusinessHour() {
-  const now = new Date();
-  const utcHour = now.getUTCHours();
-  // EST = UTC-5, EDT = UTC-4. In March-Nov (EDT), 9am EST = 1pm UTC = 13:00. In Nov-Mar (EST), 9am EST = 2pm UTC = 14:00.
-  // Conservative: check if UTC hour is roughly 13-21 (covers both EST/EDT 9am-5pm with buffer).
-  // 9am EDT = 1pm UTC (hour 13), 5pm EDT = 9pm UTC (hour 21). 9am EST = 2pm UTC (hour 14), 5pm EST = 10pm UTC (hour 22).
-  return utcHour >= 13 && utcHour < 22;
+// ── US active window (call-time, DST-safe by construction) ───────────────────────────────────
+// "Active" = at least one US dealer is open, across all lower-48 zones (ET→PT). Business hours
+// ~8am-7pm local map to a UTC window of 12:00 → 02:59 (next day); 03:00 → 11:59 UTC is deep-night
+// (every US dealer closed). We use whole-UTC-hour bounds so it is correct year-round without any
+// DST math. This drives ONLY the send-stagger choice below, and it MUST be evaluated PER CALL — a
+// warm serverless instance lives for hours, so a value frozen at module load would go stale.
+// The cron FREQUENCY (vercel.json) is what actually paces sends: every ~4 min in the active window,
+// every 15 min deep-night. See the /api/cron/roi-events entries in vercel.json.
+function isUSActiveWindow(d = new Date()) {
+  const h = d.getUTCHours();
+  return h >= 12 || h <= 2; // 12:00–23:59 or 00:00–02:59 UTC
 }
-const POLL_MINUTES = isUSBusinessHour() ? 4 : 20; // 3-5 min during hours, 15+ min after hours
+// Look-back window per pass — CONSTANT and generous ON PURPOSE. The unique (team_id, email_type,
+// event_key) dedup makes re-fetching the same window free, so a wide window can only ever RE-scan
+// (harmless), never DROP. It MUST exceed the largest gap between cron runs (15 min deep-night) plus
+// margin, or events arriving in the gap are lost forever. The earlier `isUSBusinessHour() ? 4 : 20`
+// was a silent data-loss bug: a 4-min look-back under a 15-min cron dropped 11 min of events/cycle.
+const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 25);
 // SMS post-conversation is batched to END OF DAY (the thread runs all day, so one email per lead/day
 // instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
 const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
@@ -60,22 +73,24 @@ const CONSOLE_BASE = "https://console.spyne.ai/converse-ai";
 // Override the host with DIGEST_TRACK_BASE if it ever moves.
 const TRACK_OPEN_URL = (process.env.DIGEST_TRACK_BASE || "https://qludnojfibguobgeeujw.supabase.co/functions/v1/track-open").replace(/\/$/, "");
 
-// ── Send queue: transactional events with time-aware rate limiting ───────────────────────────
-// During US business hours: 0.3s per event (tight packing, ~200 events/hour capacity)
-// After hours: 1s per event (conservative, avoid spam at odd times)
-// This spreads transactional load while respecting sender reputation + business context.
-const EVENT_SEND_DELAY_DURING_HOURS_MS = Number(process.env.EVENT_SEND_DELAY_DURING_MS ?? 300);   // 0.3s
-const EVENT_SEND_DELAY_AFTER_HOURS_MS = Number(process.env.EVENT_SEND_DELAY_AFTER_MS ?? 1000);   // 1s
+// ── Send queue: minimum spacing between transactional sends (sender-reputation guard) ─────────
+// Every event send is threaded through one promise chain so a single cron pass can never fan
+// out a sub-second burst at the shared mail proxy. The floor is time-aware: tighter in the US
+// active window (fast customer notifications when dealers are open), looser deep-night (a burst
+// at 4am ET reads as spam to ISPs and there is nobody to act on it anyway).
+//   active     → 1s/event  = up to 3600 sends/hr, well above any realistic event volume
+//   deep-night → 2s/event  = 1800 sends/hr, deliberately gentle
+// Tunable via EVENT_SEND_DELAY_ACTIVE_MS / EVENT_SEND_DELAY_NIGHT_MS (set 0 to disable spacing).
+const EVENT_SEND_DELAY_ACTIVE_MS = Number(process.env.EVENT_SEND_DELAY_ACTIVE_MS ?? 1000); // 1s
+const EVENT_SEND_DELAY_NIGHT_MS  = Number(process.env.EVENT_SEND_DELAY_NIGHT_MS  ?? 2000); // 2s
 let _eventSendQueue = Promise.resolve();
 let _lastEventSendAt = 0;
 function enqueueSendEvent(to, subject, html, opts) {
   _eventSendQueue = _eventSendQueue.then(async () => {
-    const delayMs = isUSBusinessHour() ? EVENT_SEND_DELAY_DURING_HOURS_MS : EVENT_SEND_DELAY_AFTER_HOURS_MS;
-    const now = Date.now();
-    const elapsed = now - _lastEventSendAt;
+    const delayMs = isUSActiveWindow() ? EVENT_SEND_DELAY_ACTIVE_MS : EVENT_SEND_DELAY_NIGHT_MS;
+    const elapsed = Date.now() - _lastEventSendAt;
     if (delayMs > 0 && _lastEventSendAt > 0 && elapsed < delayMs) {
-      const wait = delayMs - elapsed;
-      await new Promise(r => setTimeout(r, wait));
+      await new Promise((r) => setTimeout(r, delayMs - elapsed));
     }
     _lastEventSendAt = Date.now();
     return sendMailRaw(to, subject, html, opts);
@@ -246,7 +261,9 @@ async function runOnce() {
   for (const L of targets) {
     const c = cfgOf.get(L.team_id) || {};
     const name = c.rooftop_name || L.team_id;
-    const tz = c.timezone || "America/New_York"; // dealer-local zone for windows + displayed times
+    // dealer-local zone for windows + displayed times — configured value, else a live self-heal
+    // lookup (never a silent America/New_York default for a rooftop nobody's set up yet).
+    const tz = await resolveTz(sb, L.team_id, c.timezone, name);
     const dept = L.department; // 'sales' | 'service'
     const recs = recOf.get(L.team_id) ?? [];
     const deptOk = (r) => (dept === "sales" ? r.receives_sales : r.receives_service);
@@ -535,9 +552,9 @@ async function runOnce() {
 async function previewEvent(opts) {
   opts = opts || {};
   const dept = opts.department === "service" ? "service" : "sales";
-  const tz = opts.tz || "America/New_York";
   const name = opts.rooftopName || opts.teamId;
   const teamId = opts.teamId, ent = opts.enterpriseId || "";
+  const tz = await resolveTz(sb, teamId, opts.tz, name);
   const emailType = opts.emailType, eventKey = String(opts.eventKey || "");
   const L_ = links(teamId, ent, dept);
   // When a specific event was clicked (eventKey present) we must render THAT customer or nothing.
@@ -593,10 +610,19 @@ async function previewEvent(opts) {
   return T.renderActionItem({ rooftopName: name, dept, tz, lead, items: use, totalOpen: use.length, justArrived: 0, mtdOpen: j.total, links: L_ });
 }
 
-module.exports = { runOnce, previewEvent };
+module.exports = { runOnce, previewEvent, isUSActiveWindow };
 if (IS_CLI) {
   (async () => {
     await runOnce();
-    if (process.argv.includes("--loop")) setInterval(() => runOnce().catch((e) => console.error("pass failed:", e)), 15 * 60 * 1000);
+    // --loop mirrors the prod cron cadence: ~4 min while US dealers are open, 15 min deep-night.
+    // Self-scheduling setTimeout (not setInterval) so the interval is recomputed each tick.
+    if (process.argv.includes("--loop")) {
+      const tick = () => {
+        const nextMs = (isUSActiveWindow() ? 4 : 15) * 60 * 1000;
+        console.log(`\n[loop] next pass in ${nextMs / 60000} min …`);
+        setTimeout(() => runOnce().catch((e) => console.error("pass failed:", e)).finally(tick), nextMs);
+      };
+      tick();
+    }
   })();
 }
