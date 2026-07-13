@@ -68,6 +68,13 @@ const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 25);
 // instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
 const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
 const CONSOLE_BASE = "https://console.spyne.ai/converse-ai";
+// SMS has no send-pacing queue (unlike email's stagger queue for domain reputation) — every sendSms()
+// call fires as fast as the loop runs, relying only on Twilio's reactive 429-retry (sendSms.cjs) rather
+// than proactively avoiding the rate limit. A small fixed delay before each live send keeps this pass
+// well under typical Twilio/10DLC per-second throughput without meaningfully slowing the cron (batching
+// already cut per-pass SMS volume ~40x, so this adds at most a few seconds, not minutes).
+const SMS_SEND_STAGGER_MS = Number(process.env.EVENT_SMS_SEND_STAGGER_MS || 300);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Open-tracking pixel → the track-open Edge Function (keyed by the event-email row id).
 // Override the host with DIGEST_TRACK_BASE if it ever moves.
@@ -199,6 +206,25 @@ async function apiJson(path) {
   if (j && (j.degraded || j.note === "clickhouse not configured")) _feedDegraded = true;
   return j;
 }
+// The /api/action-items feed hard-caps `limit` at 200 server-side regardless of what's requested —
+// a single fetch with a fixed limit silently truncates any rooftop whose backlog (recent/open/overdue)
+// exceeds it. Page through with `offset` + the response's `hasMore` flag until a page comes back short.
+// ACTION_ITEMS_MAX_PAGES is a safety backstop (2000 items), not an expected ceiling — hitting it is
+// itself surfaced (`capped:true`) to the caller rather than silently stopping, same "never hide a
+// truncation" rule as the rest of this pass.
+const ACTION_ITEMS_PAGE_LIMIT = 200;
+const ACTION_ITEMS_MAX_PAGES = 10;
+async function fetchAllActionItems(qs) {
+  let all = [];
+  for (let page = 0; page < ACTION_ITEMS_MAX_PAGES; page++) {
+    const j = await apiJson(`/api/action-items?${qs}&limit=${ACTION_ITEMS_PAGE_LIMIT}&offset=${page * ACTION_ITEMS_PAGE_LIMIT}`);
+    const items = j.actionItems || [];
+    all = all.concat(items);
+    if (j.degraded) return { actionItems: all, total: j.total, degraded: true };
+    if (!j.hasMore || items.length < ACTION_ITEMS_PAGE_LIMIT) return { actionItems: all, total: all.length };
+  }
+  return { actionItems: all, total: all.length, capped: true };
+}
 function links(team, ent, dept) {
   const q = `?enterprise_id=${encodeURIComponent(ent || "")}&team_id=${encodeURIComponent(team)}&serviceType=${dept}`;
   return { appointment: `${CONSOLE_BASE}/appointments${q}`, conversations: `${CONSOLE_BASE}/conversations${q}`, actionItems: `${CONSOLE_BASE}/action-items${q}`, console: CONSOLE_BASE };
@@ -275,7 +301,7 @@ async function runOnce() {
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0 };
+  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0 };
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
   const feedFailures = []; // upstream FEED errors (per rooftop/dept) — the pass couldn't even fetch events.
@@ -437,9 +463,13 @@ async function runOnce() {
       }
       if (c.action_item_enabled) {
         const [recent, open] = await Promise.all([
-          apiJson(`/api/action-items?team_id=${L.team_id}&serviceType=${dept}&scope=recent&minutes=${POLL_MINUTES}&limit=50`),
-          apiJson(`/api/action-items?team_id=${L.team_id}&serviceType=${dept}&scope=open&limit=50`),
+          fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=recent&minutes=${POLL_MINUTES}`),
+          fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`),
         ]);
+        if (recent.capped || open.capped) {
+          out.action_items_feed_capped++;
+          console.warn(`  ⚠ ${name} [${dept}] action-items feed (recent/open) hit the pagination safety cap (${ACTION_ITEMS_MAX_PAGES * ACTION_ITEMS_PAGE_LIMIT}+ items) — some may be invisible this pass`);
+        }
         const openItems = open.actionItems || [];
         const recentItems = recent.actionItems || [];
         // LEAD-LEVEL: group just-arrived items by their lead, then send ONE email per lead
@@ -463,12 +493,27 @@ async function runOnce() {
           jobs.push({ type: "action_item", key: `lead:${k}:${newestId}`,
             subject: `Action items — ${lead.customer || name}`,
             html: T.renderActionItem({ rooftopName: name, dept, tz, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, mtdOpen: open.total, links: L_ }),
-            smsBody: T.renderActionItemSms({ rooftopName: name, dept, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, links: L_ }) });
+            smsBody: T.renderActionItemSms({ rooftopName: name, dept, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, links: L_ }),
+            // Raw per-lead data (not pre-rendered text) for the cross-lead batch renderers —
+            // see the "EMAIL"/"SMS channel" blocks below. smsLead is a trimmed subset (fine for
+            // SMS); emailLead carries the FULL lead object since leadHeader() shows more of it.
+            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length },
+            emailLead: { ...lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length },
+            // Rooftop-level (not per-lead) — `open` is out of scope by the time the batch email
+            // renders, so it's carried on the job like everything else the batch render needs.
+            mtdOpen: open.total });
         }
       }
       if (c.action_item_overdue_enabled) {
-        const j = await apiJson(`/api/action-items?team_id=${L.team_id}&serviceType=${dept}&scope=overdue&limit=50`);
+        const j = await fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=overdue`);
         const overdue = j.actionItems || [];
+        // Paginated above (fetchAllActionItems) — a rooftop's full overdue backlog is fetched
+        // regardless of size. `capped` only fires if it exceeds the pagination safety backstop
+        // (2000 items), which is surfaced rather than silently dropped.
+        if (j.capped) {
+          out.action_items_feed_capped++;
+          console.warn(`  ⚠ ${name} [${dept}] overdue feed hit the pagination safety cap (${ACTION_ITEMS_MAX_PAGES * ACTION_ITEMS_PAGE_LIMIT}+ items) — some overdue leads may be invisible this pass`);
+        }
         // LEAD-LEVEL escalation: group a customer's overdue items into ONE red email so the
         // manager sees "who's been waiting too long". Re-escalates once per lead per day.
         const leadKey = (it) => it.leadId || it.lead_id || it.customer || it.id;
@@ -487,12 +532,21 @@ async function runOnce() {
           jobs.push({ type: "action_item_overdue", key: `lead:${k}:overdue:${dayKey}`,
             subject: `Overdue — ${lead.customer || name}`,
             html: T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
-            smsBody: T.renderActionItemOverdueSms({ rooftopName: name, dept, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }) });
+            smsBody: T.renderActionItemOverdueSms({ rooftopName: name, dept, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
+            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, oldestDueAt: oldest, totalOverdue: items.length },
+            emailLead: { ...lead, items, oldestDueAt: oldest, totalOverdue: items.length } });
         }
       }
     } catch (e) { out.errors++; feedFailures.push({ rooftop: name, dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); console.log(`  ✗ ${name} [${dept}] feed error: ${String(e).slice(0, 140)}`); continue; }
 
+    // action_item / action_item_overdue are BATCHED across leads below — the same reasoning as
+    // the SMS channel (a large backlog otherwise means one full email per lead, back-to-back).
+    // post_appointment / post_conversation stay on this unchanged one-email-per-job path.
+    const BATCH_EMAIL_TYPES = new Set(["action_item", "action_item_overdue"]);
+
+    // ── 1) unchanged path — one email per job ──
     for (const job of jobs) {
+      if (BATCH_EMAIL_TYPES.has(job.type)) continue;
       let id;
       try {
         id = await claim({ ...base, email_type: job.type }, job.key);
@@ -513,9 +567,91 @@ async function runOnce() {
       } catch (e) { out.errors++; failures.push({ rooftop: name, dept: job.type || dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
     }
 
+    // ── 2) batched path — action_item / action_item_overdue, one email per TYPE covering every
+    // freshly-claimed lead this pass ──
+    const batchEmailTypes = new Set(jobs.filter((j) => BATCH_EMAIL_TYPES.has(j.type)).map((j) => j.type));
+    for (const type of batchEmailTypes) {
+      const typeJobs = jobs.filter((j) => j.type === type);
+      const emails = emailsForType(type); // type-scoped, computed once — not per lead
+
+      // Claim EVERY lead's row first — this is what preserves per-lead dedupe + the tracker's
+      // per-lead audit rows. Only jobs that come back freshly-claimed go into the batch. Email
+      // claims unconditionally (even no-recipients / dry-run cases still claim + mark a status —
+      // matching this channel's existing behavior, unlike SMS which skips claiming in those cases).
+      const claimed = [];
+      for (const job of typeJobs) {
+        let id;
+        try { id = await claim({ ...base, email_type: job.type }, job.key); }
+        catch (e) { out.errors++; failures.push({ rooftop: name, dept: job.type, error: String(e && e.message ? e.message : e).slice(0, 200) }); continue; }
+        if (!id) { out.skipped_dupe++; continue; }
+        claimed.push({ job, id });
+      }
+      if (!claimed.length) continue; // everything was a dupe this pass — nothing to send
+
+      if (!emails.length) {
+        // No recipients for this type at all — mark each freshly-claimed lead not_sent, same as
+        // today's per-lead behavior, using its OWN individual html (nothing was actually batched/sent).
+        for (const { job, id } of claimed) {
+          const html = withPixel(job.html, id);
+          try { await finish(id, { status: "not_sent", reason: "recipients_missing", subject: job.subject, rendered_html: html }); }
+          catch (e) { console.warn(`  ⚠ finish failed for a claimed row (${type}): ${String(e).slice(0, 140)}`); }
+        }
+        out.no_recipients += claimed.length;
+        continue;
+      }
+
+      // Render ONE body covering every freshly-claimed lead. N=1 delegates to the exact
+      // single-lead renderer (byte-identical to today's email, not a "1 lead" layout).
+      const leads = claimed.map((c2) => c2.job.emailLead);
+      const renderBatch = type === "action_item_overdue" ? T.renderActionItemOverdueBatch : T.renderActionItemBatch;
+      const subject = leads.length > 1
+        ? (type === "action_item_overdue" ? `${leads.length} overdue leads — ${name}` : `${leads.length} leads with new action items — ${name}`)
+        : claimed[0].job.subject;
+      const rawHtml = renderBatch({
+        rooftopName: name, dept, tz, leads, links: L_, mtdOpen: claimed[0].job.mtdOpen,
+        detailCap: Number(process.env.EVENT_EMAIL_BATCH_DETAIL_CAP || 20),
+      });
+      // Pixel is keyed to ONE row (the first claimed lead) — there's one physical email, one open
+      // event; roi_event_emails has one opened_at/open_count PER ROW, not a shared one.
+      const html = withPixel(rawHtml, claimed[0].id);
+
+      if (dry) {
+        for (const { id } of claimed) {
+          try { await finish(id, { status: "suppressed", reason: "dry_run", subject, rendered_html: html, recipients: emails.map((e) => ({ email: e })) }); }
+          catch (e) { console.warn(`  ⚠ finish failed for a claimed row (${type}): ${String(e).slice(0, 140)}`); }
+        }
+        out.suppressed += claimed.length;
+        continue;
+      }
+
+      const sentAt = new Date().toISOString();
+      let messageId = null, sendErr = null;
+      try { messageId = await sendMailAttributed(emails, subject, html); }
+      catch (e) { sendErr = e; }
+
+      // Fan the SAME outcome back to EVERY claimed lead row — none silently vanish. A row's
+      // `rendered_html` is what ACTUALLY went out (the full batch), not a per-lead reconstruction.
+      for (const { id } of claimed) {
+        try {
+          if (sendErr) await finish(id, { status: "error", reason: String(sendErr).slice(0, 300), subject, rendered_html: html });
+          else await finish(id, { status: "sent", subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
+        } catch (e) { console.warn(`  ⚠ finish failed for a batched row (${type}): ${String(e).slice(0, 140)}`); }
+      }
+      out.email_batches++;
+      if (sendErr) {
+        out.errors += claimed.length;
+        // One failure entry PER LEAD (not per batch) so the existing Slack alert's tiered
+        // warn/crit thresholds scale with real blast radius.
+        for (let i = 0; i < claimed.length; i++) {
+          failures.push({ rooftop: name, dept: type, error: `batch of ${claimed.length} (${type}): ` + String(sendErr && sendErr.message ? sendErr.message : sendErr).slice(0, 200) });
+        }
+      } else out.sent += claimed.length;
+    }
+
     // ── SMS channel — same events, texted to the type's subscribed + role-tiered phones ──
     // Only SMS-able job types (those carrying smsBody). Recipients are chosen PER TYPE
-    // (subscription matrix + role tier). Independent dedupe (roi_event_sms). We claim ONLY when a
+    // (subscription matrix + role tier), NOT per lead — every job of a given type this pass
+    // resolves to the exact same phone(s). Independent dedupe (roi_event_sms). We claim ONLY when a
     // real send will happen — a dry-run neither claims nor sends, so enabling SMS later isn't
     // pre-empted by a suppressed row. post_conversation SMS rides its EOD batch (jobs only exist at EOD).
     if (c.sms_enabled) {
@@ -523,10 +659,18 @@ async function runOnce() {
       // (emails may be deliberately held in dry-run while SMS is live). Per-dealer dry_run still
       // holds both channels for that rooftop.
       const smsDry = SMS_DRY_RUN || L.dry_run === true;
+      // action_item / action_item_overdue are BATCHED across leads below (one text can otherwise
+      // become 40+ near-simultaneous texts to the same phone when a rooftop's backlog is large —
+      // see the Jones Chrysler Dodge Jeep Ram incident). post_appointment / post_conversation stay
+      // on this unchanged one-SMS-per-job path — they're lower volume and each already reads as its
+      // own distinct event.
+      const BATCH_SMS_TYPES = new Set(["action_item", "action_item_overdue"]);
+
+      // ── 1) unchanged path — one SMS per job ──
       for (const job of jobs) {
-        if (!job.smsBody) continue; // email-only jobs (e.g. instant call summaries)
+        if (!job.smsBody || BATCH_SMS_TYPES.has(job.type)) continue;
         const smsRecipients = smsForType(job.type);
-        if (!smsRecipients.length) continue; // nobody subscribed to this type on SMS
+        if (!smsRecipients.length) { out.sms_no_recipients++; continue; } // nobody subscribed to this type on SMS
         if (smsDry) { out.sms_suppressed++; continue; }
         let sid;
         try {
@@ -535,6 +679,7 @@ async function runOnce() {
           const sentAt = new Date().toISOString();
           const results = [];
           for (const r of smsRecipients) {
+            await sleep(SMS_SEND_STAGGER_MS);
             try { const msid = await sendSms(r.phone, job.smsBody, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
             catch (e) { results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) }); }
           }
@@ -543,6 +688,70 @@ async function runOnce() {
           await finishSms(sid, { status: anySent ? "sent" : "error", reason: anySent ? null : "all_recipients_failed", body: job.smsBody, message_sid: firstSid, sent_at: anySent ? sentAt : null, recipients: results });
           if (anySent) out.sms_sent++; else { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: (results.find((x) => x.error) || {}).error || "all recipients failed" }); }
         } catch (e) { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (sid) { try { await finishSms(sid, { status: "error", reason: String(e).slice(0, 300), body: job.smsBody }); } catch { /* ignore */ } } }
+      }
+
+      // ── 2) batched path — action_item / action_item_overdue, one text per TYPE covering every
+      // freshly-claimed lead this pass, not one text per lead ──
+      const batchTypes = new Set(jobs.filter((j) => j.smsBody && BATCH_SMS_TYPES.has(j.type)).map((j) => j.type));
+      for (const type of batchTypes) {
+        const typeJobs = jobs.filter((j) => j.type === type);
+        const smsRecipients = smsForType(type); // type-scoped, computed once — not per lead
+        if (!smsRecipients.length) { out.sms_no_recipients += typeJobs.length; continue; }
+        if (smsDry) { out.sms_suppressed += typeJobs.length; continue; } // dry-run: claim nothing, as today
+
+        // Claim EVERY lead's row first — this is what preserves per-lead dedupe + the tracker's
+        // per-lead audit rows. Only jobs that come back freshly-claimed (not a dupe from a prior
+        // pass or an earlier claim today) go into the batch.
+        const claimed = [];
+        for (const job of typeJobs) {
+          let sid;
+          try { sid = await claimSms({ ...base, email_type: job.type }, job.key); }
+          catch (e) { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: String(e && e.message ? e.message : e).slice(0, 200) }); continue; }
+          if (!sid) { out.sms_dupe++; continue; }
+          claimed.push({ job, sid });
+        }
+        if (!claimed.length) continue; // everything was a dupe this pass — nothing to send
+
+        // Render ONE body covering every freshly-claimed lead. N=1 delegates to the exact
+        // single-lead renderer (byte-identical to today's message, not a "1 lead:" list).
+        const leads = claimed.map((c2) => c2.job.smsLead);
+        const renderBatch = type === "action_item_overdue" ? T.renderActionItemOverdueBatchSms : T.renderActionItemBatchSms;
+        const smsBody = renderBatch({
+          rooftopName: name, dept, leads, links: L_,
+          detailCap: Number(process.env.EVENT_SMS_BATCH_DETAIL_CAP || 8),
+          maxChars: Number(process.env.EVENT_SMS_BATCH_MAX_CHARS || 1500),
+        });
+
+        const sentAt = new Date().toISOString();
+        const results = [];
+        for (const r of smsRecipients) {
+          await sleep(SMS_SEND_STAGGER_MS);
+          try { const msid = await sendSms(r.phone, smsBody, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
+          catch (e) { results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) }); }
+        }
+        const anySent = results.some((x) => x.sent);
+        const firstSid = (results.find((x) => x.sid) || {}).sid || null;
+        const reason = anySent
+          ? (claimed.length > 1 ? `batched (${claimed.length} leads this pass)` : null)
+          : "all_recipients_failed";
+
+        // Fan the SAME outcome back to EVERY claimed lead row — none silently vanish. A row's
+        // `body` is what ACTUALLY went out (the full batch text), not a per-lead reconstruction.
+        for (const { sid } of claimed) {
+          try { await finishSms(sid, { status: anySent ? "sent" : "error", reason, body: smsBody, message_sid: firstSid, sent_at: anySent ? sentAt : null, recipients: results }); }
+          catch (e) { console.warn(`  ⚠ finishSms failed for a batched row (${type}): ${String(e).slice(0, 140)}`); }
+        }
+        out.sms_batches++;
+        if (anySent) out.sms_sent += claimed.length;
+        else {
+          out.sms_errors += claimed.length;
+          // One failure entry PER LEAD (not per batch) so the existing Slack alert's tiered
+          // warn/crit thresholds scale with real blast radius — a 40-lead batch failure reads as
+          // loud as 40 individual failures did before batching, not as "1".
+          for (let i = 0; i < claimed.length; i++) {
+            smsFailures.push({ rooftop: name, dept: type, error: `batch of ${claimed.length} (${type}): ` + ((results.find((x) => x.error) || {}).error || "all recipients failed") });
+          }
+        }
       }
     }
   }
@@ -558,7 +767,7 @@ async function runOnce() {
     }).catch((e) => console.warn("[roi-event] systemic alert skipped:", String(e).slice(0, 140)));
   }
   console.log("  events summary:", JSON.stringify(out));
-  console.log(`  sms summary: sent=${out.sms_sent} suppressed=${out.sms_suppressed} dupe=${out.sms_dupe} no_recipients=${out.sms_no_recipients} errors=${out.sms_errors}`);
+  console.log(`  sms summary: sent=${out.sms_sent} suppressed=${out.sms_suppressed} dupe=${out.sms_dupe} no_recipients=${out.sms_no_recipients} errors=${out.sms_errors} batches=${out.sms_batches}`);
   // Breakage alert → Slack when transactional emails genuinely failed to send this pass (same tiered
   // warn/crit thresholds + channel as the digest alert). Best-effort; never throws.
   await postBreakageAlert({ source: "Transactional email", failures, sentOk: out.sent, windowLabel: `event email pass (~${POLL_MINUTES}m)` })

@@ -27,6 +27,21 @@ function esc(v) { return String(v == null ? "" : v).replace(/&/g, "&amp;").repla
 var NO_VALUE_MARK = "<!--vini:no-value-->";
 function stampValue(html, hasValue) { return hasValue ? html : (String(html || "") + NO_VALUE_MARK); }
 function fmtInt(n) { n = Number(n) || 0; return n.toLocaleString("en-US"); }
+// Pretty-print a phone for display (batch SMS lines + the leadHeader email chip). Ported 1:1 from
+// src/email/EmailerTracker.tsx's formatPhone — kept in sync manually, since this .cjs file (required
+// server-side) can't import a .tsx module (this repo already duplicates small helpers this way, e.g.
+// isRealEmail is defined identically in both runner.cjs and eventRunner.cjs). US numbers (10 digits,
+// or 11 with a leading 1) -> "+1 (555) 123-4567". Anything else keeps a leading "+" and its digits,
+// so international/partial numbers aren't mangled. Empty in -> empty out.
+function formatPhone(raw) {
+  var s = String(raw == null ? "" : raw).trim();
+  if (!s) return "";
+  var hadPlus = s.charAt(0) === "+";
+  var d = s.replace(/\D/g, "");
+  if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);
+  if (d.length === 10) return "+1 (" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
+  return hadPlus ? "+" + d : d;
+}
 function money(n) { n = Number(n) || 0; return "$" + n.toLocaleString("en-US"); }
 function btnPrimary(label, href) {
   return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:' + VIOLET + ';color:#fff;text-decoration:none;font-size:13px;font-weight:700;padding:12px 22px;border-radius:10px;">' + esc(label) + " &nbsp;&#8599;</a>";
@@ -248,23 +263,26 @@ function recordingRow(url, durationSec, endedReason) {
   return '<div style="margin-top:14px;">' + btn + (meta ? '<span style="font-size:11px;color:' + MUTE + ";margin-left:" + (btn ? "12px" : "0") + ';">' + esc(meta) + "</span>" : "") + "</div>";
 }
 
-// OUTCOME banner — the single "what do I do about this?" answer, shown first.
-// Priority: booked > transferred > needs-follow-up > resolved > voicemail/no-answer > logged.
-function outcomeBanner(c) {
-  var box = function (col, bg, text, sub) {
-    return '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + bg + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
-      '<div style="font-size:14px;font-weight:800;color:' + col + ';">' + text + "</div>" +
-      (sub ? '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' + sub + "</div>" : "") + "</td></tr></table>";
-  };
-  if (c.appointmentScheduled) return box(GREEN_BIG, POS_BG, "&#128197; Booked an appointment", "Vini set this up — confirm staffing & prep.");
-  if (c.transfer && (c.transfer.department || c.transfer.reason)) return box(VIOLET, "#EDE9FE", "&#128222; Handed to your team", "Transferred to " + esc(c.transfer.department || "your team") + (c.transfer.reason ? " — " + esc(c.transfer.reason) : ""));
-  if ((c.actionItems && c.actionItems.length) || c.hasActionItem) return box(AMBER, AMBER_BG, "&#9873; Needs human follow-up", (c.actionItems && c.actionItems.length ? fmtInt(c.actionItems.length) + " action item" + (c.actionItems.length === 1 ? "" : "s") + " below." : "Vini flagged a to-do below."));
-  if (c.callbackScheduled) return box(AMBER, AMBER_BG, "&#8635; Callback scheduled", "Vini promised a call back — make sure it happens.");
-  if (c.queryResolved) return box(GREEN_BIG, POS_BG, "&#10003; Resolved — no action needed", "Vini handled this end to end.");
+// Shared outcome classification — same priority order used by the full banner (below) and the
+// condensed batch row, so the two never drift on what counts as "needs follow-up" vs "logged".
+// Priority: booked > transferred > needs-follow-up > callback > resolved > voicemail/no-answer > logged.
+function classifyOutcome(c) {
+  if (c.appointmentScheduled) return { col: GREEN_BIG, bg: POS_BG, text: "&#128197; Booked an appointment", sub: "Vini set this up — confirm staffing & prep." };
+  if (c.transfer && (c.transfer.department || c.transfer.reason)) return { col: VIOLET, bg: "#EDE9FE", text: "&#128222; Handed to your team", sub: "Transferred to " + esc(c.transfer.department || "your team") + (c.transfer.reason ? " — " + esc(c.transfer.reason) : "") };
+  if ((c.actionItems && c.actionItems.length) || c.hasActionItem) return { col: AMBER, bg: AMBER_BG, text: "&#9873; Needs human follow-up", sub: (c.actionItems && c.actionItems.length ? fmtInt(c.actionItems.length) + " action item" + (c.actionItems.length === 1 ? "" : "s") + " below." : "Vini flagged a to-do below.") };
+  if (c.callbackScheduled) return { col: AMBER, bg: AMBER_BG, text: "&#8635; Callback scheduled", sub: "Vini promised a call back — make sure it happens." };
+  if (c.queryResolved) return { col: GREEN_BIG, bg: POS_BG, text: "&#10003; Resolved — no action needed", sub: "Vini handled this end to end." };
   var er = String(c.endedReason || "").toLowerCase();
-  if (er.indexOf("voicemail") >= 0) return box(MUTE, SLATE_BG, "&#9993; Left a voicemail", "No live contact — Vini will keep trying per cadence.");
-  if (er.indexOf("no-answer") >= 0 || er.indexOf("no_answer") >= 0 || er.indexOf("hangup") >= 0) return box(MUTE, SLATE_BG, "No live conversation", "Call ended early — nothing to action.");
-  return box(MUTE, SLATE_BG, "Conversation logged", "");
+  if (er.indexOf("voicemail") >= 0) return { col: MUTE, bg: SLATE_BG, text: "&#9993; Left a voicemail", sub: "No live contact — Vini will keep trying per cadence." };
+  if (er.indexOf("no-answer") >= 0 || er.indexOf("no_answer") >= 0 || er.indexOf("hangup") >= 0) return { col: MUTE, bg: SLATE_BG, text: "No live conversation", sub: "Call ended early — nothing to action." };
+  return { col: MUTE, bg: SLATE_BG, text: "Conversation logged", sub: "" };
+}
+// OUTCOME banner — the single "what do I do about this?" answer, shown first.
+function outcomeBanner(c) {
+  var o = classifyOutcome(c);
+  return '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + o.bg + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
+    '<div style="font-size:14px;font-weight:800;color:' + o.col + ';">' + o.text + "</div>" +
+    (o.sub ? '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' + o.sub + "</div>" : "") + "</td></tr></table>";
 }
 
 /**
@@ -296,7 +314,7 @@ function renderPostConversation(opts) {
       '<td valign="middle">' + avatar(c.customer, 40) +
         '<span style="display:inline-block;vertical-align:middle;margin-left:10px;">' +
           '<span style="display:block;font-size:15px;font-weight:800;color:' + INK + ';">' + esc(c.customer || "Customer") + "</span>" +
-          (c.phone ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(c.phone) + "</span>" : "") +
+          (c.phone ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + "</span>" : "") +
         "</span></td>" +
       (when ? '<td align="right" valign="top" style="font-size:11px;color:' + MUTE + ';white-space:nowrap;">' + esc(when) + "</td>" : "") +
     "</tr></table>";
@@ -326,6 +344,55 @@ function renderPostConversation(opts) {
   // appointment, no SMS thread, no takeaways, no recording) — exactly the empty email the gate exists for.
   var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl);
   return stampValue(shell(opts, isSms ? "Text conversation" : "Conversation summary", esc(c.title || "New conversation"), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms ? "conversations handled" : "calls handled", url)), hasValue);
+}
+
+// One condensed row for the batch digest — avatar + name/phone/channel/time + a one-line outcome
+// pill (same classifyOutcome() priority as the full banner, just not the big colored box).
+function batchConvRow(c, tz) {
+  var o = classifyOutcome(c);
+  var isSms = c.channel === "sms";
+  var when = "";
+  try { if (c.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(c.at)); } catch (e) { when = ""; }
+  var label = o.text.replace(/&#\d+;\s*/, ""); // strip the leading icon entity — too busy repeated N times in a list
+  return '<tr><td style="padding:10px 0;border-bottom:1px solid ' + LINE + ';">' +
+    '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+      '<td valign="middle" style="width:38px;">' + avatar(c.customer, 32) + '</td>' +
+      '<td valign="middle" style="padding-left:10px;">' +
+        '<div style="font-size:13px;font-weight:800;color:' + INK + ';">' + esc(c.customer || "Customer") + "</div>" +
+        '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + (isSms ? " · SMS" : " · Call") + (when ? " · " + esc(when) : "") + "</div>" +
+      "</td>" +
+      '<td align="right" valign="middle">' + pill(esc(label), o.col, o.bg) + "</td>" +
+    "</tr></table>" +
+  "</td></tr>";
+}
+
+/**
+ * Post-conversation BATCH email — one digest covering MULTIPLE leads' calls/texts for the same
+ * rooftop+dept this pass, instead of one email per lead. Degrades to the IDENTICAL single-lead
+ * message when there's exactly one conversation (delegates to renderPostConversation).
+ * opts: { rooftopName, dept, tz, mtdCalls, conversations:[<same shape renderPostConversation takes>],
+ *   links, detailCap(default 20) }
+ */
+function renderPostConversationBatch(opts) {
+  opts = opts || {};
+  var convos = (Array.isArray(opts.conversations) ? opts.conversations : []).filter(Boolean);
+  var L = opts.links || {};
+  var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
+  if (convos.length <= 1) {
+    return renderPostConversation({ rooftopName: opts.rooftopName, dept: opts.dept, tz: opts.tz, mtdCalls: opts.mtdCalls, links: L, conversation: convos[0] || {} });
+  }
+  var isSmsBatch = convos.every(function (c) { return c.channel === "sms"; });
+  var cap = Number(opts.detailCap) || 20;
+  var shown = convos.slice(0, cap);
+  var hidden = convos.length - shown.length;
+  var rows = shown.map(function (c) { return batchConvRow(c, opts.tz); }).join("");
+  var noun = isSmsBatch ? "SMS conversations" : "calls";
+  var body =
+    '<div style="font-size:13px;color:' + BODY + ';margin-bottom:14px;">' + convos.length + " " + noun + ' today — condensed into one digest so it doesn\'t flood your inbox. Tap "View all" to open any of them.</div>' +
+    '<table width="100%" cellpadding="0" cellspacing="0">' + rows + "</table>" +
+    (hidden > 0 ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:10px;">+' + hidden + " more not shown here — view all in the console.</div>" : "") +
+    '<div style="margin-top:18px;">' + btnPrimary("View all conversations", url) + "</div>";
+  return stampValue(shell(opts, isSmsBatch ? "SMS digest" : "Conversation digest", convos.length + " " + noun + " — " + (opts.rooftopName || "your rooftop"), body), true);
 }
 
 // One stacked action-item row (used by both the new-item and overdue emails).
@@ -365,7 +432,7 @@ function leadHeader(lead) {
     '<table width="100%" cellpadding="0" cellspacing="0"><tr><td valign="middle">' + avatar(lead.customer, 42) +
       '<span style="display:inline-block;vertical-align:middle;margin-left:10px;">' +
         '<span style="display:block;font-size:16px;font-weight:800;color:' + INK + ';">' + esc(lead.customer || "Customer") + "</span>" +
-        (lead.phone ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(lead.phone) + "</span>" : "") +
+        (lead.phone ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(lead.phone)) + "</span>" : "") +
       "</span></td></tr></table>" +
     (chips ? '<div style="margin-top:12px;">' + chips + "</div>" : "") +
     (lead.vehicle ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:6px;"><b style="color:' + INK + ';">Vehicle of interest:</b> ' + esc(lead.vehicle) + "</div>" : "") +
@@ -452,6 +519,102 @@ function renderActionItemOverdue(opts) {
   return stampValue(shell(opts, "Overdue · by lead", title, body), count > 0);
 }
 
+/**
+ * New-action-item BATCH email — one email covering MULTIPLE leads' fresh action items for the
+ * same rooftop+dept this pass (mirrors renderActionItemBatchSms). Degrades to the IDENTICAL
+ * single-lead email when there's exactly one lead (delegates to renderActionItem).
+ * opts: { rooftopName, dept, tz, leads:[{customer,phone,vehicle,items,totalOpen,justArrived,
+ *   source,stage,aiScore,grade,sentiment,sentimentScore,lastSummary}], mtdOpen, links, detailCap(default 20) }
+ */
+function renderActionItemBatch(opts) {
+  opts = opts || {};
+  var leads = (Array.isArray(opts.leads) ? opts.leads : []).filter(Boolean);
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  if (leads.length <= 1) {
+    var only = leads[0] || {};
+    return renderActionItem({
+      rooftopName: opts.rooftopName, dept: opts.dept, tz: opts.tz, lead: only,
+      items: only.items || [], totalOpen: only.totalOpen || (only.items || []).length,
+      justArrived: only.justArrived || 0, mtdOpen: opts.mtdOpen, links: L,
+    });
+  }
+  var totalOpen = leads.reduce(function (s, ld) { return s + (Number(ld.totalOpen) || (ld.items || []).length); }, 0);
+  var cap = Number(opts.detailCap) || 20;
+  var shown = leads.slice(0, cap);
+  var hidden = leads.length - shown.length;
+
+  var heading = '<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;"><tr><td style="padding:11px 16px;border-radius:12px;background:' + AMBER_BG + ';font-size:13px;font-weight:700;color:' + AMBER + ';">' +
+    "&#9873; " + fmtInt(totalOpen) + " open action item" + (totalOpen === 1 ? "" : "s") + " across " + fmtInt(leads.length) + " lead" + (leads.length === 1 ? "" : "s") + "</td></tr></table>";
+
+  var cards = shown.map(function (ld) {
+    var items = ld.items || [];
+    return leadHeader(ld) +
+      actionList(items.slice(0, 3), opts.tz, BRAND) +
+      (items.length > 3 ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:4px;">+' + (items.length - 3) + " more item" + (items.length - 3 === 1 ? "" : "s") + " for this lead</div>" : "") +
+      '<div style="height:14px;line-height:14px;">&nbsp;</div>';
+  }).join("");
+
+  var moreCard = hidden > 0
+    ? '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed ' + LINE + ';border-radius:12px;"><tr><td style="padding:14px 16px;font-size:12px;color:' + MUTE + ';text-align:center;">+' + fmtInt(hidden) + " more lead" + (hidden === 1 ? "" : "s") + " with new action items — view the full list in the console.</td></tr></table>"
+    : "";
+
+  var body = heading + cards + moreCard +
+    '<div style="margin-top:10px;">' + btnPrimary("Work these leads", url) + "</div>" +
+    mtdStrip(opts.mtdOpen, "open action items across all leads", url);
+  var title = fmtInt(totalOpen) + " thing" + (totalOpen === 1 ? "" : "s") + " to do across " + fmtInt(leads.length) + " leads";
+  return stampValue(shell(opts, "Action items · batch", title, body), leads.length > 0);
+}
+
+/**
+ * Overdue action-item BATCH email — one email covering MULTIPLE leads' SLA breaches for the same
+ * rooftop+dept this pass (mirrors renderActionItemOverdueBatchSms). Degrades to the IDENTICAL
+ * single-lead email when there's exactly one lead (delegates to renderActionItemOverdue).
+ * opts: { rooftopName, dept, tz, leads:[{customer,phone,vehicle,items,oldestDueAt,totalOverdue,
+ *   source,stage,aiScore,grade,sentiment,sentimentScore,lastSummary}], links, detailCap(default 20) }
+ */
+function renderActionItemOverdueBatch(opts) {
+  opts = opts || {};
+  var leads = (Array.isArray(opts.leads) ? opts.leads : []).filter(Boolean);
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  if (leads.length <= 1) {
+    var only = leads[0] || {};
+    return renderActionItemOverdue({
+      rooftopName: opts.rooftopName, dept: opts.dept, tz: opts.tz, lead: only,
+      items: only.items || [], oldestDueAt: only.oldestDueAt,
+      totalOverdue: only.totalOverdue || (only.items || []).length, links: L,
+    });
+  }
+  // Oldest-overdue-first so the cap/truncation always keeps the MOST urgent leads visible.
+  var sorted = leads.slice().sort(function (a, b) { return new Date(a.oldestDueAt || 0) - new Date(b.oldestDueAt || 0); });
+  var totalItems = sorted.reduce(function (s, ld) { return s + (Number(ld.totalOverdue) || (ld.items || []).length); }, 0);
+  var cap = Number(opts.detailCap) || 20;
+  var shown = sorted.slice(0, cap);
+  var hidden = sorted.length - shown.length;
+
+  var banner = '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:16px;"><tr><td style="padding:12px 16px;font-size:13px;font-weight:800;color:' + NEG + ';">' +
+    "&#9888; " + fmtInt(totalItems) + " action item" + (totalItems === 1 ? "" : "s") + " past SLA across " + fmtInt(sorted.length) + " lead" + (sorted.length === 1 ? "" : "s") + " — resolve now.</td></tr></table>";
+
+  var cards = shown.map(function (ld) {
+    var age = overdueAge(ld.oldestDueAt);
+    var items = ld.items || [];
+    return leadHeader(ld) +
+      (age ? '<div style="font-size:11px;color:' + NEG + ';font-weight:700;margin:6px 0 2px;">Oldest ' + esc(age) + "</div>" : "") +
+      actionList(items.slice(0, 3), opts.tz, NEG) +
+      (items.length > 3 ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:4px;">+' + (items.length - 3) + " more item" + (items.length - 3 === 1 ? "" : "s") + " for this lead</div>" : "") +
+      '<div style="height:14px;line-height:14px;">&nbsp;</div>';
+  }).join("");
+
+  var moreCard = hidden > 0
+    ? '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed ' + LINE + ';border-radius:12px;"><tr><td style="padding:14px 16px;font-size:12px;color:' + MUTE + ';text-align:center;">+' + fmtInt(hidden) + " more lead" + (hidden === 1 ? "" : "s") + " past SLA — view the full list in the console.</td></tr></table>"
+    : "";
+
+  var body = banner + cards + moreCard + '<div style="margin-top:14px;">' + btnPrimary("Resolve now", url) + "</div>";
+  var title = fmtInt(totalItems) + " overdue action item" + (totalItems === 1 ? "" : "s") + " across " + fmtInt(sorted.length) + " leads";
+  return stampValue(shell(opts, "Overdue · batch", title, body), sorted.length > 0);
+}
+
 // ── SMS renderers ────────────────────────────────────────────────────────────
 // Plain-text companions to the HTML emails above, for the Twilio SMS channel
 // (sendSms.cjs). Same data shapes as the email renderers so the runner can build
@@ -533,6 +696,115 @@ function renderActionItemOverdueSms(opts) {
   return lines.join("\n");
 }
 
+// GSM 03.38 basic + extension character set. A message sends as cheap GSM-7 (~1600 usable chars
+// across concatenated segments) ONLY if every character is in this set — one accented name ("José"),
+// curly quote, or emoji anywhere in the message forces the WHOLE thing to UCS-2 (~70 chars/segment,
+// roughly half the practical budget for the same cost), not just that one character.
+var GSM_7BIT_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+var GSM_7BIT_EXT = "^{}\\[~]|€";
+function needsUcs2(s) {
+  for (var i = 0; i < s.length; i++) {
+    var ch = s.charAt(i);
+    if (GSM_7BIT_BASIC.indexOf(ch) === -1 && GSM_7BIT_EXT.indexOf(ch) === -1) return true;
+  }
+  return false;
+}
+
+// Builds a capped, length-bounded multi-lead SMS body. `headerLines` and the trailing CTA/link
+// line are NEVER dropped — only the per-lead detail rows shrink under length pressure, and the
+// header always states the TRUE total count. So even in the worst case (maxChars forces zero
+// detail rows to survive), the recipient still sees "N leads ... +N more — view all: <link>" —
+// never a silent undercount. `maxChars` is treated as a GSM-7 budget; if the assembled text (at
+// whatever length we're currently trying) contains any non-GSM-7 character, the EFFECTIVE cap for
+// that candidate is halved to reflect the real UCS-2 cost — re-checked on every shrink, since
+// dropping a line can remove the one character that triggered it.
+function assembleBatchSms(headerLines, detailLines, ctaLabel, url, cap, maxChars, totalCount) {
+  var baseMax = Number(maxChars) || 1500;
+  function build(n) {
+    var shown = detailLines.slice(0, n);
+    var hidden = totalCount - shown.length;
+    var out = headerLines.concat(shown);
+    out.push(hidden > 0 ? ("+" + hidden + " more — view all: " + url) : (ctaLabel + ": " + url));
+    return out.join("\n");
+  }
+  function effectiveMax(t) { return needsUcs2(t) ? Math.floor(baseMax / 2) : baseMax; }
+  var n = Math.min(Number(cap) || 8, detailLines.length);
+  var text = build(n);
+  while (text.length > effectiveMax(text) && n > 0) { n -= 1; text = build(n); }
+  return text;
+}
+
+/**
+ * Overdue action-item BATCH SMS — one text covering MULTIPLE leads' SLA breaches for the same
+ * rooftop+dept this pass (not per-day; the caller decides which leads are "fresh this pass").
+ * Degrades to the IDENTICAL single-lead message when there's exactly one lead (delegates to
+ * renderActionItemOverdueSms — guaranteed byte-identical to today, not a separate "1 lead:" path).
+ * opts: { rooftopName, dept, leads:[{customer,phone,vehicle,items,oldestDueAt,totalOverdue}],
+ *   links, detailCap(default 8), maxChars(default 1500) }
+ */
+function renderActionItemOverdueBatchSms(opts) {
+  opts = opts || {};
+  var leads = (Array.isArray(opts.leads) ? opts.leads : []).filter(Boolean);
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  if (leads.length <= 1) {
+    var only = leads[0] || {};
+    return renderActionItemOverdueSms({
+      rooftopName: opts.rooftopName, dept: opts.dept, lead: only,
+      items: only.items || [], oldestDueAt: only.oldestDueAt,
+      totalOverdue: only.totalOverdue || (only.items || []).length, links: L,
+    });
+  }
+  // Oldest-overdue-first so the cap/truncation always keeps the MOST urgent leads visible.
+  var sorted = leads.slice().sort(function (a, b) { return new Date(a.oldestDueAt || 0) - new Date(b.oldestDueAt || 0); });
+  var header = [
+    "OVERDUE" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
+    leads.length + " leads with action items past SLA:",
+  ];
+  var lines = sorted.map(function (ld) {
+    var age = overdueAge(ld.oldestDueAt);
+    var top = smsItemLabel((ld.items && ld.items[0]) || {});
+    var phone = formatPhone(ld.phone);
+    return "- " + (ld.customer || "Customer") + (phone ? " " + phone : "") + (age ? " · " + age : "") + " · " + top;
+  });
+  return assembleBatchSms(header, lines, "Resolve now", url,
+    Number(opts.detailCap) || 8, Number(opts.maxChars) || 1500, leads.length);
+}
+
+/**
+ * New-action-item BATCH SMS — one text covering MULTIPLE leads' fresh action items for the same
+ * rooftop+dept this pass. Degrades to the IDENTICAL single-lead message when there's exactly one
+ * lead (delegates to renderActionItemSms).
+ * opts: { rooftopName, dept, leads:[{customer,phone,vehicle,items,totalOpen,justArrived}],
+ *   links, detailCap(default 8), maxChars(default 1500) }
+ */
+function renderActionItemBatchSms(opts) {
+  opts = opts || {};
+  var leads = (Array.isArray(opts.leads) ? opts.leads : []).filter(Boolean);
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  if (leads.length <= 1) {
+    var only = leads[0] || {};
+    return renderActionItemSms({
+      rooftopName: opts.rooftopName, dept: opts.dept, lead: only,
+      items: only.items || [], totalOpen: only.totalOpen || (only.items || []).length,
+      justArrived: only.justArrived || 0, links: L,
+    });
+  }
+  var header = [
+    "Vini" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
+    leads.length + " leads with new action items:",
+  ];
+  var lines = leads.map(function (ld) {
+    var n = ld.totalOpen || (ld.items || []).length;
+    var top = smsItemLabel((ld.items && ld.items[0]) || {});
+    var phone = formatPhone(ld.phone);
+    return "- " + (ld.customer || "Customer") + (phone ? " " + phone : "") + " · " + n + " open · " + top;
+  });
+  return assembleBatchSms(header, lines, "Work these leads", url,
+    Number(opts.detailCap) || 8, Number(opts.maxChars) || 1500, leads.length);
+}
+
 /**
  * Post-conversation SMS — one terse line about a call/text + the strongest outcome + a link.
  * opts: { rooftopName, dept, conversation:{customer,channel,direction,summary,intent,
@@ -557,6 +829,37 @@ function renderPostConversationSms(opts) {
   if (summary) lines.push(summary.length > 140 ? summary.slice(0, 137) + "…" : summary);
   lines.push((isSms ? "Open thread: " : "Review: ") + url);
   return lines.join("\n");
+}
+
+/**
+ * Post-conversation BATCH SMS — one text covering MULTIPLE leads' calls/texts for the same
+ * rooftop+dept this pass. Degrades to the IDENTICAL single-lead message when there's exactly one
+ * conversation (delegates to renderPostConversationSms). This is the highest-volume/highest-risk
+ * spot for the batch — the default 'daily' SMS cadence fires every replying lead's digest in the
+ * SAME end-of-day pass, so an active rooftop's whole day of SMS replies otherwise lands as N
+ * separate texts back-to-back.
+ * opts: { rooftopName, dept, conversations:[<same shape renderPostConversationSms takes>],
+ *   links, detailCap(default 8), maxChars(default 1500) }
+ */
+function renderPostConversationBatchSms(opts) {
+  opts = opts || {};
+  var convos = (Array.isArray(opts.conversations) ? opts.conversations : []).filter(Boolean);
+  var L = opts.links || {};
+  var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
+  if (convos.length <= 1) {
+    return renderPostConversationSms({ rooftopName: opts.rooftopName, dept: opts.dept, conversation: convos[0] || {}, links: L });
+  }
+  var isSmsBatch = convos.every(function (c) { return c.channel === "sms"; });
+  var header = [
+    "Vini" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
+    convos.length + " " + (isSmsBatch ? "SMS conversations" : "calls") + " today:",
+  ];
+  var lines = convos.map(function (c) {
+    var o = classifyOutcome(c);
+    var label = o.text.replace(/&#\d+;\s*/, "");
+    return "- " + (c.customer || "Customer") + " " + formatPhone(c.phone) + " · " + label;
+  });
+  return assembleBatchSms(header, lines, "View all", url, Number(opts.detailCap) || 8, Number(opts.maxChars) || 1500, convos.length);
 }
 
 /**
@@ -607,5 +910,12 @@ module.exports = {
   renderActionItemOverdueSms: renderActionItemOverdueSms,
   renderPostConversationSms: renderPostConversationSms,
   renderDigestSms: renderDigestSms,
+  renderActionItemOverdueBatchSms: renderActionItemOverdueBatchSms,
+  renderActionItemBatchSms: renderActionItemBatchSms,
+  renderActionItemBatch: renderActionItemBatch,
+  renderActionItemOverdueBatch: renderActionItemOverdueBatch,
+  renderPostConversationBatch: renderPostConversationBatch,
+  renderPostConversationBatchSms: renderPostConversationBatchSms,
+  formatPhone: formatPhone,
   _shell: shell,
 };
