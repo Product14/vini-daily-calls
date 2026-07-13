@@ -85,6 +85,14 @@ export type SendCell = {
   runs?: CellRun[];
 };
 
+/** Account-level BUSINESS lifecycle stage (roi_rooftop_config.lifecycle_status) — orthogonal to
+ * `liveStatus` below, which is a per-DEPARTMENT technical send-status. A rooftop can be
+ * "onboarding" here while a department's dry-run badge already reads "Live" (its digest is
+ * technically sending) — that's not a contradiction, just two different questions. Derived from
+ * ClickHouse's arr_bucket (Contract-Initiated/PWS → contracting; Onboarding/OB-Live → onboarding;
+ * Live → live; Churned → churn) by the sync-lifecycle cron. */
+export type LifecycleStatus = "onboarding" | "contracting" | "live" | "churn";
+
 export type RooftopRow = {
   rooftop_id: string;
   name: string;
@@ -99,11 +107,25 @@ export type RooftopRow = {
    *   "paused"      — dry_run on, but a real digest HAS been sent before (was live, now held).
    *   "not_started" — dry_run on and NO real digest has ever been sent (never gone live). */
   liveStatus?: "live" | "paused" | "not_started";
+  /** Account-level business stage — see LifecycleStatus. Defaults to "live" for rooftops the
+   * lifecycle sync hasn't classified yet (back-compat: never hides an already-visible rooftop). */
+  lifecycleStatus?: LifecycleStatus;
+  /** Raw ClickHouse bucket behind lifecycleStatus (e.g. "PWS", "OB-Live") — display-only detail. */
+  arrBucket?: string;
+  /** Lifecycle milestone dates (roi_rooftop_config), all optional/nullable. */
+  lifecycleDates?: { contracted?: string | null; onboarding?: string | null; obLive?: string | null; live?: string | null; churn?: string | null };
+  /** True when this row has no roi_live_departments entry (no digest-cell history) — the tracker
+   * renders these in the lightweight LifecycleList instead of the digest grid. */
+  lifecycleOnly?: boolean;
   /** Dealer timezone (roi_rooftop_config.timezone) — used to build link windows. */
   timezone?: string;
   /** Local send hour (0–23) / minute (roi_rooftop_config.digest_send_hour/minute). */
   sendHour?: number;
   sendMinute?: number;
+  /** Weekly/monthly digest send-day (roi_rooftop_config.weekly_send_dow/monthly_send_day).
+   * weeklySendDow: 0=Sun..6=Sat. monthlySendDay: 1..28. Both default to 1 server-side. */
+  weeklySendDow?: number;
+  monthlySendDay?: number;
   csm: string;
   group?: string;
   /** Detected live agents · present even when the rooftop isn't classified */

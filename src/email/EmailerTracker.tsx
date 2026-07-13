@@ -11,6 +11,7 @@ import {
   isSubscribed,
   type Cadence,
   type DeptKind,
+  type LifecycleStatus,
   type NotSentReason,
   type RooftopRow,
   type RooftopConfig,
@@ -18,9 +19,10 @@ import {
   type SubType,
   type SendCell,
 } from "./mockData";
-import { loadRooftops, updateRooftopConfig, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
+import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
 import { supabase } from "./supabaseClient";
-import { RooftopCellDrawer } from "./RooftopCellDrawer";
+import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
+import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
 import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow } from "./sendDigest";
 
@@ -48,6 +50,8 @@ export function EmailerTracker() {
   const [eventCounts, setEventCounts] = useState<EventCounts>(new Map());
   const [eventList, setEventList] = useState<{ rooftop: RooftopRow; type: string; label: string; direction?: "inbound" | "outbound" | null } | null>(null);
   const [search, setSearch] = useState("");
+  // Whether the search-result dropdown is showing (focus-driven, see the search input below).
+  const [searchFocused, setSearchFocused] = useState(false);
   const [csmFilter, setCsmFilter] = useState<Set<string>>(new Set()); // empty = all CSMs
   // Agent-product filter — Sales/Service × Inbound/Outbound. Digests are stored per dept, so
   // IB/OB map onto their dept's rows (they share one digest); the picker still reads as products.
@@ -67,6 +71,13 @@ export function EmailerTracker() {
 
   // Live data from roi_digest_runs (+ mailservice engagement). No mock fallback — empty until loaded.
   const [rooftops, setRooftops] = useState<RooftopRow[]>([]);
+  // Rooftops with NO digest-cell grid row yet — onboarding/contracting-stage accounts (+ any
+  // churned account with no send history). Default tab is "live" (below), so most sessions never
+  // touch this list, but it's loaded alongside the grid so tab counts are always accurate.
+  const [lifecycleRooftops, setLifecycleRooftops] = useState<RooftopRow[]>([]);
+  // Which lifecycle-stage tab is active. "live" is the default — the CSM's day-to-day view,
+  // unpolluted by onboarding/contracting/churned accounts.
+  const [lifecycleTab, setLifecycleTab] = useState<LifecycleStatus>("live");
   const [today, setToday] = useState<string>("");
   const [source, setSource] = useState<string>("");
   const [sourceKind, setSourceKind] = useState<"supabase" | "unconfigured" | "error" | "">("");
@@ -82,9 +93,10 @@ export function EmailerTracker() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [res, counts] = await Promise.all([loadRooftops({ anchor: anchor ?? undefined }), loadEventCounts()]);
+      const [res, counts, lifecycleOnly] = await Promise.all([loadRooftops({ anchor: anchor ?? undefined }), loadEventCounts(), loadLifecycleOnlyRooftops()]);
       setEventCounts(counts);
       setRooftops(res.rooftops);
+      setLifecycleRooftops(lifecycleOnly);
       setToday(res.today);
       setSourceKind(res.source);
       setSource(res.source === "supabase" ? "Supabase · roi_digest_runs" : res.source === "error" ? "Connection error" : "Not connected");
@@ -223,10 +235,35 @@ export function EmailerTracker() {
     setAnchor(dir === 1 && next >= isoToday ? null : next);
   };
 
+  // How many DISTINCT rooftops (team_ids) sit in each lifecycle stage — powers the tab bar's count
+  // badges. Computed over the full unfiltered universe (grid + lifecycle-only), never search/CSM-scoped.
+  const tabCounts = useMemo(() => {
+    const teams: Record<LifecycleStatus, Set<string>> = { onboarding: new Set(), contracting: new Set(), live: new Set(), churn: new Set() };
+    for (const r of rooftops) if (r.team_id) teams[r.lifecycleStatus ?? "live"].add(r.team_id);
+    for (const r of lifecycleRooftops) if (r.team_id) teams[r.lifecycleStatus ?? "live"].add(r.team_id);
+    return { onboarding: teams.onboarding.size, contracting: teams.contracting.size, live: teams.live.size, churn: teams.churn.size };
+  }, [rooftops, lifecycleRooftops]);
+
+  // "Live" is the grid (digest cells + KPI strip), gated to exclude anything tagged churn — this is
+  // also what keeps a churned account's history out of the "Sent rate" KPI. Other tabs read from the
+  // lightweight lifecycle-only list (deduped by team_id against any grid row that also matches, e.g.
+  // a churned rooftop whose digest history is still around).
+  const tabBase = useMemo(() => {
+    if (lifecycleTab === "live") return rooftops.filter((r) => (r.lifecycleStatus ?? "live") !== "churn");
+    const seen = new Set<string>();
+    const base: RooftopRow[] = [];
+    for (const r of [...lifecycleRooftops, ...rooftops]) {
+      if (r.lifecycleStatus !== lifecycleTab || !r.team_id || seen.has(r.team_id)) continue;
+      seen.add(r.team_id);
+      base.push(r);
+    }
+    return base;
+  }, [rooftops, lifecycleRooftops, lifecycleTab]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const prodDept = productFilter === "all" ? null : productFilter.startsWith("sales") ? "sales" : "service";
-    return rooftops.filter((r) => {
+    return tabBase.filter((r) => {
       // Match rooftop name, CSM, team_id, enterprise_id, or the enterprise group label — so a whole
       // dealer group is findable by its enterprise_id even when its rooftops share no name token
       // (e.g. "Corn Husker Nissan" / "Corn Hukser Auto Center" / "Courtesy Ford" under one enterprise).
@@ -244,7 +281,68 @@ export function EmailerTracker() {
       if (reasonFilter !== "all" && r.current_block !== reasonFilter) return false;
       return true;
     });
-  }, [rooftops, search, csmFilter, productFilter, reasonFilter]);
+  }, [tabBase, search, csmFilter, productFilter, reasonFilter]);
+
+  // Every known rooftop, deduped by team_id, across ALL lifecycle stages — the search box needs to
+  // find a rooftop by team_id/enterprise_id regardless of which tab is currently active (a rooftop
+  // living in "Contracting" is invisible while search only scopes the active tab's list).
+  const allRooftopsUnique = useMemo(() => {
+    const seen = new Set<string>();
+    const out: RooftopRow[] = [];
+    for (const r of [...rooftops, ...lifecycleRooftops]) {
+      if (!r.team_id || seen.has(r.team_id)) continue;
+      seen.add(r.team_id);
+      out.push(r);
+    }
+    return out;
+  }, [rooftops, lifecycleRooftops]);
+
+  // Cross-tab search-box suggestions — same match rule as the in-tab filter, capped for the dropdown.
+  const searchMatches = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    return allRooftopsUnique
+      .filter((r) =>
+        r.name.toLowerCase().includes(q) ||
+        r.csm.toLowerCase().includes(q) ||
+        (r.team_id ?? "").toLowerCase().includes(q) ||
+        (r.enterprise_id ?? "").toLowerCase().includes(q) ||
+        (r.group ?? "").toLowerCase().includes(q)
+      )
+      .slice(0, 8);
+  }, [allRooftopsUnique, search]);
+
+  // Jump to a rooftop found via search — switches to whichever lifecycle tab it actually lives in
+  // (it may not be "Live"), then opens the same config drawer every other "Configure"/⚙ entry point
+  // uses, so the click lands you directly on the rooftop regardless of where it currently sits.
+  const jumpToRooftop = (r: RooftopRow) => {
+    setLifecycleTab(r.lifecycleStatus ?? "live");
+    setSearchFocused(false);
+    setConfigRooftop(r);
+  };
+
+  // "Remove from Emailer" — the real kill switch for a churned rooftop (LifecycleList's Churn-tab
+  // action). Tagging a rooftop `churn` only gates the TRACKER's own display/KPIs; it does nothing
+  // to the cron, which reads roi_live_departments.is_live independently. Flip is_live=false on
+  // every department (both server crons — digest AND transactional — filter on exactly that
+  // column, see server/roi-cron/runner.cjs + eventRunner.cjs) and, belt-and-suspenders, turn off
+  // every email-type toggle too, so a future sync-live re-touch can't silently resume sending.
+  const stopEmailerNow = async (r: RooftopRow): Promise<{ ok: boolean; error?: string }> => {
+    if (!r.team_id) return { ok: false, error: "Missing team id" };
+    // Routed through the server (not a direct client write) specifically so it lands in
+    // roi_config_audit_log, attributed to whoever clicked it — see updateRooftopLiveStatus.
+    const liveRes = await updateRooftopLiveStatus(r.team_id, false);
+    if (!liveRes.ok) return liveRes;
+    const cfgRes = await updateRooftopConfig(r.team_id, {
+      daily_enabled: false, weekly_enabled: false, monthly_enabled: false,
+      post_appointment_enabled: false, post_conversation_enabled: false,
+      action_item_enabled: false, action_item_overdue_enabled: false,
+      sms_enabled: false,
+    });
+    if (!cfgRes.ok) return cfgRes;
+    void reload();
+    return { ok: true };
+  };
 
   // Distinct team_ids behind the current filter — the scope for the transactional analytics
   // modal's cross-rooftop read. Memoised so the modal's load effect doesn't re-fire each render.
@@ -388,9 +486,12 @@ export function EmailerTracker() {
     };
   }), [filtered, eventCounts, prodDir]);
   const breakdown = useMemo(() => reasonBreakdown(rooftops), [rooftops]);
-  const teamCount = useMemo(() => new Set(rooftops.map((r) => r.team_id)).size, [rooftops]);
-  const salesRows = rooftops.filter((r) => r.department === "sales").length;
-  const serviceRows = rooftops.filter((r) => r.department === "service").length;
+  // Sourced from tabBase (not raw `rooftops`) so these KPI-strip counts stay churn-free on the Live
+  // tab, consistent with the Sent-rate KPI below. `allTeamCount` is the page-header's un-scoped total.
+  const teamCount = useMemo(() => new Set(tabBase.map((r) => r.team_id)).size, [tabBase]);
+  const allTeamCount = useMemo(() => new Set(rooftops.map((r) => r.team_id)).size, [rooftops]);
+  const salesRows = tabBase.filter((r) => r.department === "sales").length;
+  const serviceRows = tabBase.filter((r) => r.department === "service").length;
 
   // Loader while the first load is in flight — no mock dataset is ever shown.
   if (!loadedOnce && loading) {
@@ -401,8 +502,10 @@ export function EmailerTracker() {
       </div>
     );
   }
-  // Explicit empty/error state instead of fake mock data.
-  if (rooftops.length === 0) {
+  // Explicit empty/error state instead of fake mock data. A source error/misconfiguration still
+  // means "nothing to show" even if lifecycle-only rooftops happened to load — but a real,
+  // connected tracker with zero LIVE rooftops should still surface its onboarding/contracting list.
+  if (rooftops.length === 0 && lifecycleRooftops.length === 0) {
     const unconfigured = sourceKind === "unconfigured";
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3 px-6 text-center">
@@ -429,7 +532,7 @@ export function EmailerTracker() {
               Email Tracker
             </h1>
             <span className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-secondary">
-              {teamCount} rooftops · {rooftops.length} dept trackers
+              {allTeamCount} rooftops · {rooftops.length} dept trackers
             </span>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-text-muted">
@@ -503,8 +606,28 @@ export function EmailerTracker() {
         ) : null}
       </header>
 
-      {/* CSM action board */}
-      {breakdown.length > 0 ? (
+      {/* Lifecycle stage tabs — Live is the default (day-to-day CSM view); the other three
+          surface accounts the tracker previously had no way to show at all (pre-live), or that
+          should never count toward Live's KPIs (churn). */}
+      <div className="flex-shrink-0 border-b border-border-subtle bg-surface-card px-6 py-2">
+        <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
+          {(["onboarding", "contracting", "live", "churn"] as LifecycleStatus[]).map((stage) => (
+            <button
+              key={stage}
+              type="button"
+              onClick={() => setLifecycleTab(stage)}
+              className={`px-3 py-1.5 text-[12px] font-semibold capitalize ${
+                lifecycleTab === stage ? "bg-brand-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
+              }`}
+            >
+              {stage} <span className="tabular">({tabCounts[stage]})</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* CSM action board — grid-only (blocked reasons apply to live digest sends). */}
+      {lifecycleTab === "live" && breakdown.length > 0 ? (
         <div className="flex-shrink-0 border-b border-border-subtle bg-warning-soft/40 px-6 py-2.5">
           <div className="flex flex-wrap items-baseline gap-3">
             <span className="text-[10px] font-semibold uppercase tracking-widest text-warning">
@@ -547,89 +670,121 @@ export function EmailerTracker() {
       {/* Filter strip */}
       <div className="flex-shrink-0 border-b border-border-subtle bg-surface-card px-6 py-3">
         <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search rooftop, CSM, team / enterprise id…"
-            className="w-[240px] rounded-md border border-border-subtle bg-surface-card px-3 py-1.5 text-[12px] placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
-          />
+          <div className="relative">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
+              placeholder="Search rooftop, CSM, team / enterprise id…"
+              className="w-[240px] rounded-md border border-border-subtle bg-surface-card px-3 py-1.5 text-[12px] placeholder:text-text-muted focus:border-brand-primary focus:outline-none"
+            />
+            {searchFocused && search.trim() ? (
+              <div className="absolute left-0 top-[calc(100%+4px)] z-30 w-[340px] overflow-hidden rounded-md border border-border-subtle bg-surface-card shadow-lg">
+                {searchMatches.length === 0 ? (
+                  <div className="px-3 py-2.5 text-[12px] text-text-muted">No rooftop matches “{search.trim()}”.</div>
+                ) : (
+                  searchMatches.map((r) => (
+                    <button
+                      key={r.team_id}
+                      type="button"
+                      onClick={() => jumpToRooftop(r)}
+                      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-surface-subtle"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-[12px] font-semibold text-text-primary">{r.name}</div>
+                        <div className="truncate text-[10px] text-text-muted">
+                          team {r.team_id}{r.enterprise_id ? ` · ent ${r.enterprise_id}` : ""} · {r.csm}
+                        </div>
+                      </div>
+                      <LifecycleBadge status={r.lifecycleStatus ?? "live"} sub={r.arrBucket} />
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
           <MultiSelect allLabel="All CSMs" options={csms} selected={csmFilter} onChange={setCsmFilter} />
-          <Select
-            value={productFilter}
-            onChange={(v) => setProductFilter(v as typeof productFilter)}
-            options={[
-              { value: "all", label: "All products" },
-              { value: "sales_ib", label: "Sales · Inbound" },
-              { value: "sales_ob", label: "Sales · Outbound" },
-              { value: "service_ib", label: "Service · Inbound" },
-              { value: "service_ob", label: "Service · Outbound" },
-            ]}
-          />
-          <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
-            {([["digests", "Digests"], ["transactional", "Transactional"]] as const).map(([v, lbl]) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setView(v)}
-                title={v === "transactional" ? "Per-event emails: post-appointment, post-conversation, action item, overdue" : "Daily / weekly / monthly digests"}
-                className={`px-3 py-1.5 text-[12px] font-semibold ${
-                  view === v ? "bg-text-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
-                }`}
-              >
-                {lbl}
-              </button>
-            ))}
-          </div>
-          {view === "digests" ? (
-            <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
-              {(["daily", "weekly", "monthly"] as Cadence[]).map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  onClick={() => setCadence(c)}
-                  className={`px-3 py-1.5 text-[12px] font-semibold capitalize ${
-                    cadence === c ? "bg-brand-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
-                  }`}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {view === "digests" ? (
-            <div className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-1 py-0.5" title="Jump the date window to any past date. ◀ / ▶ page by a full window; pick a date to jump; Live returns to the latest.">
-              <button type="button" onClick={() => stepAnchor(-1)} className="px-1.5 text-[13px] font-bold text-text-secondary hover:text-brand-primary" aria-label="Older window">◀</button>
-              <input
-                type="date"
-                value={anchor ?? today ?? ""}
-                max={isoToday}
-                onChange={(e) => setAnchor(e.target.value && e.target.value < isoToday ? e.target.value : null)}
-                className="w-[128px] bg-transparent text-[12px] text-text-primary focus:outline-none"
+          {lifecycleTab === "live" ? (
+            <>
+              <Select
+                value={productFilter}
+                onChange={(v) => setProductFilter(v as typeof productFilter)}
+                options={[
+                  { value: "all", label: "All products" },
+                  { value: "sales_ib", label: "Sales · Inbound" },
+                  { value: "sales_ob", label: "Sales · Outbound" },
+                  { value: "service_ib", label: "Service · Inbound" },
+                  { value: "service_ob", label: "Service · Outbound" },
+                ]}
               />
-              <button type="button" onClick={() => stepAnchor(1)} disabled={!anchor} className={`px-1.5 text-[13px] font-bold ${anchor ? "text-text-secondary hover:text-brand-primary" : "text-border-subtle"}`} aria-label="Newer window">▶</button>
-              {anchor ? (
-                <button type="button" onClick={() => setAnchor(null)} className="ml-0.5 rounded bg-brand-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand-primary hover:bg-brand-primary/20">Live</button>
-              ) : (
-                <span className="ml-0.5 rounded bg-positive/10 px-1.5 py-0.5 text-[10px] font-semibold text-positive">Live</span>
-              )}
-            </div>
+              <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
+                {([["digests", "Digests"], ["transactional", "Transactional"]] as const).map(([v, lbl]) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setView(v)}
+                    title={v === "transactional" ? "Per-event emails: post-appointment, post-conversation, action item, overdue" : "Daily / weekly / monthly digests"}
+                    className={`px-3 py-1.5 text-[12px] font-semibold ${
+                      view === v ? "bg-text-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
+                    }`}
+                  >
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+              {view === "digests" ? (
+                <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
+                  {(["daily", "weekly", "monthly"] as Cadence[]).map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setCadence(c)}
+                      className={`px-3 py-1.5 text-[12px] font-semibold capitalize ${
+                        cadence === c ? "bg-brand-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
+                      }`}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {view === "digests" ? (
+                <div className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-1 py-0.5" title="Jump the date window to any past date. ◀ / ▶ page by a full window; pick a date to jump; Live returns to the latest.">
+                  <button type="button" onClick={() => stepAnchor(-1)} className="px-1.5 text-[13px] font-bold text-text-secondary hover:text-brand-primary" aria-label="Older window">◀</button>
+                  <input
+                    type="date"
+                    value={anchor ?? today ?? ""}
+                    max={isoToday}
+                    onChange={(e) => setAnchor(e.target.value && e.target.value < isoToday ? e.target.value : null)}
+                    className="w-[128px] bg-transparent text-[12px] text-text-primary focus:outline-none"
+                  />
+                  <button type="button" onClick={() => stepAnchor(1)} disabled={!anchor} className={`px-1.5 text-[13px] font-bold ${anchor ? "text-text-secondary hover:text-brand-primary" : "text-border-subtle"}`} aria-label="Newer window">▶</button>
+                  {anchor ? (
+                    <button type="button" onClick={() => setAnchor(null)} className="ml-0.5 rounded bg-brand-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand-primary hover:bg-brand-primary/20">Live</button>
+                  ) : (
+                    <span className="ml-0.5 rounded bg-positive/10 px-1.5 py-0.5 text-[10px] font-semibold text-positive">Live</span>
+                  )}
+                </div>
+              ) : null}
+              <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
+                {(["rooftop", "csm"] as const).map((g) => (
+                  <button
+                    key={g}
+                    type="button"
+                    onClick={() => setGroupBy(g)}
+                    title={g === "csm" ? "Group rooftops by CSM" : "Group by rooftop"}
+                    className={`px-3 py-1.5 text-[12px] font-semibold capitalize ${
+                      groupBy === g ? "bg-brand-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
+                    }`}
+                  >
+                    {g === "csm" ? "By CSM" : "By rooftop"}
+                  </button>
+                ))}
+              </div>
+            </>
           ) : null}
-          <div className="inline-flex overflow-hidden rounded-md border border-border-subtle">
-            {(["rooftop", "csm"] as const).map((g) => (
-              <button
-                key={g}
-                type="button"
-                onClick={() => setGroupBy(g)}
-                title={g === "csm" ? "Group rooftops by CSM" : "Group by rooftop"}
-                className={`px-3 py-1.5 text-[12px] font-semibold capitalize ${
-                  groupBy === g ? "bg-brand-primary text-white" : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
-                }`}
-              >
-                {g === "csm" ? "By CSM" : "By rooftop"}
-              </button>
-            ))}
-          </div>
           <button
             type="button"
             onClick={() => {
@@ -644,11 +799,15 @@ export function EmailerTracker() {
             Clear filters
           </button>
           <div className="ml-auto text-[11px] text-text-muted tabular">
-            Showing {filtered.length} of {rooftops.length} rooftops
+            Showing {filtered.length} of {tabBase.length} rooftops
           </div>
         </div>
       </div>
 
+      {lifecycleTab !== "live" ? (
+        <LifecycleList rooftops={filtered} onConfigure={setConfigRooftop} onStopEmails={stopEmailerNow} />
+      ) : (
+        <>
       {/* KPI strip — sits below the filters; reacts to the active filters (CSM / product / search) */}
       <div className="flex-shrink-0 border-b border-border-subtle bg-surface-background px-6 py-3">
         <div className="flex flex-wrap items-stretch gap-2">
@@ -747,7 +906,13 @@ export function EmailerTracker() {
                     {firstOfGroup ? (
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="text-[13px] font-semibold text-text-primary">{r.name}</div>
+                          <div className="text-[13px] font-semibold text-text-primary">
+                            {r.name}
+                            {/* This department is technically sending while the ACCOUNT is still
+                                onboarding/contracting per the ARR system — not a contradiction,
+                                just two different questions (see LifecycleBadge). */}
+                            {r.lifecycleStatus && r.lifecycleStatus !== "live" ? <LifecycleBadge status={r.lifecycleStatus} sub={r.arrBucket} /> : null}
+                          </div>
                           <div className="text-[10px] text-text-muted">{r.group ?? "—"}</div>
                         </div>
                         <button
@@ -822,6 +987,8 @@ export function EmailerTracker() {
           <div className="py-12 text-center text-[13px] text-text-muted">No rooftops match the filters.</div>
         ) : null}
       </div>
+        </>
+      )}
 
       <RooftopCellDrawer
         rooftop={activeCell?.rooftop ?? null}
@@ -1247,6 +1414,12 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   // Rooftop-level SMS master switch (roi_rooftop_config.sms_enabled) — SMS only sends when ON.
   const [smsMaster, setSmsMaster] = useState(false);
   const [smsBusy, setSmsBusy] = useState(false);
+  // Weekly/monthly digest send-day (roi_rooftop_config.weekly_send_dow/monthly_send_day) — same
+  // fields as RooftopCellDrawer's ScheduleEditor, surfaced here too since this notifications
+  // panel is the more discoverable entry point for "when does this rooftop's digest go out".
+  const [weeklyDow, setWeeklyDow] = useState(1);
+  const [monthlyDay, setMonthlyDay] = useState(1);
+  const [dayBusy, setDayBusy] = useState<"weekly" | "monthly" | null>(null);
   const reloadRecips = useCallback(async () => {
     if (!rooftop?.team_id) { setTeamRecips([]); return; }
     setTeamRecips(await loadTeamRecipients(rooftop.team_id));
@@ -1254,10 +1427,29 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   useEffect(() => {
     setCfg(rooftop?.config ?? null);
     setSmsMaster(rooftop?.smsEnabled === true);
+    setWeeklyDow(rooftop?.weeklySendDow ?? 1);
+    setMonthlyDay(rooftop?.monthlySendDay ?? 1);
     setErr("");
     void reloadRecips();
   }, [rooftop, reloadRecips]);
   if (!rooftop || !cfg) return null;
+
+  const saveWeeklyDow = async (next: number) => {
+    const prevDow = weeklyDow;
+    setWeeklyDow(next); setDayBusy("weekly"); setErr(""); // optimistic
+    const res = await updateRooftopConfig(rooftop.team_id ?? "", { weekly_send_dow: next });
+    setDayBusy(null);
+    if (!res.ok) { setWeeklyDow(prevDow); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
+  const saveMonthlyDay = async (next: number) => {
+    const prevDay = monthlyDay;
+    setMonthlyDay(next); setDayBusy("monthly"); setErr(""); // optimistic
+    const res = await updateRooftopConfig(rooftop.team_id ?? "", { monthly_send_day: next });
+    setDayBusy(null);
+    if (!res.ok) { setMonthlyDay(prevDay); setErr(res.error || "Save failed"); return; }
+    onSaved();
+  };
 
   const toggle = async (key: EmailTypeKey) => {
     const next = !cfg[key];
@@ -1455,19 +1647,47 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
 
           <div className="mb-3 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Emails this rooftop receives</div>
           {EMAIL_TYPES.map(({ key, label }) => (
-            <label key={key} className="flex items-center justify-between border-b border-border-subtle py-2.5 cursor-pointer">
-              <span className="text-[13px] text-text-primary">{label}</span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={cfg[key]}
-                disabled={busy === key}
-                onClick={() => void toggle(key)}
-                className={`relative h-5 w-9 rounded-full transition-colors ${cfg[key] ? "bg-brand-primary" : "bg-border-subtle"} ${busy === key ? "opacity-60" : ""}`}
-              >
-                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${cfg[key] ? "left-[18px]" : "left-0.5"}`} />
-              </button>
-            </label>
+            <Fragment key={key}>
+              <label className="flex items-center justify-between border-b border-border-subtle py-2.5 cursor-pointer">
+                <span className="text-[13px] text-text-primary">{label}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={cfg[key]}
+                  disabled={busy === key}
+                  onClick={() => void toggle(key)}
+                  className={`relative h-5 w-9 rounded-full transition-colors ${cfg[key] ? "bg-brand-primary" : "bg-border-subtle"} ${busy === key ? "opacity-60" : ""}`}
+                >
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${cfg[key] ? "left-[18px]" : "left-0.5"}`} />
+                </button>
+              </label>
+              {key === "weekly_enabled" && cfg.weekly_enabled ? (
+                <div className="flex items-center justify-between border-b border-border-subtle py-2 pl-3">
+                  <span className="text-[11px] text-text-muted">Sends on</span>
+                  <select
+                    value={weeklyDow}
+                    disabled={dayBusy === "weekly"}
+                    onChange={(e) => void saveWeeklyDow(Number(e.target.value))}
+                    className="rounded-md border border-border-subtle bg-surface-background px-2 py-1 text-[12px] focus:border-brand-primary focus:outline-none disabled:opacity-60"
+                  >
+                    {WEEKDAY_LABELS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+                  </select>
+                </div>
+              ) : null}
+              {key === "monthly_enabled" && cfg.monthly_enabled ? (
+                <div className="flex items-center justify-between border-b border-border-subtle py-2 pl-3">
+                  <span className="text-[11px] text-text-muted">Sends on</span>
+                  <select
+                    value={monthlyDay}
+                    disabled={dayBusy === "monthly"}
+                    onChange={(e) => void saveMonthlyDay(Number(e.target.value))}
+                    className="rounded-md border border-border-subtle bg-surface-background px-2 py-1 text-[12px] focus:border-brand-primary focus:outline-none disabled:opacity-60"
+                  >
+                    {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => <option key={d} value={d}>Day {d}</option>)}
+                  </select>
+                </div>
+              ) : null}
+            </Fragment>
           ))}
           {/* SMS channel master switch — texts appointment + action-item alerts to recipients with a phone + SMS on. */}
           <label className="flex items-center justify-between border-b border-border-subtle py-2.5 cursor-pointer">
@@ -1595,10 +1815,62 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
             which of the 7 types each person gets on email and SMS. <span className="font-semibold text-text-primary">Role</span> drives
             transactional routing: alerts go to the Salesperson, falling back to BDC then GM when none is set. New recipients are added paused.
           </div>
+
+          <ConfigHistory teamId={rooftop.team_id} />
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+/* Config change log — collapsible "History" panel at the bottom of the ConfigDrawer. Every write
+ * through /api/rooftop-config or /api/csm lands here (roi_config_audit_log), so a CSM can see who
+ * changed what and when. */
+function ConfigHistory({ teamId }: { teamId?: string }) {
+  const [open, setOpen] = useState(false);
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!open || !teamId) return;
+    setLoading(true);
+    void loadConfigAuditLog(teamId).then((rows) => { setEntries(rows); setLoading(false); });
+  }, [open, teamId]);
+  const timeAgo = (iso: string) => {
+    const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+    if (mins < 60) return `${mins}m ago`;
+    if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+    return `${Math.round(mins / 1440)}d ago`;
+  };
+  return (
+    <div className="mt-4 border-t border-border-subtle pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between text-[11px] font-semibold uppercase tracking-widest text-text-muted hover:text-text-primary"
+      >
+        <span>History</span>
+        <span>{open ? "▲" : "▼"}</span>
+      </button>
+      {open ? (
+        loading ? (
+          <div className="mt-2 text-[12px] text-text-muted">Loading…</div>
+        ) : entries.length === 0 ? (
+          <div className="mt-2 text-[12px] text-text-muted">No changes logged yet.</div>
+        ) : (
+          <ul className="mt-2 space-y-1.5">
+            {entries.map((e, i) => (
+              <li key={i} className="text-[11px] leading-relaxed text-text-secondary">
+                <span className="font-semibold text-text-primary">{e.field}</span> changed{" "}
+                <span className="text-negative">{e.old_value ?? "—"}</span> →{" "}
+                <span className="text-positive">{e.new_value ?? "—"}</span>
+                <span className="text-text-muted"> · {e.actor || "unknown"} · {timeAgo(e.created_at)}</span>
+              </li>
+            ))}
+          </ul>
+        )
+      ) : null}
+    </div>
   );
 }
 

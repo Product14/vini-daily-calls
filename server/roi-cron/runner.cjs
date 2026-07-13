@@ -223,7 +223,13 @@ async function apiMetrics(teamId, dept, start, end) {
     intent: Array.isArray(ir.intent) ? ir.intent : [],     // query-resolution donut
     queries: Array.isArray(ir.queries) ? ir.queries : [],  // resolution rate (resolved/total)
     leadsBySource: Array.isArray(ir.leadsBySource) ? ir.leadsBySource : [], // lead activity
-    leadFunnel: ib.leadFunnel || null,
+    leadFunnel: ib.leadFunnel || null, // legacy (= inbound funnel); kept for back-compat
+    // Per-agent funnels — Leads → Real conversations → Qualified → Appointments, EACH from its own
+    // agent (inbound vs outbound). Previously only ib.leadFunnel was passed and the template consumed it
+    // in the OUTBOUND section (mislabelled inbound numbers), and INBOUND had no funnel at all. `appt` is
+    // taken from the agent's booked-meetings metric (im/om.appointments), not the funnel's own appt flag.
+    inboundFunnel: ib.leadFunnel ? { contacted: n(ibf.contacted) || n(ir.leadsAttempted), connected: n(ibf.connected), qualified: n(ibf.qualified), appt: n(im.appointments) } : null,
+    outboundFunnel: ob.leadFunnel ? { contacted: n(obf.contacted) || n(or.leadsAttempted) || obCalls, connected: n(obf.connected) || n(om.conversations), qualified: n(obf.qualified), appt: n(om.appointments) } : null,
     outcomes: Array.isArray(ob.outcomes) ? ob.outcomes : [], // outbound outcomes bars
     callingDuring: Math.max(0, calls - after), callingAfter: after, // calling hours during/after
     // ── outbound ──────────────────────────────────────────────────────────────
@@ -1051,22 +1057,30 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
 function localCadenceParts(tz) {
   const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", weekday: "short", hour12: false }).formatToParts(new Date());
   const g = (t) => p.find((x) => x.type === t)?.value;
-  return { Y: +g("year"), M: +g("month"), D: +g("day"), H: (+g("hour")) === 24 ? 0 : +g("hour"), dow: g("weekday") };
+  const Y = +g("year"), M = +g("month"), D = +g("day");
+  // Numeric day-of-week (0=Sun..6=Sat, matches JS Date.getUTCDay() / the weekly_send_dow column)
+  // derived from the dealer-local calendar date, not the Intl short-weekday string.
+  const dowNum = new Date(Date.UTC(Y, M - 1, D)).getUTCDay();
+  return { Y, M, D, H: (+g("hour")) === 24 ? 0 : +g("hour"), dow: g("weekday"), dowNum };
 }
 const isoD = (d) => d.toISOString().slice(0, 10);
-function cadenceWindow(tz, cadence) {
+// `cfg` (roi_rooftop_config row) is optional — the on-demand "generate now" paths call this
+// without a cfg and don't read sendDue, so they're unaffected.
+function cadenceWindow(tz, cadence, cfg) {
   const c = localCadenceParts(tz);
   if (cadence === "weekly") {
     const end = new Date(Date.UTC(c.Y, c.M - 1, c.D));           // today (exclusive)
     const start = new Date(Date.UTC(c.Y, c.M - 1, c.D - 7));     // 7 days back
     const ystr = new Date(Date.UTC(c.Y, c.M - 1, c.D - 1));      // yesterday → row local_date
+    const weeklySendDow = cfg?.weekly_send_dow ?? 1; // default Monday
     return { apiStart: isoD(start), apiEnd: isoD(end), apiMonthStart: `${c.Y}-${String(c.M).padStart(2, "0")}-01`,
-      localDate: isoD(ystr), dateLabel: `Week of ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H, sendDue: c.dow === "Mon" };
+      localDate: isoD(ystr), dateLabel: `Week of ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H, sendDue: c.dowNum === weeklySendDow };
   }
-  // monthly — previous calendar month, sent on the 1st
+  // monthly — previous calendar month, sent on the configured day (default the 1st)
   const thisM1 = new Date(Date.UTC(c.Y, c.M - 1, 1)), prevM1 = new Date(Date.UTC(c.Y, c.M - 2, 1));
+  const monthlySendDay = cfg?.monthly_send_day ?? 1;
   return { apiStart: isoD(prevM1), apiEnd: isoD(thisM1), apiMonthStart: isoD(prevM1),
-    localDate: isoD(prevM1), dateLabel: prevM1.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }), localHour: c.H, sendDue: c.D === 1 };
+    localDate: isoD(prevM1), dateLabel: prevM1.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }), localHour: c.H, sendDue: c.D === monthlySendDay };
 }
 
 // On-demand window for the manual "generate & send now" path. Unlike the scheduled
@@ -1217,7 +1231,7 @@ async function runCadence(cadence) {
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,${enabledCol}`),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,${enabledCol}`),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1234,7 +1248,7 @@ async function runCadence(cadence) {
   const process1 = async (L) => {
     const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York"; const name = c?.rooftop_name || L.team_id;
     if (!c || c[enabledCol] !== true) return;
-    const w = cadenceWindow(tz, cadence);
+    const w = cadenceWindow(tz, cadence, c);
     if (!IGNORE_DAY && !w.sendDue) { out.not_due++; return; }
     const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
     const upsert = async (extra) => {
@@ -1362,8 +1376,82 @@ async function syncLive() {
   return { ranAt: ts, ...summary };
 }
 
+// ── Rooftop LIFECYCLE sync (onboarding/contracting/live/churn) ──────────────
+// Pulls EVERY Vini rooftop's ARR/lifecycle bucket from ClickHouse (the canonical
+// Contract-Initiated → PWS → Onboarding → OB-Live → Live → Churned progression —
+// see db/clickhouse-endpoints/lifecycle.sql) and upserts it into roi_rooftop_config.
+// Unlike syncLive (additive-only, ignoreDuplicates), this OVERWRITES the lifecycle
+// columns every run — they're meant to reflect the CURRENT bucket, not a one-time
+// discovery. Safe because the upsert payload below ONLY ever contains these
+// lifecycle columns: Postgres `ON CONFLICT DO UPDATE` only touches columns present
+// in the payload, so daily_enabled/recipients/template/etc. (human-set config) are
+// never touched — this is what lets a rooftop be pre-configured during onboarding
+// without the lifecycle sync clobbering it later.
+const ARR_BUCKET_TO_LIFECYCLE = {
+  "Contract-Initiated": "contracting",
+  "PWS": "contracting",
+  "Onboarding": "onboarding",
+  "OB-Live": "onboarding",
+  "Live": "live",
+  "Churned": "churn",
+};
+async function syncLifecycle() {
+  const ts = new Date().toISOString();
+  if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
+  const endpoint = process.env.CLICKHOUSE_LIFECYCLE_ENDPOINT;
+  const keyId = process.env.CLICKHOUSE_KEY_ID, keySecret = process.env.CLICKHOUSE_KEY_SECRET;
+  if (!endpoint || !keyId || !keySecret) {
+    throw new Error("Missing CLICKHOUSE_LIFECYCLE_ENDPOINT / CLICKHOUSE_KEY_ID / CLICKHOUSE_KEY_SECRET (set them as Vercel env vars)");
+  }
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}` },
+    body: JSON.stringify({ queryVariables: {}, format: "JSONEachRow" }),
+  });
+  if (!res.ok) throw new Error(`ClickHouse lifecycle ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const text = await res.text();
+  let rows;
+  try { const j = JSON.parse(text); rows = Array.isArray(j) ? j : (j.data ?? [j]); }
+  catch { rows = text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
+
+  const patches = [];
+  for (const r of rows) {
+    const team_id = String(r.t ?? r.team_id ?? "").trim();
+    if (!team_id) continue;
+    const arr_bucket = r.arr_bucket ?? null;
+    const lifecycle_status = ARR_BUCKET_TO_LIFECYCLE[arr_bucket] ?? "live";
+    patches.push({
+      team_id,
+      enterprise_id: r.e ?? r.enterprise_id ?? null,
+      enterprise_name: r.enterprise_name ?? null,
+      team_name: r.team_name ?? null,
+      arr_bucket,
+      lifecycle_status,
+      contracted_date: r.contracted_date ?? null,
+      onboarding_date: r.ob_start_date ?? r.onboarding_date ?? null,
+      ob_live_date: r.ob_live_date ?? null,
+      live_date: r.live_date ?? null,
+      churn_date: r.churn_date ?? null,
+      lifecycle_synced_at: ts,
+    });
+  }
+
+  for (let i = 0; i < patches.length; i += 500) {
+    const { error } = await sb.from("roi_rooftop_config")
+      .upsert(patches.slice(i, i + 500), { onConflict: "team_id" });
+    if (error) throw new Error(`upsert roi_rooftop_config (lifecycle) failed: ${error.message}`);
+  }
+
+  const byStatus = patches.reduce((acc, p) => { acc[p.lifecycle_status] = (acc[p.lifecycle_status] ?? 0) + 1; return acc; }, {});
+  const summary = { rooftops: patches.length, byStatus };
+  await sb.from("roi_cron_runs").insert({ source: "sync-lifecycle", ok: true, summary }).then(() => {}, () => {});
+  console.log(`[sync-lifecycle] rooftops=${patches.length}`, JSON.stringify(byStatus));
+  return { ranAt: ts, ...summary };
+}
+
 // Importable surface for the Vercel serverless cron + tests.
-module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive, apiMetrics, apiActionItems, apiCampaigns };
+module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive, syncLifecycle, apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {

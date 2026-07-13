@@ -2939,14 +2939,37 @@ const ROOFTOP_BOOL_COLS = new Set([
   "action_item_enabled", "action_item_overdue_enabled",
   "sms_enabled",
 ]);
+// Best-effort config-change audit log — never lets a logging failure fail the actual save.
+async function logConfigAudit(sb, teamId, actor, patch, before) {
+  try {
+    const rows = Object.entries(patch)
+      .filter(([field, next]) => String(before?.[field] ?? "") !== String(next ?? ""))
+      .map(([field, next]) => ({
+        team_id: teamId, actor: actor || null, field,
+        old_value: before?.[field] == null ? null : String(before[field]),
+        new_value: next == null ? null : String(next),
+        source: "tracker",
+      }));
+    if (!rows.length) return;
+    // Supabase resolves { error } rather than throwing — checking it is the whole point of this
+    // function; an unchecked insert here silently drops every audit entry.
+    const { error } = await sb.from("roi_config_audit_log").insert(rows);
+    if (error) console.warn("[audit] roi_config_audit_log insert failed:", error.message);
+  } catch (e) {
+    console.warn("[audit] roi_config_audit_log insert failed:", e?.message ?? e);
+  }
+}
+
 app.post("/api/rooftop-config", async (req, res) => {
   try {
-    const { teamId, sendHour, sendMinute, timezone, daily_template, digest_focus } = req.body ?? {};
+    const { teamId, actor, sendHour, sendMinute, timezone, daily_template, digest_focus, weekly_send_dow, monthly_send_day } = req.body ?? {};
     if (!teamId) return res.status(400).json({ error: "teamId required" });
     const patch = {};
     if (sendHour != null) { const h = Number(sendHour); if (!Number.isInteger(h) || h < 0 || h > 23) return res.status(400).json({ error: "sendHour must be 0–23" }); patch.digest_send_hour = h; }
     if (sendMinute != null) { const m = Number(sendMinute); if (!Number.isInteger(m) || m < 0 || m > 59) return res.status(400).json({ error: "sendMinute must be 0–59" }); patch.digest_send_minute = m; }
     if (typeof timezone === "string" && timezone.trim()) patch.timezone = timezone.trim();
+    if (weekly_send_dow != null) { const d = Number(weekly_send_dow); if (!Number.isInteger(d) || d < 0 || d > 6) return res.status(400).json({ error: "weekly_send_dow must be 0–6" }); patch.weekly_send_dow = d; }
+    if (monthly_send_day != null) { const d = Number(monthly_send_day); if (!Number.isInteger(d) || d < 1 || d > 28) return res.status(400).json({ error: "monthly_send_day must be 1–28" }); patch.monthly_send_day = d; }
     // Email-type toggles: whitelist boolean columns only.
     for (const [k, v] of Object.entries(req.body ?? {})) {
       if (ROOFTOP_BOOL_COLS.has(k)) {
@@ -2967,8 +2990,10 @@ app.post("/api/rooftop-config", async (req, res) => {
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data: before } = await sb.from("roi_rooftop_config").select(Object.keys(patch).join(",")).eq("team_id", teamId).maybeSingle();
     const { error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId);
     if (error) return res.status(500).json({ error: error.message });
+    await logConfigAudit(sb, teamId, actor, patch, before);
     return res.json({ ok: true, teamId, ...patch });
   } catch (err) {
     console.error("POST /api/rooftop-config error:", err?.message ?? err);
@@ -2976,10 +3001,67 @@ app.post("/api/rooftop-config", async (req, res) => {
   }
 });
 
+// ── Config change history for the ConfigDrawer's "History" panel ────────────
+app.get("/api/config-audit-log", async (req, res) => {
+  try {
+    const teamId = String(req.query.teamId || "").trim();
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data, error } = await sb.from("roi_config_audit_log")
+      .select("field,old_value,new_value,actor,source,created_at")
+      .eq("team_id", teamId).order("created_at", { ascending: false }).limit(50);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, entries: data ?? [] });
+  } catch (err) {
+    console.error("GET /api/config-audit-log error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// ── Flip is_live for EVERY department of a rooftop (the real emailer kill switch — is_live is
+// what both the digest cron and the transactional cron gate on, independent of any UI-level
+// "churn" tag). Routed through the server so it can log the change to roi_config_audit_log —
+// unlike roi_rooftop_config, roi_live_departments is otherwise written directly from the browser
+// (see DryRunToggle) with no audit trail, so this endpoint exists specifically to make the
+// "Remove from Emailer" action attributable.
+app.post("/api/rooftop-live-status", async (req, res) => {
+  try {
+    const { teamId, isLive, actor } = req.body ?? {};
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    if (typeof isLive !== "boolean") return res.status(400).json({ error: "isLive must be a boolean" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data: before, error: readErr } = await sb.from("roi_live_departments").select("department,is_live").eq("team_id", teamId);
+    if (readErr) return res.status(500).json({ error: readErr.message });
+    const { error } = await sb.from("roi_live_departments").update({ is_live: isLive }).eq("team_id", teamId);
+    if (error) return res.status(500).json({ error: error.message });
+    try {
+      const rows = (before ?? [])
+        .filter((d) => d.is_live !== isLive)
+        .map((d) => ({ team_id: teamId, actor: actor || null, field: `is_live (${d.department})`, old_value: String(d.is_live), new_value: String(isLive), source: "tracker" }));
+      if (rows.length) {
+        const { error: auditErr } = await sb.from("roi_config_audit_log").insert(rows);
+        if (auditErr) console.warn("[audit] roi_config_audit_log insert failed:", auditErr.message);
+      }
+    } catch (e) {
+      console.warn("[audit] roi_config_audit_log insert failed:", e?.message ?? e);
+    }
+    return res.json({ ok: true, teamId, isLive });
+  } catch (err) {
+    console.error("POST /api/rooftop-live-status error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "update failed" });
+  }
+});
+
 // ── Assign a CSM (name + email both required) → set csm_name + enable BOTH depts ──
 app.post("/api/csm", async (req, res) => {
   try {
-    const { teamId, name, email } = req.body ?? {};
+    const { teamId, name, email, actor } = req.body ?? {};
     const nm = String(name || "").trim();
     const addr = String(email || "").trim();
     if (!teamId || !nm || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId, CSM name and a valid CSM email are all required" });
@@ -2987,8 +3069,10 @@ app.post("/api/csm", async (req, res) => {
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data: beforeCfg } = await sb.from("roi_rooftop_config").select("csm_name").eq("team_id", teamId).maybeSingle();
     const { error: cfgErr } = await sb.from("roi_rooftop_config").update({ csm_name: nm }).eq("team_id", teamId);
     if (cfgErr) return res.status(500).json({ error: cfgErr.message });
+    await logConfigAudit(sb, teamId, actor, { csm_name: nm }, beforeCfg);
     const { data: existing } = await sb.from("roi_recipients").select("id").eq("team_id", teamId).ilike("email", addr).maybeSingle();
     const patch = { receives_sales: true, receives_service: true, email_enabled: true };
     const q = existing
@@ -3161,6 +3245,24 @@ app.get("/api/cron/sync-live", async (req, res) => {
     return res.status(200).json({ ok: true, ...summary });
   } catch (err) {
     console.error("GET /api/cron/sync-live error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "sync failed" });
+  }
+});
+
+// Rooftop LIFECYCLE-stage sync — pull every Vini rooftop's ARR bucket (onboarding /
+// contracting / live / churn) from ClickHouse into roi_rooftop_config, so the tracker
+// can show rooftops that aren't technically live yet. Scheduled daily in vercel.json.
+app.get("/api/cron/sync-lifecycle", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const { syncLifecycle } = require("./roi-cron/runner.cjs");
+    const summary = await syncLifecycle();
+    return res.status(200).json({ ok: true, ...summary });
+  } catch (err) {
+    console.error("GET /api/cron/sync-lifecycle error:", err?.message ?? err);
     return res.status(500).json({ ok: false, error: err?.message ?? "sync failed" });
   }
 });

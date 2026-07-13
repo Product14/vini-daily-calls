@@ -3,6 +3,7 @@
 // the run sent in Supabase. After this resolves ok, reload the tracker — the cell
 // flips to "sent" (from the DB) with the stored HTML + recipients viewable.
 import { renderDigestEmail } from "./renderDigest";
+import { getActorName } from "./dataSource";
 import type { Cadence, DeptKind, DigestMetrics } from "./mockData";
 
 export type SendDigestOpts = {
@@ -99,14 +100,14 @@ export const setRecipientRoleNow = (opts: { teamId?: string; dept?: DeptKind; em
 export const setRecipientSubscriptionNow = (opts: { teamId?: string; email: string; type: string; channel: "email" | "sms"; enabled: boolean }) =>
   postJson("/api/recipients/subscription", { teamId: opts.teamId, email: opts.email, type: opts.type, channel: opts.channel, enabled: opts.enabled });
 
-/** Update a rooftop's send hour / minute / timezone, or the SMS master switch (sms_enabled). */
-export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean }) =>
-  postJson("/api/rooftop-config", opts);
+/** Update a rooftop's send hour / minute / timezone / weekly-monthly send-day, or the SMS master switch (sms_enabled). */
+export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean; weekly_send_dow?: number; monthly_send_day?: number }) =>
+  postJson("/api/rooftop-config", { ...opts, actor: getActorName() });
 
 /** Assign a CSM (name + email both required) → enables both departments. */
 export const addCsmNow = (opts: { teamId?: string; name: string; email: string }) => {
   if (!opts.name?.trim() || !/\S+@\S+\.\S+/.test(opts.email || "")) return Promise.resolve({ ok: false, error: "CSM name and a valid email are required." });
-  return postJson("/api/csm", { teamId: opts.teamId, name: opts.name.trim(), email: opts.email.trim() });
+  return postJson("/api/csm", { teamId: opts.teamId, name: opts.name.trim(), email: opts.email.trim(), actor: getActorName() });
 };
 
 /** Report a missing rooftop → emails product@spyne.ai + subhav.malhotra@spyne.ai. */

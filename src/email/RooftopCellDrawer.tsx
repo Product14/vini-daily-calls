@@ -489,28 +489,40 @@ function AddRecipientInline({ teamId, dept, onAdded }: { teamId?: string; dept: 
   );
 }
 
-// #4 — view + edit a rooftop's local send hour:minute + timezone (persists to roi_rooftop_config).
+// Exported so ConfigDrawer (EmailerTracker.tsx) can render the same weekly-day picker labels.
+export const WEEKDAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+// #4 — view + edit a rooftop's local send hour:minute + timezone, plus which day the WEEKLY
+// digest sends (0=Sun..6=Sat) and which day-of-month the MONTHLY digest sends (1-28). Not every
+// customer wants their weekly/monthly summary landing on the same day — these persist to
+// roi_rooftop_config.weekly_send_dow / monthly_send_day (default Monday / the 1st, today's
+// previously-hardcoded behavior for every rooftop).
 function ScheduleEditor({ rooftop, onSaved }: { rooftop: RooftopRow; onSaved?: () => void }) {
   const [hour, setHour] = useState<string>(rooftop.sendHour != null ? String(rooftop.sendHour) : "7");
   const [minute, setMinute] = useState<string>(rooftop.sendMinute != null ? String(rooftop.sendMinute) : "0");
   const [tz, setTz] = useState<string>(rooftop.timezone || "America/New_York");
+  const [weeklyDow, setWeeklyDow] = useState<string>(String(rooftop.weeklySendDow ?? 1));
+  const [monthlyDay, setMonthlyDay] = useState<string>(String(rooftop.monthlySendDay ?? 1));
   const [edit, setEdit] = useState(false);
   const [state, setState] = useState<"idle" | "saving" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
   const pad = (n: string) => String(n).padStart(2, "0");
   const save = async () => {
-    const h = Number(hour), m = Number(minute);
+    const h = Number(hour), m = Number(minute), dow = Number(weeklyDow), day = Number(monthlyDay);
     if (!Number.isInteger(h) || h < 0 || h > 23) { setState("error"); setMsg("Hour must be 0–23"); return; }
     if (!Number.isInteger(m) || m < 0 || m > 59) { setState("error"); setMsg("Minute must be 0–59"); return; }
     setState("saving"); setMsg("");
-    const r = await updateRooftopConfigNow({ teamId: rooftop.team_id, sendHour: h, sendMinute: m, timezone: tz.trim() });
+    const r = await updateRooftopConfigNow({ teamId: rooftop.team_id, sendHour: h, sendMinute: m, timezone: tz.trim(), weekly_send_dow: dow, monthly_send_day: day });
     if (r.ok) { setState("done"); setMsg("Saved ✓"); setEdit(false); onSaved?.(); setTimeout(() => setState("idle"), 1500); }
     else { setState("error"); setMsg(r.error || "Save failed"); }
   };
   if (!edit) {
     return (
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[12px] text-text-primary">{pad(hour)}:{pad(minute)} <span className="text-text-muted">· {tz}</span></div>
+        <div className="text-[12px] text-text-primary">
+          {pad(hour)}:{pad(minute)} <span className="text-text-muted">· {tz}</span>
+          <div className="text-[10px] text-text-muted">Weekly: {WEEKDAY_LABELS[Number(weeklyDow)]} · Monthly: day {monthlyDay}</div>
+        </div>
         <button type="button" onClick={() => setEdit(true)} className="shrink-0 rounded-md border border-border-subtle px-2.5 py-1 text-[11px] font-semibold text-text-secondary hover:bg-surface-subtle">Edit</button>
       </div>
     );
@@ -524,11 +536,23 @@ function ScheduleEditor({ rooftop, onSaved }: { rooftop: RooftopRow; onSaved?: (
         <input type="text" value={tz} onChange={(e) => setTz(e.target.value)} placeholder="America/New_York" className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]" />
       </div>
       <div className="flex items-center gap-1.5">
+        <label className="text-[11px] text-text-muted">Weekly digest day</label>
+        <select value={weeklyDow} onChange={(e) => setWeeklyDow(e.target.value)} className="rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]">
+          {WEEKDAY_LABELS.map((label, i) => <option key={i} value={i}>{label}</option>)}
+        </select>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <label className="text-[11px] text-text-muted">Monthly digest day</label>
+        <select value={monthlyDay} onChange={(e) => setMonthlyDay(e.target.value)} className="rounded-md border border-border-subtle bg-surface-background px-2 py-1.5 text-[12px]">
+          {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+      </div>
+      <div className="flex items-center gap-1.5">
         <button type="button" onClick={() => void save()} disabled={state === "saving"} className="rounded-md bg-brand-primary px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">{state === "saving" ? "Saving…" : "Save"}</button>
         <button type="button" onClick={() => setEdit(false)} className="rounded-md border border-border-subtle px-3 py-1.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-subtle">Cancel</button>
         {msg ? <span className={`text-[10px] ${state === "error" ? "text-negative" : "text-text-muted"}`}>{msg}</span> : null}
       </div>
-      <p className="text-[10px] text-text-muted">Local send time for this rooftop · applies on the next scheduled run.</p>
+      <p className="text-[10px] text-text-muted">Local send time + day for this rooftop · applies on the next scheduled run. Not all customers want their weekly/monthly summary on the same day.</p>
     </div>
   );
 }

@@ -20,6 +20,7 @@ import {
   type Department,
   type DeptKind,
   type DigestMetrics,
+  type LifecycleStatus,
   type NotSentReason,
   type Recipient,
   type RooftopConfig,
@@ -55,7 +56,16 @@ type RunRow = {
 type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: string | null; timezone: string | null; csm_name: string | null; cs_poc: string | null; digest_send_hour: number | null; digest_send_minute: number | null;
   daily_enabled: boolean | null; weekly_enabled: boolean | null; monthly_enabled: boolean | null;
   post_appointment_enabled: boolean | null; post_conversation_enabled: boolean | null; action_item_enabled: boolean | null; action_item_overdue_enabled: boolean | null;
-  daily_template: string | null; digest_focus: string | null; sms_enabled: boolean | null };
+  daily_template: string | null; digest_focus: string | null; sms_enabled: boolean | null;
+  weekly_send_dow: number | null; monthly_send_day: number | null;
+  lifecycle_status: string | null; arr_bucket: string | null; enterprise_name: string | null; team_name: string | null;
+  contracted_date: string | null; onboarding_date: string | null; ob_live_date: string | null; live_date: string | null; churn_date: string | null };
+
+/** roi_rooftop_config.lifecycle_status → the tracker's LifecycleStatus, defaulting to "live" for
+ * rooftops the lifecycle sync hasn't classified yet — never hides an already-visible rooftop. */
+function toLifecycleStatus(v: string | null | undefined): LifecycleStatus {
+  return v === "onboarding" || v === "contracting" || v === "churn" ? v : "live";
+}
 // Unfurl a corp email local-part into a display name: "ankur.batra@spyne.ai" →
 // "Ankur Batra". Trailing dedup digits ("vishal.singh1") are stripped. Returns
 // "" for blank/non-email input so callers can fall back.
@@ -167,7 +177,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     .order("local_date", { ascending: false });
   const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
     (anchorReq ? runsBase.lte("local_date", anchorReq) : runsBase).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled"),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
@@ -262,15 +272,26 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
 
     return {
       rooftop_id: `${teamId}::${dept}`,
-      name: cfg?.rooftop_name || teamId,
+      name: cfg?.rooftop_name || cfg?.team_name || teamId,
       enterprise_id: enterpriseId,
       team_id: teamId,
       department: dept,
       dryRun: live.dry_run !== false, // default true (dry-run on) when unset
       liveStatus,
+      lifecycleStatus: toLifecycleStatus(cfg?.lifecycle_status),
+      arrBucket: cfg?.arr_bucket ?? undefined,
+      lifecycleDates: {
+        contracted: cfg?.contracted_date ?? null,
+        onboarding: cfg?.onboarding_date ?? null,
+        obLive: cfg?.ob_live_date ?? null,
+        live: cfg?.live_date ?? null,
+        churn: cfg?.churn_date ?? null,
+      },
       timezone: cfg?.timezone ?? undefined,
       sendHour: cfg?.digest_send_hour ?? undefined,
       sendMinute: cfg?.digest_send_minute ?? undefined,
+      weeklySendDow: cfg?.weekly_send_dow ?? undefined,
+      monthlySendDay: cfg?.monthly_send_day ?? undefined,
       // CSM is sourced from roi_rooftop_config.cs_poc (authoritative — synced from
       // Metabase Q12071's cs_poc_email per team_id). Fall back to the stored
       // csm_name, then "Unassigned".
@@ -306,6 +327,60 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   );
 
   return { rooftops, source: "supabase", today, lastSynced: new Date() };
+}
+
+/** Lightweight rows for rooftops NOT yet represented by a roi_live_departments grid row —
+ * onboarding/contracting-stage accounts (and any churned account with no send history). No
+ * digest cells: these power the tracker's non-grid "LifecycleList" view. A team with lifecycle
+ * columns unset never appears here (it's plain "live" back-compat, already covered by the grid
+ * or genuinely unclassified). */
+export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
+  if (!isSupabaseConfigured || !supabase) return [];
+  const [cfgRes, liveRes] = await Promise.all([
+    supabase.from("roi_rooftop_config")
+      .select("team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date")
+      .in("lifecycle_status", ["onboarding", "contracting", "churn"]),
+    supabase.from("roi_live_departments").select("team_id"),
+  ]);
+  if (cfgRes.error) { console.warn("[tracker] lifecycle-only read failed:", cfgRes.error.message); return []; }
+  const haveGridRow = new Set((liveRes.data ?? []).map((l: { team_id: string }) => l.team_id));
+  return (cfgRes.data ?? [])
+    .filter((c) => !haveGridRow.has(c.team_id))
+    .map((c): RooftopRow => ({
+      rooftop_id: `${c.team_id}::lifecycle`,
+      name: c.rooftop_name || c.team_name || c.team_id,
+      enterprise_id: c.enterprise_id ?? undefined,
+      team_id: c.team_id,
+      lifecycleStatus: toLifecycleStatus(c.lifecycle_status),
+      arrBucket: c.arr_bucket ?? undefined,
+      lifecycleDates: { contracted: c.contracted_date, onboarding: c.onboarding_date, obLive: c.ob_live_date, live: c.live_date, churn: c.churn_date },
+      lifecycleOnly: true,
+      csm: nameFromEmail(c.cs_poc) || c.csm_name?.trim() || "Unassigned",
+      group: c.enterprise_id ? `Ent ${c.enterprise_id.slice(0, 6)}` : (c.enterprise_name ?? undefined),
+      timezone: c.timezone ?? undefined,
+      sendHour: c.digest_send_hour ?? undefined,
+      sendMinute: c.digest_send_minute ?? undefined,
+      weeklySendDow: c.weekly_send_dow ?? undefined,
+      monthlySendDay: c.monthly_send_day ?? undefined,
+      agents_live: [],
+      departments: [],
+      daily: [], weekly: [], monthly: [],
+      // Same defaults loadRooftops() applies for a config-less team — so ConfigDrawer (opened via
+      // the LifecycleList's "Configure" button, ahead of go-live) renders normally.
+      config: {
+        daily_enabled: c.daily_enabled !== false,
+        weekly_enabled: c.weekly_enabled === true,
+        monthly_enabled: c.monthly_enabled === true,
+        post_appointment_enabled: c.post_appointment_enabled === true,
+        post_conversation_enabled: c.post_conversation_enabled === true,
+        action_item_enabled: c.action_item_enabled === true,
+        action_item_overdue_enabled: c.action_item_overdue_enabled === true,
+        daily_template: (c.daily_template === "v1" ? "v1" : "v2") as DailyTemplate,
+        digest_focus: ((c.digest_focus === "conversation" || c.digest_focus === "appointment") ? c.digest_focus : "auto") as DigestFocus,
+      },
+      smsEnabled: c.sms_enabled === true,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /* ── Transactional emails (roi_event_emails) — per-event sends, monitored per rooftop ───── */
@@ -537,18 +612,66 @@ export async function loadEventFeed(
   return { rows, hasMore: ch.length === limit };
 }
 
+/** Who's making config changes from this browser — attached to every config write so the
+ * "History" panel (roi_config_audit_log) can attribute it. Not real auth (the tracker sits
+ * behind one shared login, see TrackerAuthGate) — just a cheap, persistent display name. */
+const ACTOR_KEY = "vini-tracker-actor";
+export function getActorName(): string {
+  try {
+    const stored = localStorage.getItem(ACTOR_KEY);
+    if (stored) return stored;
+  } catch { /* private mode → ask every time */ }
+  const name = (typeof window !== "undefined" ? window.prompt("Your name (shown in the config change history):") : "")?.trim();
+  if (name) { try { localStorage.setItem(ACTOR_KEY, name); } catch { /* ignore */ } }
+  return name || "";
+}
+export function setActorName(name: string): void {
+  try { localStorage.setItem(ACTOR_KEY, name.trim()); } catch { /* ignore */ }
+}
+
 /** Persist a per-rooftop email-type toggle (roi_rooftop_config). Browser write — RLS is off
  * on this project and anon has been granted UPDATE, so the tracker writes directly. */
 // Persist rooftop config (email-type toggles + daily template) through the backend
 // (service key) so the browser's publishable key never needs write grants on
 // roi_rooftop_config. The server whitelists the columns it accepts.
-export async function updateRooftopConfig(teamId: string, patch: Partial<RooftopConfig> & { sms_enabled?: boolean }): Promise<{ ok: boolean; error?: string }> {
+export async function updateRooftopConfig(teamId: string, patch: Partial<RooftopConfig> & { sms_enabled?: boolean; weekly_send_dow?: number; monthly_send_day?: number }): Promise<{ ok: boolean; error?: string }> {
   if (!teamId) return { ok: false, error: "teamId required" };
   try {
     const res = await fetch("/api/rooftop-config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ teamId, ...patch }),
+      body: JSON.stringify({ teamId, actor: getActorName(), ...patch }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/** One entry in a rooftop's config change history (roi_config_audit_log via /api/config-audit-log). */
+export type AuditEntry = { field: string; old_value: string | null; new_value: string | null; actor: string | null; source: string; created_at: string };
+export async function loadConfigAuditLog(teamId: string): Promise<AuditEntry[]> {
+  if (!teamId) return [];
+  try {
+    const r = await fetch(`/api/config-audit-log?teamId=${encodeURIComponent(teamId)}`, { cache: "no-store" });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && Array.isArray((j as { entries?: unknown }).entries)) return (j as { entries: AuditEntry[] }).entries;
+  } catch { /* fall through */ }
+  return [];
+}
+
+/** Flip is_live for every department of a rooftop — the real emailer kill switch (both crons gate
+ * on this column independently of the tracker's own "churn" tag). Routed through the server so
+ * the change is attributable in roi_config_audit_log, unlike a direct client write. */
+export async function updateRooftopLiveStatus(teamId: string, isLive: boolean): Promise<{ ok: boolean; error?: string }> {
+  if (!teamId) return { ok: false, error: "teamId required" };
+  try {
+    const res = await fetch("/api/rooftop-live-status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId, isLive, actor: getActorName() }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
