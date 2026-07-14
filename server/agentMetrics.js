@@ -77,6 +77,9 @@ async function runClickhouseRaw(sql) {
 }
 
 // Mirror of build_dashboard.py assembly (per-period grouping + intent + Total).
+// R may carry only a subset of the 6 query results (the incremental/partial
+// refreshes below only run 3 of them) — grains whose queries weren't supplied
+// are skipped rather than assembled from `undefined`.
 function assemble(R) {
   const grains = {
     day: ["day_metrics", "day_intent", "day_vouchers"],
@@ -86,6 +89,7 @@ function assemble(R) {
   const out = {};
   for (const g of Object.keys(grains)) {
     const [mk, ik, vk] = grains[g];
+    if (!R[mk]) continue;
     const data = {}, periodsSet = new Set();
     for (const row of R[mk]) {
       const p = row.period; if (!p) continue;            // skip ROLLUP grand-total
@@ -142,4 +146,50 @@ export async function runAgentMetrics() {
       source: "live ClickHouse query",
     },
   };
+}
+
+// ── Partial refreshes (cheaper than the full 6-query bundle above) ──────────
+// The day/week/month queries each carry their own conversation-spine floor
+// (day -45d, week -84d, month ~-5mo, see agentMetricsQueries.json) baked into
+// Metabase-synced SQL. day_metrics/day_intent/day_vouchers use that -45d floor
+// EXACTLY ONCE per occurrence with no other meaning mixed in (verified: 4, 4,
+// and 1 occurrences respectively, all identical) — safe to narrow. week_* and
+// month_* mix their grain floor with an unrelated sub-scan's floor at a
+// DIFFERENT value (week_metrics: three -84d + one -45d; month_metrics: three
+// -5mo + one -45d) — a blind narrow there risks shrinking the wrong sub-scan,
+// so those two grains are only ever refreshed via the full, unmodified query
+// (see runAgentMetricsWeekMonth below).
+const DAY_FLOOR = "addDays(today(), -45)";
+const DAY_QUERIES = ["day_metrics", "day_intent", "day_vouchers"];
+const DAY_FLOOR_OCCURRENCES = { day_metrics: 4, day_intent: 4, day_vouchers: 1 };
+const WEEK_MONTH_QUERIES = ["week_metrics", "week_intent", "week_vouchers", "month_metrics", "month_intent", "month_vouchers"];
+
+function narrowDayFloor(sql, key, days) {
+  const count = sql.split(DAY_FLOOR).length - 1;
+  if (count !== DAY_FLOOR_OCCURRENCES[key]) {
+    throw new Error(`[agentMetrics] ${key}: expected ${DAY_FLOOR_OCCURRENCES[key]} occurrences of "${DAY_FLOOR}", found ${count} — upstream SQL changed (re-synced from Metabase?), review before narrowing`);
+  }
+  return sql.split(DAY_FLOOR).join(`addDays(today(), -${days})`);
+}
+
+const METRICS_INCREMENTAL_WINDOW_DAYS = Number(process.env.METRICS_INCREMENTAL_WINDOW_DAYS) || 2;
+
+// Cheap: only the day grain, floored to a couple of days instead of 45. Caller
+// merges the returned `day` periods into the cached bundle — older cached days
+// (and the week/month grains) are left untouched.
+export async function runAgentMetricsIncremental() {
+  const R = {};
+  await Promise.all(DAY_QUERIES.map(async (k) => {
+    R[k] = await runClickhouse(narrowDayFloor(QUERIES[k], k, METRICS_INCREMENTAL_WINDOW_DAYS));
+  }));
+  return { day: assemble(R).day };
+}
+
+// Full week/month queries (unmodified — see the narrowing note above), no day
+// grain. Caller replaces the cached week/month grains wholesale.
+export async function runAgentMetricsWeekMonth() {
+  const R = {};
+  await Promise.all(WEEK_MONTH_QUERIES.map(async (k) => { R[k] = await runClickhouse(QUERIES[k]); }));
+  const out = assemble(R);
+  return { week: out.week, month: out.month };
 }

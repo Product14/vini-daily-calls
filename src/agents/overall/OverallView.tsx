@@ -102,17 +102,18 @@ export function OverallView() {
   const immersive = idleImmersive || isFs;
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // Auto-sync every 20 min so an always-on screen never goes stale. Visible-tab
+  // Auto-sync every 5 min so an always-on screen never goes stale. Visible-tab
   // only and silent (keeps the current data on screen until the fresh read
   // lands). Uses reload() — re-reads the cron-precomputed cache rather than
-  // forcing a live ~50s ClickHouse scan on every interval tick. A ref keeps the
-  // interval (set up once) calling the latest closure.
+  // forcing a live ~50s ClickHouse scan on every interval tick. Matches the
+  // agents-refresh-incremental cron cadence (every 5 min) — a shorter poll than
+  // that would just re-read the same cached snapshot early.
   const refreshRef = useRef(reload);
   refreshRef.current = reload;
   useEffect(() => {
     const id = setInterval(() => {
       if (document.visibilityState === "visible") refreshRef.current();
-    }, 20 * 60 * 1000);
+    }, 5 * 60 * 1000);
     return () => clearInterval(id);
   }, []);
 

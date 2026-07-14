@@ -86,6 +86,48 @@ const voucherSql = () => `
   )
   GROUP BY GROUPING SETS ((team_id), (team_id, day))`;
 
+// ── Incremental refresh (today + a trailing buffer day) ─────────────────────
+// `totals` is a uniqExact(lead_id) distinct count over the WHOLE window, not a
+// sum of daily rows — it is NOT safe to derive from cached daily rows (that's
+// the exact cross-day double-count the dashboard already warns about). Only
+// `daily` rows are independently deduped per-day, so only `daily` can be
+// correctly refreshed from a narrow time window. This lets us re-poll "today"
+// on a tight cadence (cheap: 1-2 days of base_fact, not the full 120-day scan)
+// while `totals` keeps coming from the full-window query below, on its own
+// (slower) cadence. See server/app.js computeRooftopBundleIncremental/TotalsOnly.
+const INCREMENTAL_WINDOW_DAYS = Number(process.env.AGENTS_INCREMENTAL_WINDOW_DAYS) || 2;
+
+const dailyOnlySql = () => `SELECT ${DIM_COLS}, toString(activity_day) AS day, ${METRIC_COLS}
+FROM ( ${BASE_FACT.replaceAll("{START}", `addDays(today(), -${INCREMENTAL_WINDOW_DAYS})`)} ) AS b
+WHERE team_id != ''
+GROUP BY team_id, agent_type, activity_day`;
+
+const voucherDailyOnlySql = () => `
+  SELECT team_id, toString(day) AS day, count() AS voucher_claims
+  FROM (
+    SELECT team_id, toDate(createdAt) AS day
+    FROM dealer_leads.voucher FINAL
+    WHERE __deleted = 0 AND createdAt >= addDays(today(), -${INCREMENTAL_WINDOW_DAYS})
+  )
+  GROUP BY team_id, day`;
+
+// Full-window totals only (no daily grouping set) — same correctness as the
+// combined query's totals grain, cheaper than it since it never materializes
+// per-day rows.
+const totalsOnlySql = () => `SELECT ${DIM_COLS}, ${METRIC_COLS}
+FROM ( ${baseSql()} ) AS b
+WHERE team_id != ''
+GROUP BY team_id, agent_type`;
+
+const voucherTotalsOnlySql = () => `
+  SELECT team_id, count() AS voucher_claims
+  FROM (
+    SELECT team_id
+    FROM dealer_leads.voucher FINAL
+    WHERE __deleted = 0 AND createdAt >= addDays(today(), -${WINDOW_DAYS})
+  )
+  GROUP BY team_id`;
+
 // Merges voucher claim counts onto the Service Outbound row for each (team_id[, day]).
 // Synthesizes a zero-filled Service Outbound row when a team claimed vouchers on a
 // day with no other Service Outbound activity, so claims are never silently dropped.
@@ -143,6 +185,29 @@ export async function runAgentRooftops() {
   mergeVoucherClaims(totals, voucherTotals, { keyed: false });
   mergeVoucherClaims(daily, voucherDaily, { keyed: true });
   return { totals, daily };
+}
+
+// Cheap: only today + INCREMENTAL_WINDOW_DAYS-1 of trailing buffer. Caller
+// merges these rows into the cached `daily` array by (team_id, agent_type, day)
+// — older cached days are left untouched.
+export async function runAgentRooftopsIncremental() {
+  const [daily, voucherDaily] = await Promise.all([
+    runClickhouse(dailyOnlySql()),
+    runClickhouse(voucherDailyOnlySql()),
+  ]);
+  mergeVoucherClaims(daily, voucherDaily, { keyed: true });
+  return { daily };
+}
+
+// Full 120-day window, totals grain only. Caller replaces the cached `totals`
+// array wholesale (it's a window-deduped distinct count, not a merge target).
+export async function runAgentRooftopsTotalsOnly() {
+  const [totals, voucherTotals] = await Promise.all([
+    runClickhouse(totalsOnlySql()),
+    runClickhouse(voucherTotalsOnlySql()),
+  ]);
+  mergeVoucherClaims(totals, voucherTotals, { keyed: false });
+  return { totals };
 }
 
 export { hasClickhouseCreds };

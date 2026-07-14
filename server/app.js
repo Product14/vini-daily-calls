@@ -13,9 +13,34 @@ import { sendReport }     from "./emailClient.js";
 import { getAllDeploymentStatuses, upsertDeploymentStatus } from "./viniStatuses.js";
 import { mapMetabaseRows } from "./viniRooftopMap.js";
 import { sendProgramsReportEmail } from "./programsEmail.js";
-import { runAgentMetrics, hasClickhouseCreds } from "./agentMetrics.js";
-import { runAgentRooftops } from "./agentRooftop.js";
+import { runAgentMetrics, runAgentMetricsIncremental, runAgentMetricsWeekMonth, hasClickhouseCreds } from "./agentMetrics.js";
+import { runAgentRooftops, runAgentRooftopsIncremental, runAgentRooftopsTotalsOnly } from "./agentRooftop.js";
 import { readAgentCache, writeAgentCache, hasCacheDb } from "./agentCache.js";
+
+// Best-effort run log, mirrors what server/roi-cron/runner.cjs writes for
+// sync-live/sync-lifecycle — gives every refresh tier a "last synced" trail
+// without inventing new storage. These 3 tiers are the first callers to log a
+// `source` other than "sync-live"/"sync-lifecycle" — if `source` ever turns
+// out to be constrained (couldn't confirm from here: the local dev Supabase
+// key can't see this table at all, PGRST205, so schema introspection isn't
+// possible outside prod), retry once under the plain, pre-existing-shaped
+// "agents-refresh" name so the run is still logged (tier stays readable via
+// summary.mode) instead of silently vanishing.
+async function logCronRun(source, ok, summary) {
+  const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+  const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+  if (!sbUrl || !sbKey) return;
+  const sb = createSbClient(sbUrl, sbKey);
+  try {
+    const { error } = await sb.from("roi_cron_runs").insert({ source, ok, summary });
+    if (!error) return;
+    console.warn(`[cron] roi_cron_runs insert failed for source="${source}": ${error.message} — retrying with fallback source`);
+    const { error: fallbackError } = await sb.from("roi_cron_runs").insert({ source: "agents-refresh", ok, summary: { ...summary, sourceAttempted: source } });
+    if (fallbackError) console.error(`[cron] roi_cron_runs fallback insert also failed for source="${source}": ${fallbackError.message}`);
+  } catch (err) {
+    console.error(`[cron] roi_cron_runs insert threw for source="${source}": ${err?.message ?? err}`);
+  }
+}
 
 // Cache keys for the precomputed agent-dashboard bundles (see agentCache.js).
 const AGENT_CACHE_KEY_ROOFTOP = "rooftop";
@@ -1371,7 +1396,7 @@ function mergeAgentRows(rows, keyFields) {
 
 let agentsCache = { daily: null, totals: null, fetchedAt: 0, source: null };
 let agentsInflight = null; // single-flight: concurrent callers share one query set
-const AGENTS_TTL_MS = 20 * 60 * 1000; // 20 minutes (matches the dashboards' auto-sync cadence)
+const AGENTS_TTL_MS = 5 * 60 * 1000; // matches the agents-refresh-incremental cron + frontend poll cadence
 
 // Run the rooftop aggregation once and return the bundle. The expensive part
 // (~66s of ClickHouse base_fact scans) lives here; callers persist the result so
@@ -1417,6 +1442,49 @@ function serializeAgents(c) {
 // Compute + persist to the cron-backed cache; refresh the in-process copy too.
 async function refreshRooftopCache() {
   const bundle = await computeRooftopBundle();
+  agentsCache = { ...bundle, fetchedAt: Date.now() };
+  await writeAgentCache(AGENT_CACHE_KEY_ROOFTOP, bundle);
+  return bundle;
+}
+
+// ── Partial refreshes ─────────────────────────────────────────────────────
+// `totals` is a uniqExact(lead_id) distinct count over the whole 120-day
+// window, not a sum of `daily` rows, so it can't be derived from cached daily
+// data (see agentRooftop.js). These two therefore refresh independently:
+// `daily` from a narrow (today + buffer) scan merged into the existing cache,
+// `totals` from the full-window scan replacing the cached totals wholesale.
+// Both fall back to a full compute if nothing is cached yet to merge into.
+function mergeRooftopDaily(cachedDaily, freshDaily) {
+  const keyOf = (r) => `${r.team_id}|${r.agent_type}|${r.day}`;
+  const merged = new Map((cachedDaily || []).map((r) => [keyOf(r), r]));
+  for (const r of freshDaily) merged.set(keyOf(r), r);
+  return [...merged.values()];
+}
+
+async function loadRooftopBase() {
+  if (agentsCache.daily) return agentsCache;
+  const cached = await readAgentCache(AGENT_CACHE_KEY_ROOFTOP);
+  return cached?.payload?.daily ? cached.payload : null;
+}
+
+async function refreshRooftopCacheIncremental() {
+  if (!hasClickhouseCreds()) return null;
+  const base = await loadRooftopBase();
+  if (!base) return refreshRooftopCache();
+  const { daily } = await runAgentRooftopsIncremental();
+  const fresh = daily.filter((r) => !isExcludedAgentRooftop(r));
+  const bundle = { source: base.source, daily: mergeRooftopDaily(base.daily, fresh), totals: base.totals };
+  agentsCache = { ...bundle, fetchedAt: Date.now() };
+  await writeAgentCache(AGENT_CACHE_KEY_ROOFTOP, bundle);
+  return bundle;
+}
+
+async function refreshRooftopCacheTotalsOnly() {
+  if (!hasClickhouseCreds()) return null;
+  const base = await loadRooftopBase();
+  if (!base) return refreshRooftopCache();
+  const { totals } = await runAgentRooftopsTotalsOnly();
+  const bundle = { source: base.source, daily: base.daily, totals: totals.filter((r) => !isExcludedAgentRooftop(r)) };
   agentsCache = { ...bundle, fetchedAt: Date.now() };
   await writeAgentCache(AGENT_CACHE_KEY_ROOFTOP, bundle);
   return bundle;
@@ -3272,16 +3340,63 @@ app.get("/api/cron/sync-lifecycle", async (req, res) => {
 // against Prod-ClickHouse and returns { bundle, meta }. Returns 503 when the
 // CLICKHOUSE_* env vars are not set — the frontend then falls back to the
 // bundled snapshot (public/agent-overall-snapshot.json).
-// 20-minute in-process cache so repeated loads are instant and the live
+// 5-minute in-process cache so repeated loads are instant and the live
 // ClickHouse query (~50s) only re-runs once per window. `?refresh=1` bypasses
-// it (the dashboards' auto-refresh forces a fresh pull every 20 min).
+// it (the dashboards' auto-refresh forces a fresh pull every 5 min, matching
+// the agents-refresh-incremental cron cadence).
 let metricsCache = { payload: null, fetchedAt: 0 };
 let metricsInflight = null; // single-flight: concurrent callers share one query set
-const METRICS_TTL_MS = 20 * 60 * 1000;
+const METRICS_TTL_MS = 5 * 60 * 1000;
 
 // Compute + persist the Overall bundle to the cron-backed cache.
 async function refreshMetricsCache() {
   const payload = await runAgentMetrics();
+  metricsCache = { payload, fetchedAt: Date.now() };
+  await writeAgentCache(AGENT_CACHE_KEY_OVERALL, payload);
+  return payload;
+}
+
+// ── Partial refreshes (mirrors the rooftop split above) ──────────────────
+// day/week/month are each their own uniqExact(lead_id) distinct count over
+// their own window — a week's count isn't derivable from its daily rows either
+// — but each grain's CURRENT (still-open) period is the only one that can
+// still change; earlier periods are closed. So `day` refreshes from a narrow
+// 1-2 day floor on a tight cadence, `week`/`month` stay on the full,
+// unmodified queries (their embedded floors mix in an unrelated sub-scan's
+// window and aren't safely narrowable, see agentMetrics.js), run less often.
+function mergePeriodGrain(cachedGrain, freshGrain) {
+  if (!freshGrain) return cachedGrain;
+  if (!cachedGrain) return freshGrain;
+  const data = { ...cachedGrain.data, ...freshGrain.data };
+  const intent = { ...cachedGrain.intent, ...freshGrain.intent };
+  const periods = [...new Set([...(cachedGrain.periods || []), ...(freshGrain.periods || [])])].sort().reverse();
+  return { periods, data, intent };
+}
+
+async function loadMetricsBase() {
+  if (metricsCache.payload?.bundle) return metricsCache.payload;
+  const cached = await readAgentCache(AGENT_CACHE_KEY_OVERALL);
+  return cached?.payload?.bundle ? cached.payload : null;
+}
+
+async function refreshMetricsCacheIncremental() {
+  if (!hasClickhouseCreds()) return null;
+  const base = await loadMetricsBase();
+  if (!base) return refreshMetricsCache();
+  const { day } = await runAgentMetricsIncremental();
+  const bundle = { ...base.bundle, day: mergePeriodGrain(base.bundle.day, day) };
+  const payload = { bundle, meta: { ...base.meta, generated: new Date().toISOString().slice(0, 10) } };
+  metricsCache = { payload, fetchedAt: Date.now() };
+  await writeAgentCache(AGENT_CACHE_KEY_OVERALL, payload);
+  return payload;
+}
+
+async function refreshMetricsCacheWeekMonthOnly() {
+  if (!hasClickhouseCreds()) return null;
+  const base = await loadMetricsBase();
+  if (!base) return refreshMetricsCache();
+  const { week, month } = await runAgentMetricsWeekMonth();
+  const payload = { bundle: { ...base.bundle, week, month }, meta: base.meta };
   metricsCache = { payload, fetchedAt: Date.now() };
   await writeAgentCache(AGENT_CACHE_KEY_OVERALL, payload);
   return payload;
@@ -3323,41 +3438,71 @@ app.get("/api/metrics", async (req, res) => {
   }
 });
 
-// ── GET /api/cron/agents-refresh — precompute both dashboards into the cache ──
-// Vercel Cron hits this on a schedule (see vercel.json) so the heavy ClickHouse
-// scans run OFF the request path. Both /api/agents and /api/metrics then serve a
-// sub-100ms Postgres lookup. Vercel sends `Authorization: Bearer <CRON_SECRET>`.
-app.get("/api/cron/agents-refresh", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-  const ranAt = new Date().toISOString();
-  if (!hasCacheDb()) {
-    console.warn("[cron/agents-refresh] no cache DB configured (POSTGRES_URL) — precompute skipped");
-  }
-  // Both refreshes share the global ClickHouse concurrency cap internally, so
-  // launching them together just interleaves their queries. allSettled so one
-  // failing tab still persists the other.
-  const [rooftop, overall] = await Promise.allSettled([
-    refreshRooftopCache(),
-    hasClickhouseCreds()
-      ? refreshMetricsCache()
-      : Promise.reject(new Error("ClickHouse creds not set")),
-  ]);
-  const summary = {
-    ranAt,
-    cacheDb: hasCacheDb(),
-    rooftop: rooftop.status === "fulfilled"
-      ? { ok: true, daily: rooftop.value.daily.length, totals: rooftop.value.totals.length, source: rooftop.value.source }
-      : { ok: false, error: String(rooftop.reason?.message ?? rooftop.reason) },
-    overall: overall.status === "fulfilled"
-      ? { ok: true, meta: overall.value.meta }
-      : { ok: false, error: String(overall.reason?.message ?? overall.reason) },
+// ── GET /api/cron/agents-refresh(-incremental|-full) — precompute both
+// dashboards into the cache ──────────────────────────────────────────────
+// Three tiers, all writing the SAME cache the routes below read:
+//   -incremental (every few min): narrow "today" scans, merged into the cache.
+//     Cheap — this is what makes a call/SMS from minutes ago show up fast.
+//   (plain, hourly): full-window `totals`/`week`/`month` grains, replacing
+//     those wholesale — these are window-level distinct counts that can't be
+//     cheaply derived from the daily/day cache, so they still need the full
+//     scan, just less often than before.
+//   -full (weekly): the original full recompute of everything. Insurance
+//     against a historical correction (a dev backfill, late CDC) landing
+//     outside the incremental tier's narrow window — the only path that ever
+//     re-verifies old, already-cached days.
+// Vercel Cron hits these on a schedule (see vercel.json); each run logs to
+// roi_cron_runs so "when did each tier last sync" is always answerable.
+function makeAgentsRefreshRoute(mode, { rooftop: rooftopFn, overall: overallFn }) {
+  return async (req, res) => {
+    const secret = process.env.CRON_SECRET;
+    if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const ranAt = new Date().toISOString();
+    if (!hasCacheDb()) {
+      console.warn(`[cron/agents-refresh:${mode}] no cache DB configured (POSTGRES_URL) — precompute skipped`);
+    }
+    // Both refreshes share the global ClickHouse concurrency cap internally, so
+    // launching them together just interleaves their queries. allSettled so one
+    // failing tab still persists the other.
+    const [rooftop, overall] = await Promise.allSettled([
+      rooftopFn(),
+      hasClickhouseCreds()
+        ? overallFn()
+        : Promise.reject(new Error("ClickHouse creds not set")),
+    ]);
+    const summary = {
+      ranAt,
+      mode,
+      cacheDb: hasCacheDb(),
+      rooftop: rooftop.status === "fulfilled"
+        ? { ok: true, daily: rooftop.value?.daily?.length ?? null, totals: rooftop.value?.totals?.length ?? null, source: rooftop.value?.source ?? null }
+        : { ok: false, error: String(rooftop.reason?.message ?? rooftop.reason) },
+      overall: overall.status === "fulfilled"
+        ? { ok: true, meta: overall.value?.meta ?? null }
+        : { ok: false, error: String(overall.reason?.message ?? overall.reason) },
+    };
+    const ok = rooftop.status === "fulfilled" || overall.status === "fulfilled";
+    if (!ok) console.error(`[cron/agents-refresh:${mode}] both refreshes failed`, summary);
+    await logCronRun(`agents-refresh-${mode}`, ok, summary);
+    return res.status(ok ? 200 : 500).json({ ok, ...summary });
   };
-  const ok = rooftop.status === "fulfilled" || overall.status === "fulfilled";
-  if (!ok) console.error("[cron/agents-refresh] both refreshes failed", summary);
-  return res.status(ok ? 200 : 500).json({ ok, ...summary });
-});
+}
+
+app.get("/api/cron/agents-refresh-incremental", makeAgentsRefreshRoute("incremental", {
+  rooftop: refreshRooftopCacheIncremental,
+  overall: refreshMetricsCacheIncremental,
+}));
+
+app.get("/api/cron/agents-refresh", makeAgentsRefreshRoute("hourly", {
+  rooftop: refreshRooftopCacheTotalsOnly,
+  overall: refreshMetricsCacheWeekMonthOnly,
+}));
+
+app.get("/api/cron/agents-refresh-full", makeAgentsRefreshRoute("full", {
+  rooftop: refreshRooftopCache,
+  overall: refreshMetricsCache,
+}));
 
 export default app;
