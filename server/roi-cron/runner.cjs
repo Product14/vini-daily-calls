@@ -1395,25 +1395,86 @@ const ARR_BUCKET_TO_LIFECYCLE = {
   "Live": "live",
   "Churned": "churn",
 };
+// ARR/lifecycle ledger query — every Vini rooftop's Contract-Initiated → PWS → Onboarding → OB-Live →
+// Live → Churned bucket, from the canonical ARR change-event ledger. Embedded (mirror of
+// db/clickhouse-endpoints/lifecycle.sql) so the serverless bundle carries it. Column aliases match the
+// row mapping below. runClickhouse appends `FORMAT JSONEachRow`, so no trailing semicolon / FORMAT here.
+const LIFECYCLE_SQL = `WITH vini_teams AS (
+  SELECT DISTINCT ace.teamId
+  FROM credit_v2.arrChangeEvents ace
+  INNER JOIN (
+    SELECT DISTINCT product_line_details_id
+    FROM aggregated_data.aggregated_product_line_details
+    WHERE product_line_registry_id = '68ff7a65befb847b44b6d1b8'
+      AND _peerdb_is_deleted = 0
+  ) ids ON ace.entityId = ids.product_line_details_id
+  WHERE ace.entityType = 'product-line'
+    AND ace.arrType    = 'CARR'
+    AND ace.__deleted  = 0
+),
+product_curr AS (
+  SELECT
+    ace.teamId,
+    ace.enterpriseId,
+    ace.entityId                                     AS product_id,
+    argMax(toFloat64OrNull(ace.newArr), ace.eventAt) AS curr_arr,
+    countIf(ace.eventType = 'churn') > 0             AS is_product_churned
+  FROM credit_v2.arrChangeEvents ace
+  INNER JOIN vini_teams vt ON ace.teamId = vt.teamId
+  WHERE ace.entityType = 'product'
+    AND ace.arrType    = 'CARR'
+    AND ace.__deleted  = 0
+  GROUP BY ace.teamId, ace.enterpriseId, ace.entityId
+),
+team_product_agg AS (
+  SELECT
+    teamId,
+    any(enterpriseId)                         AS enterpriseId,
+    sumIf(curr_arr, is_product_churned = 0)   AS contracted_arr,
+    (countIf(is_product_churned = 0) = 0)     AS is_churned
+  FROM product_curr
+  GROUP BY teamId
+)
+SELECT
+  tpa.teamId                                                   AS t,
+  tpa.enterpriseId                                             AS e,
+  COALESCE(apld.enterprise_name, ed.name, tpa.enterpriseId)    AS enterprise_name,
+  COALESCE(apld.team_name, etd.team_name, tpa.teamId)          AS team_name,
+  CASE
+    WHEN tpa.is_churned = 1                                       THEN 'Churned'
+    WHEN apld.live_date IS NOT NULL                               THEN 'Live'
+    WHEN apld.ob_live_date IS NOT NULL AND apld.live_date IS NULL THEN 'OB-Live'
+    WHEN apld.onboarding_date IS NOT NULL                         THEN 'Onboarding'
+    WHEN apld.contracted_date IS NOT NULL                         THEN 'PWS'
+    ELSE 'Contract-Initiated'
+  END                                                          AS arr_bucket,
+  apld.contracted_date,
+  apld.onboarding_date                                         AS ob_start_date,
+  apld.ob_live_date,
+  apld.live_date,
+  apld.churn_date
+FROM team_product_agg tpa
+LEFT JOIN aggregated_data.aggregated_product_line_details apld
+  ON tpa.teamId = apld.team_id
+  AND apld.product_line_registry_id = '68ff7a65befb847b44b6d1b8'
+  AND apld.is_test_account = 0
+  AND apld._peerdb_is_deleted = 0
+LEFT JOIN eventila.enterprise_team_details etd
+  ON tpa.teamId = etd.team_id
+  AND etd.is_test_account = 0
+LEFT JOIN eventila.enterprise_details ed
+  ON tpa.enterpriseId = ed.enterprise_id`;
+
 async function syncLifecycle() {
   const ts = new Date().toISOString();
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
-  const endpoint = process.env.CLICKHOUSE_LIFECYCLE_ENDPOINT;
-  const keyId = process.env.CLICKHOUSE_KEY_ID, keySecret = process.env.CLICKHOUSE_KEY_SECRET;
-  if (!endpoint || !keyId || !keySecret) {
-    throw new Error("Missing CLICKHOUSE_LIFECYCLE_ENDPOINT / CLICKHOUSE_KEY_ID / CLICKHOUSE_KEY_SECRET (set them as Vercel env vars)");
-  }
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}` },
-    body: JSON.stringify({ queryVariables: {}, format: "JSONEachRow" }),
-  });
-  if (!res.ok) throw new Error(`ClickHouse lifecycle ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const text = await res.text();
-  let rows;
-  try { const j = JSON.parse(text); rows = Array.isArray(j) ? j : (j.data ?? [j]); }
-  catch { rows = text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
+  // Query the ARR/lifecycle ledger through the SAME ClickHouse client the rest of the app uses
+  // (CLICKHOUSE_HOST/USER/PASSWORD — already provisioned in prod), NOT a bespoke ClickHouse Cloud
+  // query-endpoint. The endpoint path needed 3 extra secrets (CLICKHOUSE_LIFECYCLE_ENDPOINT/KEY_ID/
+  // KEY_SECRET) that were never set, so this cron errored every morning. credit_v2 + aggregated_data
+  // are reachable by that client (verified). Falls through the shared concurrency cap in agentMetrics.
+  const { runClickhouse } = await import("../agentMetrics.js");
+  const rows = await runClickhouse(LIFECYCLE_SQL);
 
   const patches = [];
   for (const r of rows) {
