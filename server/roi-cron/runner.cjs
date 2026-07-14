@@ -1465,6 +1465,28 @@ LEFT JOIN eventila.enterprise_team_details etd
 LEFT JOIN eventila.enterprise_details ed
   ON tpa.enterpriseId = ed.enterprise_id`;
 
+// Operational-activity rollup — per-team calls + SMS in the last 30 days, from dealer_leads (calls from
+// endcallreports, SMS conversations from conversations). UNION-ALL then aggregate so one pass covers both
+// tables. Orthogonal to lifecycle: answers "is the AI actually working for this rooftop right now" — a
+// contracting/onboarding rooftop can already be handling live traffic.
+const ACTIVITY_SQL = `SELECT
+  t,
+  sum(calls_30d)     AS calls_30d,
+  sum(sms_30d)       AS sms_30d,
+  max(last_activity) AS last_activity_at
+FROM (
+  SELECT teamId AS t, uniqExact(callId) AS calls_30d, 0 AS sms_30d, max(createdAt) AS last_activity
+  FROM dealer_leads.endcallreports
+  WHERE isTestCall = 0 AND createdAt >= today() - 30 AND teamId != ''
+  GROUP BY teamId
+  UNION ALL
+  SELECT teamId AS t, 0 AS calls_30d, count(DISTINCT conversationId) AS sms_30d, max(createdAt) AS last_activity
+  FROM dealer_leads.conversations
+  WHERE type = 'sms' AND createdAt >= today() - 30 AND teamId != ''
+  GROUP BY teamId
+)
+GROUP BY t`;
+
 async function syncLifecycle() {
   const ts = new Date().toISOString();
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
@@ -1498,6 +1520,20 @@ async function syncLifecycle() {
     });
   }
 
+  // Merge the operational-activity rollup onto the same rows (best-effort — a failure here must not
+  // break the lifecycle sync). Epoch/1970 timestamps (no real activity) are nulled.
+  try {
+    const actRows = await runClickhouse(ACTIVITY_SQL);
+    const act = new Map(actRows.map((a) => [String(a.t ?? "").trim(), a]));
+    for (const p of patches) {
+      const a = act.get(p.team_id);
+      p.calls_30d = a ? (Number(a.calls_30d) || 0) : 0;
+      p.sms_30d = a ? (Number(a.sms_30d) || 0) : 0;
+      p.last_activity_at = (a && a.last_activity_at && !/^(0000|1970)/.test(String(a.last_activity_at))) ? a.last_activity_at : null;
+      p.activity_synced_at = ts;
+    }
+  } catch (e) { console.warn("[sync-lifecycle] activity rollup skipped:", String(e).slice(0, 140)); }
+
   for (let i = 0; i < patches.length; i += 500) {
     const { error } = await sb.from("roi_rooftop_config")
       .upsert(patches.slice(i, i + 500), { onConflict: "team_id" });
@@ -1505,7 +1541,8 @@ async function syncLifecycle() {
   }
 
   const byStatus = patches.reduce((acc, p) => { acc[p.lifecycle_status] = (acc[p.lifecycle_status] ?? 0) + 1; return acc; }, {});
-  const summary = { rooftops: patches.length, byStatus };
+  const activeRooftops = patches.filter((p) => (p.calls_30d || 0) + (p.sms_30d || 0) > 0).length;
+  const summary = { rooftops: patches.length, activeRooftops, byStatus };
   await sb.from("roi_cron_runs").insert({ source: "sync-lifecycle", ok: true, summary }).then(() => {}, () => {});
   console.log(`[sync-lifecycle] rooftops=${patches.length}`, JSON.stringify(byStatus));
   return { ranAt: ts, ...summary };

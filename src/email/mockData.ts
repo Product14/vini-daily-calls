@@ -114,6 +114,9 @@ export type RooftopRow = {
   arrBucket?: string;
   /** Lifecycle milestone dates (roi_rooftop_config), all optional/nullable. */
   lifecycleDates?: { contracted?: string | null; onboarding?: string | null; obLive?: string | null; live?: string | null; churn?: string | null };
+  /** Operational activity (last 30d) from ClickHouse — orthogonal to lifecycleStatus. Shows whether the
+   * AI is actually handling calls/SMS, even for a pre-live (onboarding/contracting) rooftop. */
+  activity?: { calls30d: number; sms30d: number; lastActivityAt?: string | null };
   /** True when this row has no roi_live_departments entry (no digest-cell history) — the tracker
    * renders these in the lightweight LifecycleList instead of the digest grid. */
   lifecycleOnly?: boolean;

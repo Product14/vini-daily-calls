@@ -106,7 +106,7 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
       <table className="w-full border-separate" style={{ borderSpacing: 0 }}>
         <thead className="sticky top-0 z-10 bg-surface-background">
           <tr>
-            {["Rooftop", "Enterprise", "CSM / POC", "Stage", "Days in stage", ""].map((h) => (
+            {["Rooftop", "Enterprise", "CSM / POC", "Stage", "Days in stage", "Activity (30d)", ""].map((h) => (
               <th key={h} className="border-b border-border-subtle px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-text-muted">
                 {h}
               </th>
@@ -126,6 +126,26 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
                 </td>
                 <td className="border-b border-border-subtle px-4 py-2.5 text-[12px] tabular text-text-secondary">
                   {days == null ? "—" : `${days}d`}
+                </td>
+                <td className="border-b border-border-subtle px-4 py-2.5">
+                  {r.activity && (r.activity.calls30d + r.activity.sms30d) > 0 ? (
+                    <div className="flex flex-col gap-0.5">
+                      <span
+                        className="inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                        style={r.lifecycleStatus === "churn"
+                          ? { background: "#fef3c7", color: "#92400e" }
+                          : { background: "#dcfce7", color: "#166534" }}
+                        title="The AI is already handling live calls/SMS for this rooftop — before it's marked live"
+                      >
+                        ● {r.lifecycleStatus === "churn" ? "Still active" : "Already active"}
+                      </span>
+                      <span className="text-[11px] tabular text-text-muted">
+                        {r.activity.calls30d.toLocaleString()} calls · {r.activity.sms30d.toLocaleString()} SMS
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-[12px] text-text-muted">—</span>
+                  )}
                 </td>
                 <td className="border-b border-border-subtle px-4 py-2.5 text-right">
                   <div className="flex items-center justify-end gap-1.5">
