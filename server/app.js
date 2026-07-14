@@ -2608,8 +2608,9 @@ app.post("/api/email/roi-event-send-now", async (req, res) => {
     let recipients = (Array.isArray(to) ? to : to ? [to] : []).map((s) => String(s || "").trim()).filter(Boolean);
     if (!recipients.length) recipients = (row.recipients ?? []).map((r) => String(r?.email || "").trim()).filter(Boolean);
     if (!recipients.length) {
-      const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled").eq("team_id", row.team_id);
-      recipients = (recs ?? []).filter((r) => (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", row.team_id);
+      // GATE (r.verified_at): a rooftop only emails recipients a human verified for it (PR #27).
+      recipients = (recs ?? []).filter((r) => r.verified_at && (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
     }
     if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
 
@@ -2670,9 +2671,10 @@ app.post("/api/email/roi-event-generate-send", async (req, res) => {
     const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz, strict: !!eventKey });
     if (!html) return res.status(404).json({ error: "No live data found to render this email for the rooftop." });
 
-    // 2) recipients — the dept's enabled addresses
-    const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled").eq("team_id", teamId);
-    const recipients = (recs ?? []).filter((r) => (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+    // 2) recipients — the dept's enabled, human-verified addresses
+    const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", teamId);
+    // GATE (r.verified_at): a rooftop only emails recipients a human verified for it (PR #27).
+    const recipients = (recs ?? []).filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
     if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
 
     // 3) idempotency: a deterministic event_key + a recent-duplicate guard so a double-click or client
