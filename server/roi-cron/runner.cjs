@@ -1440,6 +1440,8 @@ SELECT
   tpa.enterpriseId                                             AS e,
   COALESCE(apld.enterprise_name, ed.name, tpa.enterpriseId)    AS enterprise_name,
   COALESCE(apld.team_name, etd.team_name, tpa.teamId)          AS team_name,
+  apld.ae_poc_email                                            AS ae_poc,
+  apld.ob_poc_email                                            AS ob_poc,
   CASE
     WHEN tpa.is_churned = 1                                       THEN 'Churned'
     WHEN apld.live_date IS NOT NULL                               THEN 'Live'
@@ -1509,6 +1511,8 @@ async function syncLifecycle() {
       enterprise_id: r.e ?? r.enterprise_id ?? null,
       enterprise_name: r.enterprise_name ?? null,
       team_name: r.team_name ?? null,
+      ae_poc: r.ae_poc || null,
+      ob_poc: r.ob_poc || null,
       arr_bucket,
       lifecycle_status,
       contracted_date: r.contracted_date ?? null,

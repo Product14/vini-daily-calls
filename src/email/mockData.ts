@@ -117,6 +117,10 @@ export type RooftopRow = {
   /** Operational activity (last 30d) from ClickHouse — orthogonal to lifecycleStatus. Shows whether the
    * AI is actually handling calls/SMS, even for a pre-live (onboarding/contracting) rooftop. */
   activity?: { calls30d: number; sms30d: number; lastActivityAt?: string | null };
+  /** Stage-relevant owner names (from ClickHouse POC emails): ae = Account Executive (contracting),
+   * ob = Onboarding owner (onboarding). CSM (live) stays on `csm`. */
+  ae?: string;
+  ob?: string;
   /** True when this row has no roi_live_departments entry (no digest-cell history) — the tracker
    * renders these in the lightweight LifecycleList instead of the digest grid. */
   lifecycleOnly?: boolean;

@@ -60,7 +60,8 @@ type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: 
   weekly_send_dow: number | null; monthly_send_day: number | null;
   lifecycle_status: string | null; arr_bucket: string | null; enterprise_name: string | null; team_name: string | null;
   contracted_date: string | null; onboarding_date: string | null; ob_live_date: string | null; live_date: string | null; churn_date: string | null;
-  calls_30d: number | null; sms_30d: number | null; last_activity_at: string | null };
+  calls_30d: number | null; sms_30d: number | null; last_activity_at: string | null;
+  ae_poc: string | null; ob_poc: string | null };
 
 /** roi_rooftop_config.lifecycle_status → the tracker's LifecycleStatus, defaulting to "live" for
  * rooftops the lifecycle sync hasn't classified yet — never hides an already-visible rooftop. */
@@ -178,7 +179,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     .order("local_date", { ascending: false });
   const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
     (anchorReq ? runsBase.lte("local_date", anchorReq) : runsBase).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at"),
+    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc"),
     supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
     supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
   ]);
@@ -289,6 +290,8 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
         churn: cfg?.churn_date ?? null,
       },
       activity: { calls30d: cfg?.calls_30d ?? 0, sms30d: cfg?.sms_30d ?? 0, lastActivityAt: cfg?.last_activity_at ?? null },
+      ae: nameFromEmail(cfg?.ae_poc) || undefined,
+      ob: nameFromEmail(cfg?.ob_poc) || undefined,
       timezone: cfg?.timezone ?? undefined,
       sendHour: cfg?.digest_send_hour ?? undefined,
       sendMinute: cfg?.digest_send_minute ?? undefined,
@@ -340,7 +343,7 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
   if (!isSupabaseConfigured || !supabase) return [];
   const [cfgRes, liveRes] = await Promise.all([
     supabase.from("roi_rooftop_config")
-      .select("team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at")
+      .select("team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc")
       .in("lifecycle_status", ["onboarding", "contracting", "churn"]),
     supabase.from("roi_live_departments").select("team_id"),
   ]);
@@ -357,6 +360,8 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
       arrBucket: c.arr_bucket ?? undefined,
       lifecycleDates: { contracted: c.contracted_date, onboarding: c.onboarding_date, obLive: c.ob_live_date, live: c.live_date, churn: c.churn_date },
       activity: { calls30d: c.calls_30d ?? 0, sms30d: c.sms_30d ?? 0, lastActivityAt: c.last_activity_at ?? null },
+      ae: nameFromEmail(c.ae_poc) || undefined,
+      ob: nameFromEmail(c.ob_poc) || undefined,
       lifecycleOnly: true,
       csm: nameFromEmail(c.cs_poc) || c.csm_name?.trim() || "Unassigned",
       group: c.enterprise_id ? `Ent ${c.enterprise_id.slice(0, 6)}` : (c.enterprise_name ?? undefined),

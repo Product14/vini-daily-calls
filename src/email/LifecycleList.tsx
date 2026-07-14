@@ -59,6 +59,14 @@ function stageDate(r: RooftopRow): string | null | undefined {
   return r.lifecycleDates?.contracted;
 }
 
+/** The owner most relevant to a rooftop's CURRENT stage: AE while contracting, OB while onboarding,
+ * CSM otherwise. Falls back to the CSM when the stage-specific owner isn't set. */
+function ownerFor(r: RooftopRow): { role: string; name: string } {
+  if (r.lifecycleStatus === "contracting" && r.ae) return { role: "AE", name: r.ae };
+  if (r.lifecycleStatus === "onboarding" && r.ob) return { role: "OB", name: r.ob };
+  return { role: "CSM", name: r.csm || "Unassigned" };
+}
+
 /** "Remove from Emailer" — the actual kill switch for a churned rooftop. Confirms, then hands off
  * to the caller's onStopEmails (which flips is_live=false on every department + all email-type
  * toggles off). Local busy/done state only — the parent's reload picks up the real result. */
@@ -106,7 +114,7 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
       <table className="w-full border-separate" style={{ borderSpacing: 0 }}>
         <thead className="sticky top-0 z-10 bg-surface-background">
           <tr>
-            {["Rooftop", "Enterprise", "CSM / POC", "Stage", "Days in stage", "Activity (30d)", ""].map((h) => (
+            {["Rooftop", "Enterprise", "Owner", "Stage", "Days in stage", "Activity (30d)", ""].map((h) => (
               <th key={h} className="border-b border-border-subtle px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-text-muted">
                 {h}
               </th>
@@ -116,11 +124,17 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
         <tbody>
           {rooftops.map((r) => {
             const days = daysSince(stageDate(r));
+            const owner = ownerFor(r);
             return (
               <tr key={r.team_id ?? r.rooftop_id} className="hover:bg-surface-subtle">
                 <td className="border-b border-border-subtle px-4 py-2.5 text-[13px] font-semibold text-text-primary">{r.name}</td>
                 <td className="border-b border-border-subtle px-4 py-2.5 text-[12px] text-text-secondary">{r.group ?? "—"}</td>
-                <td className="border-b border-border-subtle px-4 py-2.5 text-[12px] text-text-secondary">{r.csm}</td>
+                <td className="border-b border-border-subtle px-4 py-2.5">
+                  <div className="flex flex-col leading-tight">
+                    <span className="text-[9px] font-semibold uppercase tracking-wide text-text-muted">{owner.role}</span>
+                    <span className="text-[12px] text-text-secondary">{owner.name}</span>
+                  </div>
+                </td>
                 <td className="border-b border-border-subtle px-4 py-2.5">
                   <LifecycleBadge status={r.lifecycleStatus ?? "live"} sub={r.arrBucket} />
                 </td>

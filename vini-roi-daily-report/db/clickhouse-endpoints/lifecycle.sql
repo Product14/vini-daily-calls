@@ -44,6 +44,8 @@ SELECT
   tpa.enterpriseId                                                    AS e,
   COALESCE(apld.enterprise_name, ed.name, tpa.enterpriseId)          AS enterprise_name,
   COALESCE(apld.team_name, etd.team_name, tpa.teamId)                AS team_name,
+  apld.ae_poc_email                                                   AS ae_poc,
+  apld.ob_poc_email                                                   AS ob_poc,
   CASE
     WHEN tpa.is_churned = 1                                           THEN 'Churned'
     WHEN apld.live_date IS NOT NULL                                   THEN 'Live'
