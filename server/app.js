@@ -3358,12 +3358,15 @@ async function refreshMetricsCache() {
 
 // ── Partial refreshes (mirrors the rooftop split above) ──────────────────
 // day/week/month are each their own uniqExact(lead_id) distinct count over
-// their own window — a week's count isn't derivable from its daily rows either
-// — but each grain's CURRENT (still-open) period is the only one that can
-// still change; earlier periods are closed. So `day` refreshes from a narrow
-// 1-2 day floor on a tight cadence, `week`/`month` stay on the full,
-// unmodified queries (their embedded floors mix in an unrelated sub-scan's
-// window and aren't safely narrowable, see agentMetrics.js), run less often.
+// their own window — a week's count isn't derivable from its daily rows
+// either. `day` refreshes on a tight cadence via the full, UNMODIFIED
+// day_metrics/day_intent/day_vouchers queries (not narrowed — a live
+// full-vs-narrowed cross-check caught a real undercount bug in `qualified`
+// from doing that, see agentMetrics.js); `week`/`month` stay on their own
+// full, unmodified queries too, just at a slower cadence, since none of the
+// 6 embedded query floors are safe to hand-narrow (verified: textually
+// identical floor literals within one query aren't necessarily semantically
+// interchangeable — one gates an unrelated lead-level lookback).
 function mergePeriodGrain(cachedGrain, freshGrain) {
   if (!freshGrain) return cachedGrain;
   if (!cachedGrain) return freshGrain;

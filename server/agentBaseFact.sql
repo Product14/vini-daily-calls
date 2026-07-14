@@ -273,14 +273,22 @@ sms_buying_intent_actions AS (
 ),
 
 -- canonical: distinct leads that logged a concrete buying-intent action item within the window. Used
--- as the SMS qualification gate. actionItems is lead-scoped (no conversationId/channel), so this
--- credits buying intent at the LEAD level. Windowed to {START} to avoid all-time inflation.
+-- as the SMS *and call* qualification gate (hia, joined below and in ecr_by_call) — a lead can be
+-- qualified by a call/SMS on one day via an action item logged on an EARLIER day, so this floor must
+-- NOT track the caller's {START}: a caller scanning a narrow recent window (e.g. the incremental
+-- refresh, {START} = today-2) would otherwise silently lose the qualifying evidence for any lead whose
+-- action item predates that narrow window, undercounting `qualified` for calls/SMS still inside it
+-- (caught via a live full-vs-incremental cross-check: `qualified_leads` undercounted by up to ~4x on
+-- some rooftops). Independent, fixed floor instead — same pattern as CALLBACK_FLOOR in
+-- callbackAttribution.js. 120d matches the widest current full-window consumer (agentRooftop.js
+-- WINDOW_DAYS), so this is a no-op for every existing full-window query and only changes behavior for
+-- callers with a narrower {START}.
 lead_high_intent_action AS (
     SELECT DISTINCT ai.lead_id AS lead_id, ai.team_id AS team_id
     FROM dealer_leads.actionItems AS ai FINAL
     WHERE ai.__deleted = 0
       AND ifNull(ai.intent, '') IN (SELECT intent FROM sms_buying_intent_actions)
-      AND toDate(ai.createdAt) >= {START}
+      AND toDate(ai.createdAt) >= addDays(today(), -120)
 ),
 
 sms_by_conv AS (
