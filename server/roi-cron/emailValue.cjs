@@ -39,7 +39,7 @@ function digestSignal(m) {
     n(m.appointmentsYesterday) +
     n(m.conversationsHandled) +
     n(m.callsHandled != null ? m.callsHandled : m.conversationsCall) +
-    n(m.totalLeads != null ? m.totalLeads : m.inboundUniqueLeads) +
+    n(m.inboundUniqueLeads) +
     n(m.outboundTotalCalls) +
     n(m.actionItemsTotal)
   );

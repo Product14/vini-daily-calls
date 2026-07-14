@@ -1,12 +1,14 @@
 import { useEffect, useState, type ReactNode, type FormEvent } from "react";
+import { TRACKER_TOKEN_KEY as TOKEN_KEY } from "./dataSource";
 
 // ── Email-tracker access gate ──────────────────────────────────────────────────
 // The tracker shows customer PII, so it sits behind a sign-in. The password is validated on the
 // SERVER (POST /api/tracker/login) and is NOT shipped in this bundle; on success the server returns
-// a short HMAC-signed token we store and re-check via /api/tracker/verify.
-// NOTE: intentionally light for now — it does not yet gate the /api/email/* endpoints or enable
-// Supabase RLS (the anon key can still read roi_* directly). That deeper hardening is deferred.
-const TOKEN_KEY = "vini-tracker-token";
+// a short HMAC-signed token we store and re-check via /api/tracker/verify. The same token now also
+// gates every config-mutation route (recipients*, rooftop-config, csm, …) — see trackerAuthHeaders()
+// in dataSource.ts. NOTE: /api/email/* send routes and Supabase RLS are a separate, still-deferred
+// hardening pass (the anon key can still read roi_* directly).
+
 
 export function TrackerAuthGate({ children }: { children: ReactNode }) {
   const [authed, setAuthed] = useState<boolean | null>(null); // null = still checking a stored token

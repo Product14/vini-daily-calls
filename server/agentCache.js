@@ -17,9 +17,13 @@ import pg from "pg";
 const { Pool } = pg;
 
 function connString() {
+  // Deliberately does NOT fall back to VIN_TRACKER_DATABASE_URL — that's the unrelated VIN-inventory
+  // Supabase project (see server/db.js), and the whole point of this dedicated pool is to never touch
+  // it. It used to sit ahead of POSTGRES_URL in this chain (backwards from that stated intent); harmless
+  // only because VIN_TRACKER_DATABASE_URL happens to be unset in this deployment. If it's ever set for
+  // the unrelated VIN-tracker feature, this cache must not silently start reading/writing that project.
   return (
     process.env.AGENT_CACHE_DATABASE_URL ||
-    process.env.VIN_TRACKER_DATABASE_URL ||
     process.env.POSTGRES_URL ||
     process.env.DATABASE_URL ||
     null

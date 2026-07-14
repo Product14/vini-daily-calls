@@ -620,6 +620,17 @@ export async function loadEventFeed(
   return { rows, hasMore: ch.length === limit };
 }
 
+/** The tracker sign-in token (see TrackerAuthGate) — the server now requires this on every
+ * config-mutation route (recipients*, rooftop-config, rooftop-live-status, csm, missing-rooftop,
+ * config-audit-log). Shared here so every fetch in this module (and sendDigest.ts) can attach it. */
+export const TRACKER_TOKEN_KEY = "vini-tracker-token";
+export function trackerAuthHeaders(): Record<string, string> {
+  try {
+    const token = localStorage.getItem(TRACKER_TOKEN_KEY);
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch { return {}; }
+}
+
 /** Who's making config changes from this browser — attached to every config write so the
  * "History" panel (roi_config_audit_log) can attribute it. Not real auth (the tracker sits
  * behind one shared login, see TrackerAuthGate) — just a cheap, persistent display name. */
@@ -647,7 +658,7 @@ export async function updateRooftopConfig(teamId: string, patch: Partial<Rooftop
   try {
     const res = await fetch("/api/rooftop-config", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
       body: JSON.stringify({ teamId, actor: getActorName(), ...patch }),
     });
     const body = await res.json().catch(() => ({}));
@@ -663,7 +674,7 @@ export type AuditEntry = { field: string; old_value: string | null; new_value: s
 export async function loadConfigAuditLog(teamId: string): Promise<AuditEntry[]> {
   if (!teamId) return [];
   try {
-    const r = await fetch(`/api/config-audit-log?teamId=${encodeURIComponent(teamId)}`, { cache: "no-store" });
+    const r = await fetch(`/api/config-audit-log?teamId=${encodeURIComponent(teamId)}`, { cache: "no-store", headers: trackerAuthHeaders() });
     const j = await r.json().catch(() => ({}));
     if (r.ok && Array.isArray((j as { entries?: unknown }).entries)) return (j as { entries: AuditEntry[] }).entries;
   } catch { /* fall through */ }
@@ -678,7 +689,7 @@ export async function updateRooftopLiveStatus(teamId: string, isLive: boolean): 
   try {
     const res = await fetch("/api/rooftop-live-status", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
       body: JSON.stringify({ teamId, isLive, actor: getActorName() }),
     });
     const body = await res.json().catch(() => ({}));

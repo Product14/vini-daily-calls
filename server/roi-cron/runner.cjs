@@ -29,6 +29,10 @@ const T = require("../../src/email/transactionalTemplates.cjs");
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 // Per-recipient subscription matrix (who gets which type on which channel).
 const { isSubscribed } = require("./subscriptions.cjs");
+// Self-healing rooftop-timezone resolver (live Spyne API, persisted back) — already used by
+// eventRunner.cjs; the digest cron used to hardcode America/New_York for any rooftop with a
+// blank roi_rooftop_config.timezone.
+const { resolveTz } = require("./resolveTz.cjs");
 
 // Digest recipients for a channel, filtered by dept + per-channel master + the subscription matrix.
 // Digests are rooftop summaries → NO role tiering (everyone subscribed gets them).
@@ -72,10 +76,11 @@ async function sendDigestSms(sbc, base, cadence, localDate, smsRecips, body) {
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
-const MAIL_URL = process.env.MAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
+const MAIL_URL = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
 const MAIL_TEMPLATE = process.env.MAIL_TEMPLATE || "email-control-tower-report";
 const MAIL_TOKEN = process.env.MAIL_TOKEN || "";
-const DRY_RUN = process.env.DRY_RUN !== "false";               // default ON
+// "false" and "0" both disable — .env.example documents DRY_RUN=0 to go live.
+const DRY_RUN = !["false", "0"].includes(String(process.env.DRY_RUN ?? "").trim().toLowerCase());  // default ON
 // Domain reputation: stagger mail sends between rooftops to avoid ISP filtering on burst delivery.
 // Default 3s between rooftop sends (~3.5 min for 67 rooftops, completes well within the hourly cron).
 // Set MAIL_SEND_DELAY_MS=0 to disable or tune for faster/slower sends.
@@ -124,9 +129,9 @@ function localToUTC(y, m, day, tz) {
   return new Date(approx.getTime() + (approx.getTime() - asUTC.getTime()));
 }
 function localParts(tz) {
-  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", hour12: false }).formatToParts(new Date());
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", hour12: false }).formatToParts(new Date());
   const g = (t) => parseInt(p.find((x) => x.type === t)?.value ?? "0");
-  const Y = g("year"), M = g("month"), D = g("day"), H = g("hour") === 24 ? 0 : g("hour");
+  const Y = g("year"), M = g("month"), D = g("day"), H = g("hour") === 24 ? 0 : g("hour"), Min = g("minute");
   const pad = (n) => String(n).padStart(2, "0");
   // "Yesterday" (the reported day) with calendar-safe month/year rollover. The old naive `D - 1`
   // produced a malformed `YYYY-MM-00` on the 1st of the month, corrupting the API window every month.
@@ -139,7 +144,7 @@ function localParts(tz) {
   const dateLabel = new Date(yStart.getTime()).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
   // apiEnd stays "today" (exclusive end) → the day window is yesterday..today = the reported day,
   // and MTD is the first of yesterday's month..today.
-  return { localHour: H, localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
+  return { localHour: H, localMinute: Min, localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
     apiStart: localDate, apiEnd: `${Y}-${pad(M)}-${pad(D)}`, apiMonthStart: `${yY}-${pad(yM)}-01` };
 }
 
@@ -714,7 +719,7 @@ async function runOnce() {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
@@ -747,10 +752,12 @@ async function runOnce() {
   // Process ONE rooftop·dept. Independent per row → safe to run many in parallel.
   const processOne = async (L) => {
     const c = cfgOf.get(L.team_id);
-    const tz = c?.timezone || "America/New_York";
     const name = c?.rooftop_name || L.team_id;
     if (c && c.daily_enabled === false) return;
-    const w = RUN_LOCAL_DATE ? { ...windowsForDate(RUN_LOCAL_DATE, tz), localHour: localParts(tz).localHour } : localParts(tz);
+    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
+    const w = RUN_LOCAL_DATE
+      ? { ...windowsForDate(RUN_LOCAL_DATE, tz), localHour: localParts(tz).localHour, localMinute: localParts(tz).localMinute }
+      : localParts(tz);
     const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
     // FAIL LOUD on write failure. The 'queued' upsert runs BEFORE the send, so if the DB write
     // is blocked (e.g. ROI_SUPABASE_SERVICE_KEY is the anon key → RLS denies the insert), this
@@ -801,7 +808,9 @@ async function runOnce() {
       if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; console.log(`  · ${name} [${L.department}] not_sent → ${g.reason} (appts ${m.appointmentsYesterday} · conv ${m.conversationsHandled} · leads ${m.inboundUniqueLeads} · actions ${m.actionItemsTotal})`); return; }
       // step 4 — send-hour gate
       const sendHour = c?.digest_send_hour ?? 7;
-      if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:00 < send ${String(sendHour).padStart(2, "0")}:00)`); return; }
+      const sendMinute = c?.digest_send_minute ?? 0;
+      const beforeSendTime = w.localHour < sendHour || (w.localHour === sendHour && (w.localMinute ?? 0) < sendMinute);
+      if (!IGNORE_HOUR && beforeSendTime) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:${String(w.localMinute ?? 0).padStart(2, "0")} < send ${String(sendHour).padStart(2, "0")}:${String(sendMinute).padStart(2, "0")})`); return; }
       // active campaigns (3rd embedding) — only now, just before render
       const camps = await getCampaigns(L.team_id, L.department, w);
       // Enrichment: upcoming appointments (car + $ + schedule) + top vehicles — sourced from the
@@ -925,8 +934,9 @@ async function backfill(start, end) {
   const tasks = (live ?? []).filter((L) => (cfgOf.get(L.team_id)?.daily_enabled) !== false);
 
   async function worker(L) {
-    const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York";
+    const c = cfgOf.get(L.team_id);
     const name = c?.rooftop_name || L.team_id;
+    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
     const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
     for (const day of days) {
       const w = windowsForDate(day, tz);
@@ -998,8 +1008,8 @@ async function rerender() {
     for (const r of rows) {
       try {
         const m = r.metrics || {};
-        const tz = r.dealer_timezone || "America/New_York";
         const name = nameOf.get(r.team_id) || r.team_id;
+        const tz = await resolveTz(sb, r.team_id, r.dealer_timezone, name);
         const dateLabel = new Date(`${r.local_date}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
         const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
         // re-render to the rooftop's CURRENT template choice (daily switchable; weekly/monthly always v2)
@@ -1035,8 +1045,8 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
   const { data: cfg } = await sb.from("roi_rooftop_config")
     .select("rooftop_name,daily_template,digest_focus").eq("team_id", teamId).maybeSingle();
   const m = row.metrics || {};
-  const tz = row.dealer_timezone || "America/New_York";
   const name = (cfg && cfg.rooftop_name) || teamId;
+  const tz = await resolveTz(sb, teamId, row.dealer_timezone, name);
   const dateLabel = new Date(`${localDate}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
   const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
   // daily honors the requested template (falls back to the rooftop's config); weekly/monthly always v2.
@@ -1055,13 +1065,13 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
 // pass; only the window + cadence + period wording differ. Idempotent: one row per
 // (team, dept, cadence, local_date).
 function localCadenceParts(tz) {
-  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", weekday: "short", hour12: false }).formatToParts(new Date());
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", weekday: "short", hour12: false }).formatToParts(new Date());
   const g = (t) => p.find((x) => x.type === t)?.value;
   const Y = +g("year"), M = +g("month"), D = +g("day");
   // Numeric day-of-week (0=Sun..6=Sat, matches JS Date.getUTCDay() / the weekly_send_dow column)
   // derived from the dealer-local calendar date, not the Intl short-weekday string.
   const dowNum = new Date(Date.UTC(Y, M - 1, D)).getUTCDay();
-  return { Y, M, D, H: (+g("hour")) === 24 ? 0 : +g("hour"), dow: g("weekday"), dowNum };
+  return { Y, M, D, H: (+g("hour")) === 24 ? 0 : +g("hour"), Min: +g("minute"), dow: g("weekday"), dowNum };
 }
 const isoD = (d) => d.toISOString().slice(0, 10);
 // `cfg` (roi_rooftop_config row) is optional — the on-demand "generate now" paths call this
@@ -1074,13 +1084,13 @@ function cadenceWindow(tz, cadence, cfg) {
     const ystr = new Date(Date.UTC(c.Y, c.M - 1, c.D - 1));      // yesterday → row local_date
     const weeklySendDow = cfg?.weekly_send_dow ?? 1; // default Monday
     return { apiStart: isoD(start), apiEnd: isoD(end), apiMonthStart: `${c.Y}-${String(c.M).padStart(2, "0")}-01`,
-      localDate: isoD(ystr), dateLabel: `Week of ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H, sendDue: c.dowNum === weeklySendDow };
+      localDate: isoD(ystr), dateLabel: `Week of ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H, localMinute: c.Min, sendDue: c.dowNum === weeklySendDow };
   }
   // monthly — previous calendar month, sent on the configured day (default the 1st)
   const thisM1 = new Date(Date.UTC(c.Y, c.M - 1, 1)), prevM1 = new Date(Date.UTC(c.Y, c.M - 2, 1));
   const monthlySendDay = cfg?.monthly_send_day ?? 1;
   return { apiStart: isoD(prevM1), apiEnd: isoD(thisM1), apiMonthStart: isoD(prevM1),
-    localDate: isoD(prevM1), dateLabel: prevM1.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }), localHour: c.H, sendDue: c.D === monthlySendDay };
+    localDate: isoD(prevM1), dateLabel: prevM1.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }), localHour: c.H, localMinute: c.Min, sendDue: c.D === monthlySendDay };
 }
 
 // On-demand window for the manual "generate & send now" path. Unlike the scheduled
@@ -1120,7 +1130,7 @@ async function generateAndSendNow(opts) {
 
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_template,digest_focus"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1133,10 +1143,15 @@ async function generateAndSendNow(opts) {
   if (onlyTeam) targets = targets.filter((L) => L.team_id === onlyTeam);
   if (onlyDept) targets = targets.filter((L) => L.department === onlyDept);
 
-  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, errors: 0, details: [] };
+  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, paused: 0, errors: 0, details: [] };
+  const smsFailures = []; // on-demand digest-SMS failures this pass → shared Slack breakage alert (SMS)
 
   const process1 = async (L) => {
-    const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York"; const name = c?.rooftop_name || L.team_id;
+    const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || L.team_id;
+    // Same pause toggle the daily cron honors (roi_rooftop_config.daily_enabled) — a CSM who paused
+    // a rooftop's digest must not have a manual "Generate & send now" bypass that hold.
+    if (cadence === "daily" && c && c.daily_enabled === false) { out.paused++; return; }
+    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
     const w = onDemandWindow(tz, cadence);
     const Dep = L.department === "service" ? "Service" : "Sales";
     const Cad = cadence === "weekly" ? "Weekly" : cadence === "monthly" ? "Monthly" : "Daily";
@@ -1164,6 +1179,15 @@ async function generateAndSendNow(opts) {
       try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
       const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
       const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
+      // Digest SMS companion — the cron sends this alongside the email (subscribedSmsRecips), but this
+      // on-demand path used to skip it entirely, so a manual re-send silently dropped the SMS channel
+      // the rooftop would otherwise have gotten. Before the email dry gate so a held email doesn't block SMS.
+      const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, cadence, c && c.sms_enabled);
+      if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true || forceDry)) {
+        const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
+        const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
+        if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
+      }
       const dry = forceDry || DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
       const sentAt = new Date().toISOString();
@@ -1177,6 +1201,8 @@ async function generateAndSendNow(opts) {
   const POOL = Number(process.env.CRON_POOL || 10); let _i = 0;
   await Promise.all(Array.from({ length: Math.max(1, Math.min(POOL, targets.length || 1)) }, async () => { while (_i < targets.length) { await process1(targets[_i++]); } }));
   console.log(`  on-demand ${cadence} summary:`, JSON.stringify({ ...out, details: undefined }));
+  await postBreakageAlert({ source: `On-demand ${cadence} digest SMS`, failures: smsFailures, sentOk: null, windowLabel: `on-demand ${cadence} generate & send` })
+    .catch((e) => console.warn("[roi-cron] on-demand sms slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
 
@@ -1200,8 +1226,8 @@ async function previewDigestNow(opts) {
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_template,digest_focus").eq("team_id", teamId).maybeSingle(),
   ]);
   const cfg = cfgRes.data || {};
-  const tz = cfg.timezone || "America/New_York";
   const name = cfg.rooftop_name || teamId;
+  const tz = await resolveTz(sb, teamId, cfg.timezone, name);
   const enterpriseId = cfg.enterprise_id || ""; // enterprise_id is on roi_rooftop_config, not roi_live_departments
   const w = onDemandWindow(tz, cadence);
   const Dep = department === "service" ? "Service" : "Sales";
@@ -1231,7 +1257,7 @@ async function runCadence(cadence) {
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,${enabledCol}`),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,${enabledCol}`),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1242,12 +1268,15 @@ async function runCadence(cadence) {
   const IGNORE_HOUR = process.env.IGNORE_SEND_HOUR === "true";
   const IGNORE_DAY = process.env.IGNORE_SEND_DAY === "true"; // testing: ignore the Mon/1st gate
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  // FORCE_RESEND=true → re-send even if a 'sent' row already exists for that date (manual backfill send) — see runOnce.
+  const FORCE_RESEND = process.env.FORCE_RESEND === "true";
   const out = { sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, no_data: 0, before_hour: 0, errors: 0 };
   const smsFailures = []; // genuine weekly/monthly digest-SMS failures this pass → Slack breakage alert (SMS)
 
   const process1 = async (L) => {
-    const c = cfgOf.get(L.team_id); const tz = c?.timezone || "America/New_York"; const name = c?.rooftop_name || L.team_id;
+    const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || L.team_id;
     if (!c || c[enabledCol] !== true) return;
+    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
     const w = cadenceWindow(tz, cadence, c);
     if (!IGNORE_DAY && !w.sendDue) { out.not_due++; return; }
     const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
@@ -1257,7 +1286,7 @@ async function runCadence(cadence) {
     };
     try {
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
-      if (done) { out.already_sent++; return; }
+      if (done && !FORCE_RESEND) { out.already_sent++; return; }
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; return; }
       const day = await getMetrics(L.team_id, L.department, w, "day");
@@ -1271,7 +1300,9 @@ async function runCadence(cadence) {
       const g = guardrailFor(tpl, m);
       if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; return; }
       const sendHour = c?.digest_send_hour ?? 7;
-      if (!IGNORE_HOUR && w.localHour < sendHour) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; return; }
+      const sendMinute = c?.digest_send_minute ?? 0;
+      const beforeSendTime = w.localHour < sendHour || (w.localHour === sendHour && (w.localMinute ?? 0) < sendMinute);
+      if (!IGNORE_HOUR && beforeSendTime) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; return; }
       const camps = await getCampaigns(L.team_id, L.department, w);
       const dollarRate = digestDollarRate(L.department);
       let enr = { appointments: [], topVehicles: [], warmLeads: [] };
@@ -1291,13 +1322,15 @@ async function runCadence(cadence) {
       // Atomic send-claim (at-most-once per customer · dept · cadence · period) — see runOnce for rationale.
       const sentAt = new Date().toISOString();
       const lockId = `cron-${L.team_id}-${L.department}-${cadence}-${w.localDate}`;
-      const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
-        .update({ status: "sending", message_id: lockId })
-        .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate)
-        .is("message_id", null)
-        .select("id");
-      if (claimErr) throw new Error(`send-claim failed: ${claimErr.message}`);
-      if (!claim || !claim.length) { out.already_sent++; return; }
+      if (!FORCE_RESEND) {
+        const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
+          .update({ status: "sending", message_id: lockId })
+          .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate)
+          .is("message_id", null)
+          .select("id");
+        if (claimErr) throw new Error(`send-claim failed: ${claimErr.message}`);
+        if (!claim || !claim.length) { out.already_sent++; return; }
+      }
       const messageId = await sendMailAttributed(emails, subject, html);
       await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || lockId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;

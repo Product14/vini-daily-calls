@@ -3,7 +3,7 @@
 // the run sent in Supabase. After this resolves ok, reload the tracker — the cell
 // flips to "sent" (from the DB) with the stored HTML + recipients viewable.
 import { renderDigestEmail } from "./renderDigest";
-import { getActorName } from "./dataSource";
+import { getActorName, trackerAuthHeaders } from "./dataSource";
 import type { Cadence, DeptKind, DigestMetrics } from "./mockData";
 
 export type SendDigestOpts = {
@@ -30,7 +30,7 @@ export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; 
   try {
     const res = await fetch("/api/recipients", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
       body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled, phone: opts.phone, smsEnabled: opts.smsEnabled, role: opts.role }),
     });
     const body = await res.json().catch(() => ({}));
@@ -43,7 +43,7 @@ export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; 
 
 async function postJson(path: string, body: unknown): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...trackerAuthHeaders() }, body: JSON.stringify(body) });
     const j = await res.json().catch(() => ({}));
     if (!res.ok || !(j as { ok?: boolean }).ok) return { ok: false, error: (j as { error?: string }).error || `Request failed (HTTP ${res.status})` };
     return { ok: true };

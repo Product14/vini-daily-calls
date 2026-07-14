@@ -2329,10 +2329,31 @@ const eventPixel = (id) => pixelTag(`id=${encodeURIComponent(id)}`);
 app.post("/api/email/roi-send-now", async (req, res) => {
   try {
     const { teamId, department, localDate, to, subject, html, override } = req.body ?? {};
-    const recipients = (Array.isArray(to) ? to : [to]).map((s) => String(s || "").trim()).filter(Boolean);
+    const requested = (Array.isArray(to) ? to : [to]).map((s) => String(s || "").trim()).filter(Boolean);
     if (!teamId || !department || !localDate) return res.status(400).json({ error: "teamId, department, localDate required" });
-    if (!recipients.length) return res.status(400).json({ error: "no recipients" });
+    if (!requested.length) return res.status(400).json({ error: "no recipients" });
     if (!html) return res.status(400).json({ error: "no html" });
+
+    // GATE (verified_at): every other send path (the cron, roi-event-send-now, roi-event-generate-send)
+    // only emails a rooftop's human-verified recipients — this route took `to` straight from the request
+    // body with no check at all, the one remaining hole for a cross-rooftop leak via the manual "Send Now"
+    // button / FixDataForm free-text fallback. Enforce the same rule here.
+    const sbUrlV = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKeyV = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrlV || !sbKeyV) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
+    const sbV = createSbClient(sbUrlV, sbKeyV, { auth: { persistSession: false } });
+    const { data: verifiedRecs } = await sbV.from("roi_recipients")
+      .select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", teamId);
+    const verifiedEmails = new Set(
+      (verifiedRecs ?? [])
+        .filter((r) => r.verified_at && (department === "service" ? r.receives_service : r.receives_sales) && r.email_enabled)
+        .map((r) => String(r.email || "").trim().toLowerCase())
+    );
+    const recipients = requested.filter((e) => verifiedEmails.has(e.toLowerCase()));
+    if (!recipients.length) {
+      return res.status(400).json({ error: "None of the requested recipients are verified for this rooftop/department — add + verify them first." });
+    }
+
     // Anti-churn gate: a no-value digest is blocked unless the DANGER override is typed.
     const force = require("./roi-cron/emailValue.cjs").overrideOk(override);
 
@@ -2807,6 +2828,18 @@ app.post("/api/tracker/login", (req, res) => {
 });
 app.post("/api/tracker/verify", (req, res) => res.json({ ok: _trackerValid((req.body ?? {}).token) }));
 
+// Gate for the tracker's config-mutation + PII-adjacent routes (recipients, rooftop-config,
+// rooftop-live-status, csm, missing-rooftop, config-audit-log). Previously the tracker login
+// token was checked ONLY inside /api/tracker/verify — every route below accepted an unauthenticated
+// POST from anyone who found the deployed API base URL. Reuses the same HMAC token the sign-in
+// page already issues; the frontend attaches it via trackerAuthHeaders() (see src/email/dataSource.ts).
+function requireTrackerAuth(req, res, next) {
+  const hdr = String(req.headers.authorization || "");
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7) : "";
+  if (!_trackerValid(token)) return res.status(401).json({ error: "Sign in required." });
+  next();
+}
+
 // A non-deliverable placeholder email for a phone-only recipient. email is roi_recipients'
 // identity (NOT NULL + unique per team), so a phone-only person still needs one; the `.invalid`
 // TLD (RFC 2606) guarantees it never resolves, and the sender skips non-real addresses.
@@ -2820,7 +2853,7 @@ function isPlaceholderEmail(email) {
 
 // ── Add a recipient to a rooftop+department (tracker "Add recipient") ────────
 // Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
-app.post("/api/recipients", async (req, res) => {
+app.post("/api/recipients", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, department, email, name, emailEnabled, phone, smsEnabled, role } = req.body ?? {};
     const dept = department === "service" ? "service" : "sales";
@@ -2873,7 +2906,7 @@ app.post("/api/recipients", async (req, res) => {
 // /api/recipients upsert is keyed on email and would create a new row instead.
 // Any field omitted is left unchanged. Clearing the email is allowed only when a
 // phone remains (then the identity falls back to a phone placeholder).
-app.post("/api/recipients/update", async (req, res) => {
+app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, id, email, phone, name } = req.body ?? {};
     if (!teamId || !id) return res.status(400).json({ error: "teamId + id required" });
@@ -2919,7 +2952,7 @@ app.post("/api/recipients/update", async (req, res) => {
 });
 
 // ── Toggle a recipient's email_enabled (store state, no send) ────────────────
-app.post("/api/recipients/toggle", async (req, res) => {
+app.post("/api/recipients/toggle", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, email, enabled, channel } = req.body ?? {};
     const addr = String(email || "").trim();
@@ -2947,7 +2980,7 @@ app.post("/api/recipients/toggle", async (req, res) => {
 // A recipient is only ever emailed after a human confirms it belongs to THIS rooftop
 // (roi_recipients.verified_at). This is the guarantee against a wrong-rooftop address
 // receiving another rooftop's data. verified=false clears it (re-holds the recipient).
-app.post("/api/recipients/verify", async (req, res) => {
+app.post("/api/recipients/verify", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, email, verified } = req.body ?? {};
     const addr = String(email || "").trim();
@@ -2973,7 +3006,7 @@ const SUB_TYPES = new Set([
   "daily", "weekly", "monthly",
   "post_appointment", "post_conversation", "action_item", "action_item_overdue",
 ]);
-app.post("/api/recipients/subscription", async (req, res) => {
+app.post("/api/recipients/subscription", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, email, type, channel, enabled } = req.body ?? {};
     const addr = String(email || "").trim();
@@ -3030,7 +3063,7 @@ async function logConfigAudit(sb, teamId, actor, patch, before) {
   }
 }
 
-app.post("/api/rooftop-config", async (req, res) => {
+app.post("/api/rooftop-config", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, actor, sendHour, sendMinute, timezone, daily_template, digest_focus, weekly_send_dow, monthly_send_day } = req.body ?? {};
     if (!teamId) return res.status(400).json({ error: "teamId required" });
@@ -3072,7 +3105,7 @@ app.post("/api/rooftop-config", async (req, res) => {
 });
 
 // ── Config change history for the ConfigDrawer's "History" panel ────────────
-app.get("/api/config-audit-log", async (req, res) => {
+app.get("/api/config-audit-log", requireTrackerAuth, async (req, res) => {
   try {
     const teamId = String(req.query.teamId || "").trim();
     if (!teamId) return res.status(400).json({ error: "teamId required" });
@@ -3097,7 +3130,7 @@ app.get("/api/config-audit-log", async (req, res) => {
 // unlike roi_rooftop_config, roi_live_departments is otherwise written directly from the browser
 // (see DryRunToggle) with no audit trail, so this endpoint exists specifically to make the
 // "Remove from Emailer" action attributable.
-app.post("/api/rooftop-live-status", async (req, res) => {
+app.post("/api/rooftop-live-status", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, isLive, actor } = req.body ?? {};
     if (!teamId) return res.status(400).json({ error: "teamId required" });
@@ -3129,7 +3162,7 @@ app.post("/api/rooftop-live-status", async (req, res) => {
 });
 
 // ── Assign a CSM (name + email both required) → set csm_name + enable BOTH depts ──
-app.post("/api/csm", async (req, res) => {
+app.post("/api/csm", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, name, email, actor } = req.body ?? {};
     const nm = String(name || "").trim();
@@ -3158,7 +3191,7 @@ app.post("/api/csm", async (req, res) => {
 });
 
 // ── Report a missing rooftop → email product@spyne.ai + subhav.malhotra@spyne.ai ──
-app.post("/api/missing-rooftop", async (req, res) => {
+app.post("/api/missing-rooftop", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, teamName, departments, csm, csmEmail, note } = req.body ?? {};
     if (!teamId && !teamName) return res.status(400).json({ error: "teamId or teamName required" });
