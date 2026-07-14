@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   NOT_SENT_REASON_CTA,
@@ -43,10 +43,41 @@ function isPlaceholderEmail(email: string | null | undefined): boolean {
   return /@phone\.invalid$/i.test(String(email ?? ""));
 }
 
+/* ── Shareable routing — /email-tracker/:stage/:cadence/:teamId ──────────────
+ * Three levels, each optional and falling back to today's defaults, so a bare "/email-tracker"
+ * is unchanged:
+ *   1. :stage    — lifecycle tab (onboarding/contracting/live/churn), default "live"
+ *   2. :cadence  — daily/weekly/monthly/transactional, only meaningful within "live", default "daily"
+ *   3. :teamId   — when present, deep-links straight to that rooftop's config drawer
+ * No router library — main.jsx's own hand-rolled routing only ever prefix-matches
+ * "/email-tracker", so any depth of sub-path here is invisible to it. History updates via
+ * pushState/popstate directly (see the effects inside EmailerTracker). */
+const TRACKER_STAGES: readonly LifecycleStatus[] = ["onboarding", "contracting", "live", "churn"];
+const TRACKER_CADENCES: readonly (Cadence | "transactional")[] = ["daily", "weekly", "monthly", "transactional"];
+
+function parseTrackerPath(pathname: string): { stage: LifecycleStatus; cadenceOrView: Cadence | "transactional"; teamId: string | null } {
+  const parts = pathname.replace(/^\/email-tracker\/?/, "").split("/").filter(Boolean);
+  const [stageSeg, cadenceSeg, teamSeg] = parts;
+  const stage = (TRACKER_STAGES as readonly string[]).includes(stageSeg) ? (stageSeg as LifecycleStatus) : "live";
+  const cadenceOrView = (TRACKER_CADENCES as readonly string[]).includes(cadenceSeg) ? (cadenceSeg as Cadence | "transactional") : "daily";
+  const teamId = teamSeg ? decodeURIComponent(teamSeg) : null;
+  return { stage, cadenceOrView, teamId };
+}
+function buildTrackerPath(stage: LifecycleStatus, cadenceOrView: Cadence | "transactional", teamId?: string | null): string {
+  const parts = ["", "email-tracker", stage, cadenceOrView];
+  if (teamId) parts.push(encodeURIComponent(teamId));
+  return parts.join("/");
+}
+
 export function EmailerTracker() {
-  const [cadence, setCadence] = useState<Cadence>("daily");
+  const [cadence, setCadence] = useState<Cadence>(() => {
+    const c = parseTrackerPath(window.location.pathname).cadenceOrView;
+    return c === "transactional" ? "daily" : c;
+  });
   // Digests (daily/weekly/monthly cadence cells) vs Transactional (per-event email counts).
-  const [view, setView] = useState<"digests" | "transactional">("digests");
+  const [view, setView] = useState<"digests" | "transactional">(() =>
+    parseTrackerPath(window.location.pathname).cadenceOrView === "transactional" ? "transactional" : "digests"
+  );
   const [eventCounts, setEventCounts] = useState<EventCounts>(new Map());
   const [eventList, setEventList] = useState<{ rooftop: RooftopRow; type: string; label: string; direction?: "inbound" | "outbound" | null } | null>(null);
   const [search, setSearch] = useState("");
@@ -77,7 +108,10 @@ export function EmailerTracker() {
   const [lifecycleRooftops, setLifecycleRooftops] = useState<RooftopRow[]>([]);
   // Which lifecycle-stage tab is active. "live" is the default — the CSM's day-to-day view,
   // unpolluted by onboarding/contracting/churned accounts.
-  const [lifecycleTab, setLifecycleTab] = useState<LifecycleStatus>("live");
+  const [lifecycleTab, setLifecycleTab] = useState<LifecycleStatus>(() => parseTrackerPath(window.location.pathname).stage);
+  // team_id from the initial URL's 3rd route level (e.g. shared straight to a rooftop's config
+  // drawer) — resolved once allRooftopsUnique loads, see the effect near jumpToRooftop below.
+  const pendingTeamIdRef = useRef<string | null>(parseTrackerPath(window.location.pathname).teamId);
   const [today, setToday] = useState<string>("");
   const [source, setSource] = useState<string>("");
   const [sourceKind, setSourceKind] = useState<"supabase" | "unconfigured" | "error" | "">("");
@@ -320,6 +354,41 @@ export function EmailerTracker() {
     setSearchFocused(false);
     setConfigRooftop(r);
   };
+
+  // Resolve a team_id carried in via the URL's 3rd route level (a shared deep link) once the
+  // rooftop universe has loaded — reuses jumpToRooftop so the stage tab self-corrects to
+  // wherever the rooftop actually lives now, same as clicking it from search.
+  useEffect(() => {
+    const pending = pendingTeamIdRef.current;
+    if (!pending || !loadedOnce) return;
+    const row = allRooftopsUnique.find((r) => r.team_id === pending);
+    if (row) jumpToRooftop(row);
+    pendingTeamIdRef.current = null; // resolve once — found or not
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allRooftopsUnique, loadedOnce]);
+
+  // Back/forward navigation — re-derive state from whatever URL the browser just navigated to.
+  // pushState (below) never fires popstate, so this only ever runs for real browser navigation.
+  useEffect(() => {
+    const onPopState = () => {
+      const parsed = parseTrackerPath(window.location.pathname);
+      setLifecycleTab(parsed.stage);
+      if (parsed.cadenceOrView === "transactional") setView("transactional");
+      else { setView("digests"); setCadence(parsed.cadenceOrView); }
+      setConfigRooftop(parsed.teamId ? allRooftopsUnique.find((r) => r.team_id === parsed.teamId) ?? null : null);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [allRooftopsUnique]);
+
+  // Keep the URL in sync with the 3 shareable levels — stage / cadence-or-view / open rooftop.
+  // Deliberately scoped to just these 4 state values (not search/csmFilter/etc.) so typing in the
+  // search box or toggling a filter never spams browser history.
+  useEffect(() => {
+    const cadenceOrView = view === "transactional" ? "transactional" : cadence;
+    const path = buildTrackerPath(lifecycleTab, cadenceOrView, configRooftop?.team_id ?? null);
+    if (window.location.pathname !== path) window.history.pushState(null, "", path);
+  }, [lifecycleTab, view, cadence, configRooftop]);
 
   // "Remove from Emailer" — the real kill switch for a churned rooftop (LifecycleList's Churn-tab
   // action). Tagging a rooftop `churn` only gates the TRACKER's own display/KPIs; it does nothing
