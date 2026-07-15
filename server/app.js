@@ -1294,10 +1294,25 @@ const AGENT_ROOFTOP_EXCLUDE = new Set([
   "khandelwal", "prompt testing", "speed to lead", "approval genie",
   "onboardtest3", "onboardtest4",
   "used inventory",
+  // Churned customers — removed from every tab (not test rooftops, real deals
+  // that ended). Edwards auto group (all rooftops) + Watermark churned.
+  "edwards chevrolet 280", "edwards chevrolet downtown",
+  "edwards ford", "edwards honda", "edwards nissan",
+  "watermark auto group_marion-il",
+]);
+// Rooftops whose SERVICE side alone is churned / never deployed — Sales stays,
+// Service agent rows drop. Bridgeton Auto Mall: sales is live, service isn't.
+const AGENT_ROOFTOP_EXCLUDE_SERVICE = new Set([
+  "bridgeton auto mall",
 ]);
 function isExcludedAgentRooftop(row) {
   const name = String(row?.rooftop_name ?? "").trim().toLowerCase();
-  return AGENT_ROOFTOP_EXCLUDE.has(name);
+  if (AGENT_ROOFTOP_EXCLUDE.has(name)) return true;
+  if (
+    AGENT_ROOFTOP_EXCLUDE_SERVICE.has(name) &&
+    String(row?.agent_type ?? "").trim().toLowerCase().startsWith("service")
+  ) return true;
+  return false;
 }
 
 // Numeric agent-card fields that should be summed when collapsing duplicates.

@@ -1267,7 +1267,7 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
         @keyframes agentSpin { to { transform: rotate(360deg); } }
       `}</style>
 
-      <div style={{ marginBottom: 20, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+      <div style={{ marginBottom: 12, display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: "#111827", margin: 0 }}>
             Conversational AI — Performance Dashboard
@@ -1277,60 +1277,76 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
             roll-up. Date filter applies to every card, chart and the per-day breakdown.
           </p>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, paddingTop: 4 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {fetchedAt && !loading && (
-              <span style={{ fontSize: 12, color: "#16a34a" }}>
-                ● {(dailyRows.length + totalsRows.length).toLocaleString()} rows ({totalsRows.length.toLocaleString()} totals · {dailyRows.length.toLocaleString()} daily) · fetched {new Date(fetchedAt).toLocaleTimeString()}
-              </span>
-            )}
-            {loading && <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching…</span>}
-            <button onClick={() => load(true)} disabled={loading}
-              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: loading ? "#f3f4f6" : "#fff", fontSize: 12, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", color: loading ? "#9ca3af" : "#374151" }}>
-              <span className={loading ? "agent-refreshing" : undefined} style={{ display: "inline-block" }}>↻</span>
-              Refresh
-            </button>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button onClick={() => setScorecard({ team: "", name: "" })}
-               style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #15803d", background: "#15803d", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff" }}>
-              📊 Scorecards →
-            </button>
-            <a href="/email-tracker"
-               style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #4600F2", background: "#4600F2", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
-              ✉ Email tracker →
-            </a>
-            <a href="/programs"
-               style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #111827", background: "#111827", fontSize: 12, fontWeight: 600, cursor: "pointer", color: "#fff", textDecoration: "none" }}>
-              CS Report →
-            </a>
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 4 }}>
+          {fetchedAt && !loading && (
+            <span style={{ fontSize: 12, color: "#16a34a" }}>
+              ● {(dailyRows.length + totalsRows.length).toLocaleString()} rows ({totalsRows.length.toLocaleString()} totals · {dailyRows.length.toLocaleString()} daily) · fetched {new Date(fetchedAt).toLocaleTimeString()}
+            </span>
+          )}
+          {loading && <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching…</span>}
+          <button onClick={() => load(true)} disabled={loading}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: loading ? "#f3f4f6" : "#fff", fontSize: 12, fontWeight: 600, cursor: loading ? "not-allowed" : "pointer", color: loading ? "#9ca3af" : "#374151" }}>
+            <span className={loading ? "agent-refreshing" : undefined} style={{ display: "inline-block" }}>↻</span>
+            Refresh
+          </button>
         </div>
       </div>
 
-      {/* Top-level view toggle — company-wide Overall ("/") vs the per-rooftop
-          view ("/agents") vs the RAG health view ("/rag-analysis") vs the Agent
-          Scorecard ("/scorecard"). Real links (so middle-click / open-in-new-tab
-          work) that navigate within the SPA on plain click. */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        {(["overall", "rooftop", "rag", "scorecard"] as const).map(v => {
-          const active = v === mainView;
-          const label = v === "overall" ? "Overall" : v === "rooftop" ? "Rooftop level" : v === "rag" ? "RAG Analysis" : "Agent Scorecard";
-          const href = v === "overall" ? "/" : v === "rooftop" ? "/agents" : v === "rag" ? "/rag-analysis" : "/scorecard";
-          return (
-            <a key={v} href={href}
-              onClick={e => { if (!e.metaKey && !e.ctrlKey && e.button === 0) { e.preventDefault(); navigateMainView(v); } }}
-              style={{
-                padding: "8px 18px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
-                textDecoration: "none", display: "inline-block",
-                border: `1px solid ${active ? "#111827" : "#e5e7eb"}`,
-                background: active ? "#111827" : "#fff",
-                color: active ? "#fff" : "#374151",
-              }}>
-              {label}
-            </a>
-          );
-        })}
+      {/* Single nav row: the top-level view toggle (Overall / Rooftop level / RAG
+          Analysis / Agent Scorecard — company-wide "/" vs per-rooftop "/agents" vs
+          RAG health "/rag-analysis" vs "/scorecard") on the left, and the links to
+          sibling product flows (Fleet Scorecards, Email Tracker, CS Report) on the
+          right — one div, one row, instead of two separately-placed groups. Real
+          links (so middle-click / open-in-new-tab work) that navigate within the
+          SPA on plain click. The utility links keep an outline-chip style (vs the
+          view tabs' solid-fill) so the two groups stay visually distinguishable
+          within the shared row. "Fleet Scorecards" is named distinctly from the
+          in-page "Agent Scorecard" tab to avoid confusion. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          {(["overall", "rooftop", "rag", "scorecard"] as const).map(v => {
+            const active = v === mainView;
+            const label = v === "overall" ? "Overall" : v === "rooftop" ? "Rooftop level" : v === "rag" ? "RAG Analysis" : "Agent Scorecard";
+            const href = v === "overall" ? "/" : v === "rooftop" ? "/agents" : v === "rag" ? "/rag-analysis" : "/scorecard";
+            return (
+              <a key={v} href={href}
+                onClick={e => { if (!e.metaKey && !e.ctrlKey && e.button === 0) { e.preventDefault(); navigateMainView(v); } }}
+                style={{
+                  padding: "6px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  textDecoration: "none", display: "inline-block",
+                  border: `1px solid ${active ? "#111827" : "#e5e7eb"}`,
+                  background: active ? "#111827" : "#fff",
+                  color: active ? "#fff" : "#374151",
+                }}>
+                {label}
+              </a>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {[
+            { key: "scorecards", icon: "📊", label: "Fleet Scorecards", color: "#15803d", onClick: () => setScorecard({ team: "", name: "" }) },
+            { key: "email", icon: "✉️", label: "Email Tracker", color: "#4600F2", href: "/email-tracker" },
+            { key: "cs", icon: "📈", label: "CS Report", color: "#111827", href: "/programs" },
+          ].map(item => {
+            const chipStyle: CSSProperties = {
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "7px 14px", borderRadius: 8,
+              border: `1.5px solid ${item.color}`, background: "#fff",
+              fontSize: 12.5, fontWeight: 700, color: item.color,
+              cursor: "pointer", textDecoration: "none", lineHeight: 1,
+            };
+            return item.href ? (
+              <a key={item.key} href={item.href} style={chipStyle}>
+                <span>{item.icon}</span>{item.label}<span>→</span>
+              </a>
+            ) : (
+              <button key={item.key} onClick={item.onClick} style={chipStyle}>
+                <span>{item.icon}</span>{item.label}<span>→</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {mainView === "overall" ? (
@@ -1347,10 +1363,13 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
         </div>
       )}
 
-      {/* Agent tabs — "All Agents" rolls every agent_type together for the
-          active rooftop (KPIs sum, table merges per team_id, stage/MRR pick
-          across agents). */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 12, borderBottom: "1px solid #e5e7eb" }}>
+      {/* Agent-type filter — a compact segmented pill (same idiom as the date-range
+          filter below), NOT a second tab strip: it scopes data within the current
+          "Rooftop level" view rather than navigating to a different page, so it's
+          deliberately styled to read as a filter, not more top-level nav.
+          "All Agents" rolls every agent_type together for the active rooftop
+          (KPIs sum, table merges per team_id, stage/MRR pick across agents). */}
+      <div style={{ display: "inline-flex", gap: 2, marginBottom: 10, padding: 3, borderRadius: 10, background: "#f0f1f3", border: "1px solid #e5e7eb" }}>
         {(["All", ...AGENT_TYPES] as ActiveAgent[]).map(t => {
           const active = t === activeAgent;
           const isAllTab = t === "All";
@@ -1364,16 +1383,16 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
               disabled={!loading && totalsRows.length > 0 && !hasData}
               title={!hasData ? `No ${t} rows in current data` : undefined}
               style={{
-                padding: "10px 16px", border: "none", background: "transparent",
-                borderBottom: `2px solid ${active ? color : "transparent"}`,
+                padding: "5px 12px", borderRadius: 7, border: "none",
+                background: active ? "#fff" : "transparent",
+                boxShadow: active ? "0 1px 2px rgba(0,0,0,.08)" : "none",
                 color: active ? color : hasData ? "#374151" : "#d1d5db",
-                fontSize: 13, fontWeight: active ? 700 : 600,
+                fontSize: 12.5, fontWeight: active ? 700 : 600,
                 cursor: hasData ? "pointer" : "not-allowed",
-                marginBottom: -1,
-                transition: "color 0.15s, border-color 0.15s",
+                transition: "background 0.15s, color 0.15s",
               }}
             >
-              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: color, marginRight: 8, verticalAlign: "middle" }} />
+              <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: color, marginRight: 7, verticalAlign: "middle" }} />
               {label}
             </button>
           );
@@ -1381,7 +1400,7 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
       </div>
 
       {/* Filters */}
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 18, background: "#fff", padding: 12, borderRadius: 10, border: "1px solid #e5e7eb" }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12, background: "#fff", padding: "8px 12px", borderRadius: 10, border: "1px solid #e5e7eb" }}>
         <SegmentedControl options={DATE_RANGES} value={dateRange} onChange={setDateRange} />
         {dateRange === "CUSTOM" && (
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -1700,9 +1719,9 @@ function KpiStrip({ agent, totals, liveRooftops, churnedRooftops, inObRooftops, 
   ];
 
   return (
-    <div style={{ marginBottom: 18 }}>
+    <div style={{ marginBottom: 12 }}>
       {/* MAIN — large headline cards (V3 funnel: Touched · Qualified · Appts) */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
         {main.map(c => (
           <KpiCard key={c.label} label={c.label} value={c.value} color={c.color} loading={loading} sub={c.sub} size="main" info={c.info} />
         ))}
@@ -1843,21 +1862,32 @@ function RooftopTable({ agent, rows, expanded, onToggle, loading, sort, onSort, 
                 <td style={{ ...tdStyle, textAlign: "center", color: "#6b7280", fontWeight: 700, userSelect: "none" }}>
                   <span style={{ display: "inline-block", width: 16, transform: isOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}>▶</span>
                 </td>
-                <td style={{ ...tdStyle, whiteSpace: "normal" }} title={`team_id: ${row.key}`}>
-                  <div style={{ fontWeight: 700, color: "#111827" }}>
+                <td
+                  style={{ ...tdStyle, maxWidth: 420 }}
+                  title={row.enterprise && row.enterprise !== row.rooftop
+                    ? `${row.rooftop} · ${row.enterprise} (team_id: ${row.key})`
+                    : `team_id: ${row.key}`}
+                >
+                  {/* Single-line row: rooftop name + stage + day-count never shrink;
+                      the enterprise name (secondary context) is the only part that
+                      truncates when space is tight — collapses what used to be a
+                      wrapped second line into one row, ×119 rooftops. */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                     <span onClick={e => { e.stopPropagation(); onOpenScorecard(row.key, row.rooftop); }}
                       title="Open rooftop scorecard"
-                      style={{ color: "#1d4ed8", cursor: "pointer", borderBottom: "1px dashed #93c5fd" }}>
+                      style={{ flexShrink: 0, fontWeight: 700, color: "#1d4ed8", cursor: "pointer", borderBottom: "1px dashed #93c5fd" }}>
                       {row.rooftop} 📊
                     </span>
-                    <StagePill stage={row.stage} />
-                    <span style={{ marginLeft: 8, fontSize: 11, color: "#6b7280", fontWeight: 500 }}>
-                      ({row.daily.length} day{row.daily.length === 1 ? "" : "s"})
+                    {row.enterprise && row.enterprise !== row.rooftop && (
+                      <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "#9ca3af" }}>
+                        · {row.enterprise}
+                      </span>
+                    )}
+                    <span style={{ flexShrink: 0 }}><StagePill stage={row.stage} /></span>
+                    <span style={{ flexShrink: 0, fontSize: 11, color: "#6b7280", fontWeight: 500 }}>
+                      ({row.daily.length}d)
                     </span>
                   </div>
-                  {row.enterprise && row.enterprise !== row.rooftop && (
-                    <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>{row.enterprise}</div>
-                  )}
                 </td>
                 <td style={{ ...tdStyle, textAlign: "right", color: row.mrr != null ? "#0369a1" : "#9ca3af", fontWeight: row.mrr != null ? 600 : 400 }}>
                   {row.mrr != null ? fmtCurrency(row.mrr) : "—"}
@@ -1995,7 +2025,7 @@ function StagePill({ stage }: { stage: string | null }) {
   const c = colorMap[stage] ?? { bg: "#f3f4f6", fg: "#374151" };
   return (
     <span style={{
-      marginLeft: 8, padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 700,
+      padding: "2px 7px", borderRadius: 999, fontSize: 10, fontWeight: 700,
       background: c.bg, color: c.fg, textTransform: "uppercase", letterSpacing: 0.4,
       verticalAlign: "middle",
     }}>
@@ -2269,10 +2299,10 @@ function SegmentedControl<T extends string>({ options, value, onChange }: {
 }
 
 const thStyle: CSSProperties = {
-  padding: "10px 12px", fontSize: 11, fontWeight: 700, color: "#6b7280",
+  padding: "7px 12px", fontSize: 11, fontWeight: 700, color: "#6b7280",
   textTransform: "uppercase", letterSpacing: 0.4, borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap",
 };
-const tdStyle: CSSProperties = { padding: "8px 12px", fontSize: 13, color: "#374151", whiteSpace: "nowrap" };
+const tdStyle: CSSProperties = { padding: "6px 12px", fontSize: 13, color: "#374151", whiteSpace: "nowrap" };
 const dayCellStyle: CSSProperties = { padding: "3px 12px", fontSize: 12, color: "#4b5563", whiteSpace: "nowrap", lineHeight: 1.3 };
 
 // Small ⓘ glyph with a tooltip on hover/focus. Uses React state for visibility
@@ -2339,7 +2369,7 @@ function KpiCard({ label, value, color, loading, sub, size = "main", info }: {
   return (
     <div style={{
       background: "#fff", borderRadius: 12,
-      padding: isMain ? "16px 22px" : "10px 14px",
+      padding: isMain ? "12px 18px" : "8px 12px",
       boxShadow: isMain ? "0 1px 3px rgba(0,0,0,0.06)" : "0 1px 2px rgba(0,0,0,0.04)",
       border: "1px solid #e5e7eb",
       flex: isMain ? "1 1 220px" : "1 1 150px",
