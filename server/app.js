@@ -3460,10 +3460,16 @@ app.get("/api/cron/sync-lifecycle", async (req, res) => {
 // fresh by reporting-vini's sync-reports GitHub Action (every 30 min). On
 // 2026-07-14 that job silently stalled for ~2 days (an oversized backlog OOM-
 // killed every run before the watermark advanced) — nobody was paged because
-// the failure was outside this app. This watchdog closes that gap: it reads
-// sync_state + the newest agent_daily day and pings #vini-alerts-and-monitoring
-// when the pipeline is stuck, so a stall is caught in ~1 hour instead of days.
-// Runs hourly (Vercel cron). Guarded by CRON_SECRET.
+// the failure was outside this app. This watchdog closes that gap: it fetches
+// reporting-vini's /api/sync-health (sync_state + newest agent_daily day) and
+// pings #vini-alerts-and-monitoring when the pipeline is stuck, so a stall is
+// caught in ~1 hour instead of days. Runs hourly (Vercel cron), guarded by
+// CRON_SECRET.
+//   Why not read Supabase directly: sync_state / agent_daily sit behind RLS, and
+//   this app's ROI key is a publishable key that silently reads ZERO rows there
+//   (no error) — which produced a FALSE "nullh stale" page. reporting-vini's
+//   service-role key can read them, so the freshness probe lives THERE and we
+//   fetch it (same REPORTING_CRON_SECRET path the Fleet Scorecard already uses).
 //   Thresholds (env-overridable): SYNC_STALE_HOURS (default 3) — no successful
 //   run in this long; SYNC_DATA_STALE_DAYS (default 2) — newest aggregated day
 //   is this far behind today (the user-visible "reports frozen" symptom).
@@ -3472,35 +3478,45 @@ app.get("/api/cron/sync-health", async (req, res) => {
   if (secret && req.headers.authorization !== `Bearer ${secret}`) {
     return res.status(401).json({ error: "unauthorized" });
   }
+  const alert = async (title, detail) => {
+    const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+    await postSystemicAlert({ source: "Reporting sync", title, detail, windowLabel: "hourly sync-health cron" }).catch((e) => console.error("[sync-health] alert post failed:", e?.message));
+  };
   try {
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ ok: false, error: "ROI_SUPABASE_URL/KEY not set" });
-    const sb = createSbClient(sbUrl, sbKey);
-
     const staleHours = Number(process.env.SYNC_STALE_HOURS) || 3;
     const dataStaleDays = Number(process.env.SYNC_DATA_STALE_DAYS) || 2;
 
-    const [{ data: state, error: e1 }, { data: latest, error: e2 }] = await Promise.all([
-      sb.from("sync_state").select("watermark,last_run_at,last_status,error,rows_synced").eq("id", 1).maybeSingle(),
-      sb.from("agent_daily").select("activity_day").order("activity_day", { ascending: false }).limit(1),
-    ]);
-    // A watchdog that can't read its target must not fail silently — that's the very failure mode it
-    // guards against. Alert on the read failure itself rather than returning a misleading "healthy".
-    if (e1 || e2) {
-      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
-      const detail = `sync-health watchdog could not read sync_state/agent_daily: ${(e1 || e2)?.message}`;
-      await postSystemicAlert({ source: "Reporting sync", title: "watchdog read FAILED", detail, windowLabel: "hourly sync-health cron" }).catch(() => {});
-      return res.status(500).json({ ok: false, error: detail });
+    // Fetch the freshness probe from reporting-vini (the only place with a key that can read sync_state).
+    let h;
+    try {
+      const url = `${REPORTING_API_BASE}/api/sync-health`;
+      const resp = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(15000), redirect: "follow" });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      h = await resp.json();
+    } catch (e) {
+      // Can't reach the probe → freshness UNKNOWN. This is a DISTINCT failure from "aggregate is stale"
+      // (and a real problem in its own right), so it gets its own honest message — never the misleading
+      // "stale nullh" page. A watchdog that can't see must say so, not invent a verdict.
+      const detail = `sync-health watchdog could not reach reporting-vini /api/sync-health: ${String(e?.message ?? e)}. Reporting freshness is UNKNOWN this pass — verify the reporting-vini deployment and REPORTING_CRON_SECRET.`;
+      await alert("watchdog PROBE UNREACHABLE — freshness unknown", detail);
+      return res.status(502).json({ ok: false, error: detail });
+    }
+
+    // Guard against a malformed/empty probe: if the core fields are missing, treat as "unknown", not
+    // "stale". (This is the exact class of bug that fired the first false page — null timestamps read as
+    // infinitely old. We now refuse to call it stale without real values.)
+    if (!h || h.ok !== true || !h.lastRunAt || !h.maxActivityDay) {
+      const detail = `reporting-vini /api/sync-health returned no usable data (lastRunAt=${h?.lastRunAt ?? "null"}, maxActivityDay=${h?.maxActivityDay ?? "null"}, err=${h?.error ?? "none"}). Freshness UNKNOWN — likely a reporting-vini config/read issue, NOT a confirmed stall.`;
+      await alert("watchdog PROBE EMPTY — freshness unknown", detail);
+      return res.status(200).json({ ok: false, unknown: true, probe: h ?? null });
     }
 
     const now = Date.now();
-    const lastRunAt = state?.last_run_at ? new Date(state.last_run_at).getTime() : 0;
-    const runAgeHours = lastRunAt ? (now - lastRunAt) / 3_600_000 : Infinity;
-    const maxDay = latest && latest[0] ? String(latest[0].activity_day) : null;
+    const runAgeHours = (now - new Date(h.lastRunAt).getTime()) / 3_600_000;
+    const maxDay = String(h.maxActivityDay);
     const todayUTC = new Date().toISOString().slice(0, 10);
     const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000);
-    const dataAgeDays = maxDay ? dayDiff(todayUTC, maxDay) : Infinity;
+    const dataAgeDays = dayDiff(todayUTC, maxDay);
 
     const runStale = runAgeHours > staleHours;
     const dataStale = dataAgeDays > dataStaleDays;
@@ -3508,19 +3524,17 @@ app.get("/api/cron/sync-health", async (req, res) => {
 
     const status = {
       healthy, runStale, dataStale,
-      runAgeHours: Number.isFinite(runAgeHours) ? Math.round(runAgeHours * 10) / 10 : null,
-      dataAgeDays: Number.isFinite(dataAgeDays) ? dataAgeDays : null,
-      lastRunAt: state?.last_run_at ?? null, lastStatus: state?.last_status ?? null,
-      watermark: state?.watermark ?? null, maxActivityDay: maxDay, lastError: state?.error ?? null,
+      runAgeHours: Math.round(runAgeHours * 10) / 10, dataAgeDays,
+      lastRunAt: h.lastRunAt, lastStatus: h.lastStatus ?? null,
+      watermark: h.watermark ?? null, maxActivityDay: maxDay, lastError: h.lastError ?? null,
     };
 
     if (!healthy) {
-      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
       const reasons = [];
-      if (runStale) reasons.push(`no successful sync in ${status.runAgeHours}h (threshold ${staleHours}h; last_run_at=${state?.last_run_at}, last_status=${state?.last_status})`);
-      if (dataStale) reasons.push(`newest aggregated day is ${status.dataAgeDays}d behind (agent_daily max=${maxDay}, today=${todayUTC})`);
+      if (runStale) reasons.push(`no successful sync in ${status.runAgeHours}h (threshold ${staleHours}h; last_run_at=${h.lastRunAt}, last_status=${h.lastStatus})`);
+      if (dataStale) reasons.push(`newest aggregated day is ${dataAgeDays}d behind (agent_daily max=${maxDay}, today=${todayUTC})`);
       const detail = `${reasons.join(" · ")}. The console, daily digests, and Fleet Scorecard read this aggregate — they are serving STALE numbers until the sync-reports job recovers. Check reporting-vini Actions → "Sync reporting aggregate".`;
-      await postSystemicAlert({ source: "Reporting sync", title: "aggregate is STALE — sync-reports stalled", detail, windowLabel: "hourly sync-health cron" });
+      await alert("aggregate is STALE — sync-reports stalled", detail);
       console.warn(`[sync-health] UNHEALTHY: ${reasons.join(" | ")}`);
       return res.status(200).json({ ok: true, alerted: true, ...status });
     }
