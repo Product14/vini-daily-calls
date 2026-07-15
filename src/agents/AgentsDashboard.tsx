@@ -926,6 +926,19 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [totalsRows, activeAgent, stageFilter, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
+  // team_id (rowKey) -> oem_brands, from the FULL unfiltered totalsRows. Needed
+  // because sheet-mode re-seeds zero-activity rooftops straight from the sheet
+  // below (bypassing filteredTotals, which already applies the brand filter) —
+  // this lookup lets that seeding loop apply the same brand filter.
+  const oemBrandsByRowKey = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const r of totalsRows) {
+      const key = rowKey(r);
+      if (!map.has(key) && r.oem_brands?.length) map.set(key, r.oem_brands);
+    }
+    return map;
+  }, [totalsRows]);
+
   // Filter predicate shared by both daily and totals pipelines (minus the date
   // check, which only applies to daily — totals are all-time per Metabase scope).
   // Stage check uses displayStage so the filter matches whatever the user sees
@@ -1087,6 +1100,10 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
         // Same filter predicate as Metabase rows, but on the sheet's fields.
         if (stageFilter.size > 0 && !stageFilter.has(entry.stage || "")) continue;
         if (selectedRooftops.size > 0 && !selectedRooftops.has(key)) continue;
+        if (oemFilter.size > 0) {
+          const brands = oemBrandsByRowKey.get(key)?.length ? oemBrandsByRowKey.get(key)! : [UNCLASSIFIED_BRAND];
+          if (!brands.some(b => oemFilter.has(b))) continue;
+        }
         const q = search.trim().toLowerCase();
         if (q) {
           const hay = `${entry.rooftopName} ${entry.enterpriseName}`.toLowerCase();
@@ -1123,7 +1140,7 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
     }
     return out;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredTotals, filteredDaily, rooftopToStage, accountsByTeamAgent, accountsByNameAgent, mrrRange, dataMode, dateRange, sheetEntries, activeAgent, stageFilter, selectedRooftops, search]);
+  }, [filteredTotals, filteredDaily, rooftopToStage, accountsByTeamAgent, accountsByNameAgent, mrrRange, dataMode, dateRange, sheetEntries, activeAgent, stageFilter, selectedRooftops, search, oemFilter, oemBrandsByRowKey]);
 
   // Sum each rooftop's already-correctly-collapsed `total` into the KPI strip
   // figure. Doing it here (rather than re-summing daily / totals rows) keeps
