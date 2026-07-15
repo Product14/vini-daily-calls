@@ -1533,6 +1533,91 @@ app.get("/api/agents", async (req, res) => {
   }
 });
 
+// ─── GET /api/scorecard — LIVE per-rooftop Fleet Scorecard data ──────────────
+// Powers public/fleet-scorecards.html. Same-origin proxy: the static scorecard
+// can't call reporting-vini directly (cross-origin + it needs the server-held
+// REPORTING_CRON_SECRET), so this route server-side fetches /api/reports for the
+// three windows (7d / 30d / all-time) and maps the canonical response into the
+// exact per-agent slice shape the scorecard renders. Replaces the previously
+// baked-in (and quickly stale) `scdata` snapshot — the numbers now always match
+// the Vini console live.
+//   GET /api/scorecard?team=<teamId>
+const REPORTING_API_BASE = process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app";
+const REPORTING_AUTH = process.env.REPORTING_CRON_SECRET || process.env.CRON_SECRET || process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
+
+// Map ONE canonical /api/reports agent object → the scorecard's flat slice.
+function scorecardSlice(a) {
+  if (!a) return null;
+  const lf = a.leadFunnel || {}, m = a.metrics || {}, r = a.report || {};
+  const cf = r.callFlow || {};
+  const num = (x) => Number(x || 0);
+  const qual = num(lf.qualified), booked = num(lf.appt), conv = num(lf.connected);
+  return {
+    leads: num(lf.contacted), conv, qual, booked,
+    assisted: num(m.appointmentsAssisted),
+    calls: num(m.calls), sms: num(m.smsSent),
+    talkH: Math.round((num(m.talkMinutes) / 60) * 10) / 10,
+    transfers: num(cf.transferred), tfail: num(cf.transfersFailed), callbacks: num(cf.callbacks),
+    // Turn/close rates are computed canonically (qualified÷conversations, AI-booked÷qualified) to match
+    // the console + the old baked scorecard — NOT report.turnRate, which uses a different denominator.
+    turnRate: conv ? Math.round((100 * qual) / conv) : 0,
+    closeRate: qual ? Math.round((100 * booked) / qual) : 0,
+    callFlow: {
+      total: num(cf.total), answered: num(cf.answered), missed: num(cf.missed),
+      transferred: num(cf.transferred), transfersFailed: num(cf.transfersFailed),
+      callbacks: num(cf.callbacks), lost: num(cf.lost), handledByAI: num(cf.handledByAI),
+    },
+    // report.queries is already [{label,total,resolved}] → the scorecard's [[label,total,resolved]].
+    intent: Array.isArray(r.queries) ? r.queries.map((q) => [q.label, num(q.total), num(q.resolved)]) : [],
+    // outbound campaign outcomes [{label,value}] → [[label,value]].
+    outcomes: Array.isArray(r.outcomes) ? r.outcomes.map((o) => [o.label, num(o.value)]) : [],
+    // named follow-ups [{name,intent,due,priority}] → [[name,intent,due,pri]] (absent today → []).
+    followUps: Array.isArray(r.followUps) ? r.followUps.map((f) => [f.name || f[0], f.intent || f[1], f.due || f[2], f.priority || f[3]]) : [],
+  };
+}
+
+// Fetch one window of /api/reports and reshape into { start,end,tz,hasData,degraded,err, agents:{...4 slices} }.
+async function scorecardWindow(teamId, query) {
+  const url = `${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&${query}`;
+  const empty = { sales_ib: null, sales_ob: null, service_ib: null, service_ob: null };
+  try {
+    const resp = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(20000), redirect: "follow" });
+    if (!resp.ok) return { start: null, end: null, tz: null, hasData: false, degraded: false, err: `HTTP ${resp.status}`, agents: empty };
+    const j = await resp.json();
+    const agents = { ...empty };
+    for (const a of (j.agents || [])) {
+      const dept = /sales/i.test(a.dept) ? "sales" : /service/i.test(a.dept) ? "service" : null;
+      const dir = /out/i.test(a.dir) ? "ob" : /in/i.test(a.dir) ? "ib" : null;
+      if (dept && dir) agents[`${dept}_${dir}`] = scorecardSlice(a);
+    }
+    return { start: j.start ?? null, end: j.end ?? null, tz: j.timezone ?? null, hasData: !!j.hasData, degraded: !!j.degraded, err: null, agents };
+  } catch (e) {
+    return { start: null, end: null, tz: null, hasData: false, degraded: false, err: String(e?.message ?? e).slice(0, 120), agents: empty };
+  }
+}
+
+app.get("/api/scorecard", async (req, res) => {
+  const teamId = req.query.team;
+  if (!teamId) return res.status(400).json({ error: "team query param (teamId) is required" });
+  try {
+    // All-time uses an explicit floor (bucket=all is capped to 30d server-side, so it must be dates).
+    const today = new Date();
+    const end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)).toISOString().slice(0, 10);
+    const [w7, w30, wall] = await Promise.all([
+      scorecardWindow(teamId, "bucket=last7"),
+      scorecardWindow(teamId, "bucket=last30"),
+      scorecardWindow(teamId, `start=2020-01-01&end=${end}`),
+    ]);
+    // Short edge cache: the underlying aggregate refreshes every 30 min, so a few minutes stale is fine.
+    res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=1800");
+    return res.json({ teamId, generatedAt: new Date().toISOString(), win: { "7d": w7, "30d": w30, "all": wall } });
+  } catch (err) {
+    console.error("GET /api/scorecard error:", err?.message);
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(500).json({ error: err?.message ?? "Failed to load scorecard data" });
+  }
+});
+
 // ─── GET /api/agent-stages — Rooftop → stage mapping (Google Sheet CSVs) ─────
 //
 // Config: STAGES_SHEET_URLS env var holds a JSON object mapping stage name to
