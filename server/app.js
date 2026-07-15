@@ -3455,6 +3455,82 @@ app.get("/api/cron/sync-lifecycle", async (req, res) => {
   }
 });
 
+// ── GET /api/cron/sync-health — WATCHDOG for the reporting aggregate ─────────
+// The console, digests, and Fleet Scorecard all read agent_daily, which is kept
+// fresh by reporting-vini's sync-reports GitHub Action (every 30 min). On
+// 2026-07-14 that job silently stalled for ~2 days (an oversized backlog OOM-
+// killed every run before the watermark advanced) — nobody was paged because
+// the failure was outside this app. This watchdog closes that gap: it reads
+// sync_state + the newest agent_daily day and pings #vini-alerts-and-monitoring
+// when the pipeline is stuck, so a stall is caught in ~1 hour instead of days.
+// Runs hourly (Vercel cron). Guarded by CRON_SECRET.
+//   Thresholds (env-overridable): SYNC_STALE_HOURS (default 3) — no successful
+//   run in this long; SYNC_DATA_STALE_DAYS (default 2) — newest aggregated day
+//   is this far behind today (the user-visible "reports frozen" symptom).
+app.get("/api/cron/sync-health", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  try {
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ ok: false, error: "ROI_SUPABASE_URL/KEY not set" });
+    const sb = createSbClient(sbUrl, sbKey);
+
+    const staleHours = Number(process.env.SYNC_STALE_HOURS) || 3;
+    const dataStaleDays = Number(process.env.SYNC_DATA_STALE_DAYS) || 2;
+
+    const [{ data: state, error: e1 }, { data: latest, error: e2 }] = await Promise.all([
+      sb.from("sync_state").select("watermark,last_run_at,last_status,error,rows_synced").eq("id", 1).maybeSingle(),
+      sb.from("agent_daily").select("activity_day").order("activity_day", { ascending: false }).limit(1),
+    ]);
+    // A watchdog that can't read its target must not fail silently — that's the very failure mode it
+    // guards against. Alert on the read failure itself rather than returning a misleading "healthy".
+    if (e1 || e2) {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      const detail = `sync-health watchdog could not read sync_state/agent_daily: ${(e1 || e2)?.message}`;
+      await postSystemicAlert({ source: "Reporting sync", title: "watchdog read FAILED", detail, windowLabel: "hourly sync-health cron" }).catch(() => {});
+      return res.status(500).json({ ok: false, error: detail });
+    }
+
+    const now = Date.now();
+    const lastRunAt = state?.last_run_at ? new Date(state.last_run_at).getTime() : 0;
+    const runAgeHours = lastRunAt ? (now - lastRunAt) / 3_600_000 : Infinity;
+    const maxDay = latest && latest[0] ? String(latest[0].activity_day) : null;
+    const todayUTC = new Date().toISOString().slice(0, 10);
+    const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000);
+    const dataAgeDays = maxDay ? dayDiff(todayUTC, maxDay) : Infinity;
+
+    const runStale = runAgeHours > staleHours;
+    const dataStale = dataAgeDays > dataStaleDays;
+    const healthy = !runStale && !dataStale;
+
+    const status = {
+      healthy, runStale, dataStale,
+      runAgeHours: Number.isFinite(runAgeHours) ? Math.round(runAgeHours * 10) / 10 : null,
+      dataAgeDays: Number.isFinite(dataAgeDays) ? dataAgeDays : null,
+      lastRunAt: state?.last_run_at ?? null, lastStatus: state?.last_status ?? null,
+      watermark: state?.watermark ?? null, maxActivityDay: maxDay, lastError: state?.error ?? null,
+    };
+
+    if (!healthy) {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      const reasons = [];
+      if (runStale) reasons.push(`no successful sync in ${status.runAgeHours}h (threshold ${staleHours}h; last_run_at=${state?.last_run_at}, last_status=${state?.last_status})`);
+      if (dataStale) reasons.push(`newest aggregated day is ${status.dataAgeDays}d behind (agent_daily max=${maxDay}, today=${todayUTC})`);
+      const detail = `${reasons.join(" · ")}. The console, daily digests, and Fleet Scorecard read this aggregate — they are serving STALE numbers until the sync-reports job recovers. Check reporting-vini Actions → "Sync reporting aggregate".`;
+      await postSystemicAlert({ source: "Reporting sync", title: "aggregate is STALE — sync-reports stalled", detail, windowLabel: "hourly sync-health cron" });
+      console.warn(`[sync-health] UNHEALTHY: ${reasons.join(" | ")}`);
+      return res.status(200).json({ ok: true, alerted: true, ...status });
+    }
+    return res.status(200).json({ ok: true, alerted: false, ...status });
+  } catch (err) {
+    console.error("GET /api/cron/sync-health error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "sync-health check failed" });
+  }
+});
+
 // ── GET /api/metrics — "Overall" agent-performance bundle (live ClickHouse) ──
 // Powers the Overall view on /agents. Runs the 6 day/week/month aggregations
 // against Prod-ClickHouse and returns { bundle, meta }. Returns 503 when the
