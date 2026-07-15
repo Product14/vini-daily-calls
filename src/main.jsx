@@ -21,12 +21,16 @@ function Router() {
   if (path === "/programs" || path.startsWith("/programs/")) {
     return <ProgramsDashboard />;
   }
-  // Two faces of the agent dashboard, split by route:
-  //   "/"       → Overall (company-wide, agent-type level)
-  //   "/agents" → Rooftop level (per-rooftop ROI table)
-  // The in-page toggle navigates between these two paths.
+  // Three faces of the agent dashboard, split by route:
+  //   "/"             → Overall (company-wide, agent-type level)
+  //   "/agents"       → Rooftop level (per-rooftop ROI table)
+  //   "/rag-analysis" → RAG health view (critical-metric red/amber/green)
+  // The in-page toggle navigates between these paths.
   if (path === "/agents" || path.startsWith("/agents/")) {
     return <AgentsDashboard mainView="rooftop" />;
+  }
+  if (path === "/rag-analysis" || path.startsWith("/rag-analysis/")) {
+    return <AgentsDashboard mainView="rag" />;
   }
   if (path === "/dream" || path.startsWith("/dream/")) {
     return <DreamDashboard />;
