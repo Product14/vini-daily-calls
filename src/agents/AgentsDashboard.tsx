@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import OverallView from "./overall/OverallView";
 import RagAnalysisView from "./rag/RagAnalysisView";
+import ScorecardView from "./scorecard/ScorecardView";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
@@ -442,7 +443,7 @@ function computeRag(mrr: number | null, total: Bucket, periodMonths: number): Ra
   return { roi, status: "red", note: `ROI ${fmtRoi(roi)} — below ${ROI_AMBER}×` };
 }
 
-function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "rooftop" | "rag" }) {
+function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "rooftop" | "rag" | "scorecard" }) {
   const [dailyRows, setDailyRows] = useState<AgentRowDaily[]>([]);
   const [totalsRows, setTotalsRows] = useState<AgentRowTotals[]>([]);
   const [loading, setLoading] = useState(true);
@@ -450,12 +451,13 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
 
   // Top-level view comes from the route: "/" → Overall (company-wide), "/agents"
-  // → the per-rooftop view, "/rag-analysis" → the RAG health view. The toggle
-  // navigates between these paths (SPA nav). The heavy /api/agents Metabase
-  // pull is deferred until the rooftop view is actually shown (gated below on
-  // mainView === "rooftop", so "rag" never triggers it).
-  const navigateMainView = (v: "overall" | "rooftop" | "rag") => {
-    const target = v === "overall" ? "/" : v === "rooftop" ? "/agents" : "/rag-analysis";
+  // → the per-rooftop view, "/rag-analysis" → the RAG health view, "/scorecard"
+  // → the Agent Scorecard. The toggle navigates between these paths (SPA nav).
+  // The heavy /api/agents Metabase pull is deferred until the rooftop view is
+  // actually shown (gated below on mainView === "rooftop", so the other three
+  // views never trigger it).
+  const navigateMainView = (v: "overall" | "rooftop" | "rag" | "scorecard") => {
+    const target = v === "overall" ? "/" : v === "rooftop" ? "/agents" : v === "rag" ? "/rag-analysis" : "/scorecard";
     if (window.location.pathname === target) return;
     window.history.pushState({}, "", target);
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -1259,14 +1261,14 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
       </div>
 
       {/* Top-level view toggle — company-wide Overall ("/") vs the per-rooftop
-          view ("/agents") vs the RAG health view ("/rag-analysis"). Real links
-          (so middle-click / open-in-new-tab work) that navigate within the SPA
-          on plain click. */}
+          view ("/agents") vs the RAG health view ("/rag-analysis") vs the Agent
+          Scorecard ("/scorecard"). Real links (so middle-click / open-in-new-tab
+          work) that navigate within the SPA on plain click. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        {(["overall", "rooftop", "rag"] as const).map(v => {
+        {(["overall", "rooftop", "rag", "scorecard"] as const).map(v => {
           const active = v === mainView;
-          const label = v === "overall" ? "Overall" : v === "rooftop" ? "Rooftop level" : "RAG Analysis";
-          const href = v === "overall" ? "/" : v === "rooftop" ? "/agents" : "/rag-analysis";
+          const label = v === "overall" ? "Overall" : v === "rooftop" ? "Rooftop level" : v === "rag" ? "RAG Analysis" : "Agent Scorecard";
+          const href = v === "overall" ? "/" : v === "rooftop" ? "/agents" : v === "rag" ? "/rag-analysis" : "/scorecard";
           return (
             <a key={v} href={href}
               onClick={e => { if (!e.metaKey && !e.ctrlKey && e.button === 0) { e.preventDefault(); navigateMainView(v); } }}
@@ -1287,6 +1289,8 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
         <OverallView />
       ) : mainView === "rag" ? (
         <RagAnalysisView />
+      ) : mainView === "scorecard" ? (
+        <ScorecardView />
       ) : (
       <>
       {error && (
