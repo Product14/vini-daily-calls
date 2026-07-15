@@ -54,6 +54,12 @@ type AgentRowBase = {
   // the outcome that flow's campaigns actually optimize for now instead of a booked
   // meeting. Null/0 on the other three agent types.
   voucher_claims: number | null;
+
+  // Franchise brand(s) the rooftop sells, classified server-side from the
+  // dealer name / website (see server/oemBrands.js). A rooftop can carry
+  // multiple brands (multi-franchise dealer groups); empty/null means the
+  // heuristic couldn't classify it — surfaced in the filter as "Unclassified".
+  oem_brands: string[] | null;
 };
 // Index signature for the `pld.` prefixed fields (TS can't express dotted keys
 // in a closed type; we just hand-roll the access).
@@ -466,6 +472,9 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   const [dateRange, setDateRange] = useState<DateRange>("D30");
   const [customRange, setCustomRange] = useState<CustomRange>(() => ({ from: "", to: todayIso() }));
   const [stageFilter, setStageFilter] = useState<Set<string>>(new Set());
+  // Franchise-brand filter. "Unclassified" is a synthetic bucket for rooftops
+  // whose oem_brands came back empty (see server/oemBrands.js).
+  const [oemFilter, setOemFilter] = useState<Set<string>>(new Set());
   const [stageMasterList, setStageMasterList] = useState<string[]>([]);
   // Rooftop-name (lower-case, trimmed) → curated stage from the OB Google Sheet
   // (the "per-stage roster" sheet). Used to surface Onboarding/OB-side stages
@@ -836,7 +845,7 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   };
 
   // Reset row-expansion state whenever the active agent or filters narrow.
-  useEffect(() => { setExpanded(new Set()); }, [activeAgent, dateRange, customRange, stageFilter, search, selectedRooftops, mrrRange, dataMode]);
+  useEffect(() => { setExpanded(new Set()); }, [activeAgent, dateRange, customRange, stageFilter, search, selectedRooftops, oemFilter, mrrRange, dataMode]);
   // Reset sort when the agent (and therefore the column set) changes.
   useEffect(() => { setSort({ label: null, dir: "desc" }); }, [activeAgent]);
 
@@ -899,6 +908,24 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [totalsRows, activeAgent, stageFilter, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
+  // Franchise brands available in the current agent/stage scope, same scoping
+  // as availableRooftops. "Unclassified" surfaces rooftops oemBrands.js couldn't
+  // classify instead of silently hiding them from the filter.
+  const UNCLASSIFIED_BRAND = "Unclassified";
+  const availableOems = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of totalsRows) {
+      if (activeAgent !== "All" && r.agent_type !== activeAgent) continue;
+      if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) continue;
+      const brands = r.oem_brands?.length ? r.oem_brands : [UNCLASSIFIED_BRAND];
+      brands.forEach(b => s.add(b));
+    }
+    return Array.from(s.values()).sort((a, b) =>
+      a === UNCLASSIFIED_BRAND ? 1 : b === UNCLASSIFIED_BRAND ? -1 : a.localeCompare(b)
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalsRows, activeAgent, stageFilter, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
+
   // Filter predicate shared by both daily and totals pipelines (minus the date
   // check, which only applies to daily — totals are all-time per Metabase scope).
   // Stage check uses displayStage so the filter matches whatever the user sees
@@ -909,6 +936,10 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
     if (activeAgent !== "All" && r.agent_type !== activeAgent) return false;
     if (stageFilter.size > 0 && !stageFilter.has(displayStage(r) ?? "")) return false;
     if (selectedRooftops.size > 0 && !selectedRooftops.has(rowKey(r))) return false;
+    if (oemFilter.size > 0) {
+      const brands = r.oem_brands?.length ? r.oem_brands : [UNCLASSIFIED_BRAND];
+      if (!brands.some(b => oemFilter.has(b))) return false;
+    }
     const q = search.trim().toLowerCase();
     if (q) {
       // Include both the displayed (sheet-override) and raw (Metabase) names
@@ -929,12 +960,12 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
   // dataMode + accounts maps are pulled in because matchesAgentStageRooftopSearch
   // now reads displayStage, which closes over them.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dailyRows, activeAgent, dateRange, customRange, stageFilter, search, selectedRooftops, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
+  }, [dailyRows, activeAgent, dateRange, customRange, stageFilter, search, selectedRooftops, oemFilter, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
   const filteredTotals = useMemo(() => {
     return totalsRows.filter(matchesAgentStageRooftopSearch);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalsRows, activeAgent, stageFilter, search, selectedRooftops, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
+  }, [totalsRows, activeAgent, stageFilter, search, selectedRooftops, oemFilter, rooftopToStage, dataMode, accountsByTeamAgent, accountsByNameAgent]);
 
   // KPI strip totals — sum the already-aggregated per-rooftop totals so the
   // KPI scope matches the table exactly (incl. MRR / sheet filters), and so
@@ -1375,6 +1406,15 @@ function AgentsDashboard({ mainView = "overall" }: { mainView?: "overall" | "roo
           allLabel="All rooftops"
           pluralUnit="rooftops"
           searchPlaceholder="Search rooftop…"
+        />
+        <MultiSelectDropdown
+          options={availableOems.map(b => ({ key: b, label: b }))}
+          selected={oemFilter}
+          onChange={setOemFilter}
+          headerLabel="Franchise Brand"
+          allLabel="All brands"
+          pluralUnit="brands"
+          searchPlaceholder="Search brand…"
         />
         <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search enterprise…"
           style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 13, minWidth: 180 }} />

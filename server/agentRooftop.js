@@ -12,10 +12,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runClickhouse, hasClickhouseCreds } from "./agentMetrics.js";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
+import { injectDealerWebsite, classifyOemBrands } from "./oemBrands.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const BASE_FACT = applyCallbackOutboundAttribution(
-  readFileSync(join(here, "agentBaseFact.sql"), "utf8"),
+const BASE_FACT = injectDealerWebsite(
+  applyCallbackOutboundAttribution(
+    readFileSync(join(here, "agentBaseFact.sql"), "utf8"),
+    "agentBaseFact.sql"
+  ),
   "agentBaseFact.sql"
 );
 
@@ -33,6 +37,7 @@ const DIM_COLS = `
   any(enterprise_name) AS enterprise_name,
   any(rooftop_name)    AS rooftop_name,
   any(rooftop_stage)   AS rooftop_stage,
+  any(dealer_website)  AS dealer_website,
   any(service_type)    AS service_type,
   any(direction)       AS direction,
   agent_type`;
@@ -156,6 +161,16 @@ function mergeVoucherClaims(rows, voucherRows, { keyed }) {
   }
 }
 
+// Attaches oem_brands (string[]) to each row from its dealer_website /
+// rooftop_name, then drops dealer_website — it was only scaffolding for the
+// classifier, not a field the dashboard needs directly.
+function enrichOemBrands(rows) {
+  for (const r of rows) {
+    r.oem_brands = classifyOemBrands(r.rooftop_name, r.dealer_website, r.team_id);
+    delete r.dealer_website;
+  }
+}
+
 // Returns { daily, totals } in the exact shape /api/agents already serves.
 // GROUP BY yields one row per key, so no client-side dedup is needed.
 export async function runAgentRooftops() {
@@ -184,6 +199,8 @@ export async function runAgentRooftops() {
   }
   mergeVoucherClaims(totals, voucherTotals, { keyed: false });
   mergeVoucherClaims(daily, voucherDaily, { keyed: true });
+  enrichOemBrands(totals);
+  enrichOemBrands(daily);
   return { totals, daily };
 }
 
@@ -196,6 +213,7 @@ export async function runAgentRooftopsIncremental() {
     runClickhouse(voucherDailyOnlySql()),
   ]);
   mergeVoucherClaims(daily, voucherDaily, { keyed: true });
+  enrichOemBrands(daily);
   return { daily };
 }
 
@@ -207,6 +225,7 @@ export async function runAgentRooftopsTotalsOnly() {
     runClickhouse(voucherTotalsOnlySql()),
   ]);
   mergeVoucherClaims(totals, voucherTotals, { keyed: false });
+  enrichOemBrands(totals);
   return { totals };
 }
 
