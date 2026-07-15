@@ -526,6 +526,37 @@ function renderActionItemOverdue(opts) {
  * opts: { rooftopName, dept, tz, leads:[{customer,phone,vehicle,items,totalOpen,justArrived,
  *   source,stage,aiScore,grade,sentiment,sentimentScore,lastSummary}], mtdOpen, links, detailCap(default 20) }
  */
+// Compact one-row-per-lead card for BATCH digests. leadHeader()+actionList() (a full avatar/chips
+// header, then a separately-bordered card PER item) is right for a single customer's OWN email —
+// repeated 8-20x in one digest it reads as disjointed noise (avatar block, then a line, then a
+// boxed card, per lead). This collapses each lead to ONE scannable row: avatar + name + phone on
+// one line, an optional status pill on the right, and every item as a single compact text line
+// underneath instead of its own bordered box.
+function batchLeadCard(ld, tz, rightPillHtml) {
+  var items = ld.items || [];
+  var lineItems = items.slice(0, 2).map(function (it) {
+    var hasIntent = it.intent && humanizeIntent(it.intent);
+    var title = hasIntent ? humanizeIntent(it.intent) : (it.description || "Follow-up");
+    var pr = it.priority ? " (" + esc(String(it.priority).toLowerCase()) + ")" : "";
+    return esc(title) + pr;
+  });
+  var extra = items.length > 2 ? " +" + (items.length - 2) + " more" : "";
+  var firstDue = items.length && items[0].dueAt ? new Date(items[0].dueAt) : null;
+  var dueTxt = "";
+  try { if (firstDue && !isNaN(firstDue.getTime())) dueTxt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: tz || "America/New_York" }).format(firstDue); } catch (e) { dueTxt = ""; }
+  return '<tr><td style="padding:11px 0;border-bottom:1px solid ' + LINE + ';">' +
+    '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+      '<td valign="middle" style="width:38px;">' + avatar(ld.customer, 32) + '</td>' +
+      '<td valign="middle" style="padding-left:10px;">' +
+        '<div style="font-size:13px;font-weight:800;color:' + INK + ';">' + esc(ld.customer || "Customer") + "</div>" +
+        '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(ld.phone)) + (ld.vehicle ? " · " + esc(ld.vehicle) : "") + "</div>" +
+      "</td>" +
+      (rightPillHtml ? '<td align="right" valign="middle">' + rightPillHtml + "</td>" : "") +
+    "</tr></table>" +
+    '<div style="font-size:12.5px;color:' + BODY + ';margin-top:6px;padding-left:48px;">' + lineItems.join(" · ") + esc(extra) + (dueTxt ? ' <span style="color:' + MUTE + ';">· due ' + esc(dueTxt) + "</span>" : "") + "</div>" +
+  "</td></tr>";
+}
+
 function renderActionItemBatch(opts) {
   opts = opts || {};
   var leads = (Array.isArray(opts.leads) ? opts.leads : []).filter(Boolean);
@@ -547,13 +578,10 @@ function renderActionItemBatch(opts) {
   var heading = '<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;"><tr><td style="padding:11px 16px;border-radius:12px;background:' + AMBER_BG + ';font-size:13px;font-weight:700;color:' + AMBER + ';">' +
     "&#9873; " + fmtInt(totalOpen) + " open action item" + (totalOpen === 1 ? "" : "s") + " across " + fmtInt(leads.length) + " lead" + (leads.length === 1 ? "" : "s") + "</td></tr></table>";
 
-  var cards = shown.map(function (ld) {
-    var items = ld.items || [];
-    return leadHeader(ld) +
-      actionList(items.slice(0, 3), opts.tz, BRAND) +
-      (items.length > 3 ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:4px;">+' + (items.length - 3) + " more item" + (items.length - 3 === 1 ? "" : "s") + " for this lead</div>" : "") +
-      '<div style="height:14px;line-height:14px;">&nbsp;</div>';
-  }).join("");
+  var cards = '<table width="100%" cellpadding="0" cellspacing="0">' + shown.map(function (ld) {
+    var n = Number(ld.totalOpen) || (ld.items || []).length;
+    return batchLeadCard(ld, opts.tz, pill(fmtInt(n) + " open", AMBER, AMBER_BG));
+  }).join("") + "</table>";
 
   var moreCard = hidden > 0
     ? '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed ' + LINE + ';border-radius:12px;"><tr><td style="padding:14px 16px;font-size:12px;color:' + MUTE + ';text-align:center;">+' + fmtInt(hidden) + " more lead" + (hidden === 1 ? "" : "s") + " with new action items — view the full list in the console.</td></tr></table>"
@@ -593,18 +621,18 @@ function renderActionItemOverdueBatch(opts) {
   var shown = sorted.slice(0, cap);
   var hidden = sorted.length - shown.length;
 
+  // One aggregate "total pending" line, rooftop-wide (not per-lead) — already excludes
+  // non-actionable intents (e.g. sales_lost_lead), same as the overdue count above.
+  var totalPending = Number(opts.totalPendingAllLeads) || 0;
   var banner = '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:16px;"><tr><td style="padding:12px 16px;font-size:13px;font-weight:800;color:' + NEG + ';">' +
-    "&#9888; " + fmtInt(totalItems) + " action item" + (totalItems === 1 ? "" : "s") + " past SLA across " + fmtInt(sorted.length) + " lead" + (sorted.length === 1 ? "" : "s") + " — resolve now.</td></tr></table>";
+    "&#9888; " + fmtInt(totalItems) + " action item" + (totalItems === 1 ? "" : "s") + " past SLA across " + fmtInt(sorted.length) + " lead" + (sorted.length === 1 ? "" : "s") + " — resolve now." +
+    (totalPending > 0 ? '<div style="font-size:11.5px;font-weight:600;color:' + BODY + ';margin-top:4px;">' + fmtInt(totalPending) + " total pending action item" + (totalPending === 1 ? "" : "s") + " rooftop-wide</div>" : "") +
+    "</td></tr></table>";
 
-  var cards = shown.map(function (ld) {
+  var cards = '<table width="100%" cellpadding="0" cellspacing="0">' + shown.map(function (ld) {
     var age = overdueAge(ld.oldestDueAt);
-    var items = ld.items || [];
-    return leadHeader(ld) +
-      (age ? '<div style="font-size:11px;color:' + NEG + ';font-weight:700;margin:6px 0 2px;">Oldest ' + esc(age) + "</div>" : "") +
-      actionList(items.slice(0, 3), opts.tz, NEG) +
-      (items.length > 3 ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:4px;">+' + (items.length - 3) + " more item" + (items.length - 3 === 1 ? "" : "s") + " for this lead</div>" : "") +
-      '<div style="height:14px;line-height:14px;">&nbsp;</div>';
-  }).join("");
+    return batchLeadCard(ld, opts.tz, age ? pill(esc(age), NEG, NEG_BG) : "");
+  }).join("") + "</table>";
 
   var moreCard = hidden > 0
     ? '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px dashed ' + LINE + ';border-radius:12px;"><tr><td style="padding:14px 16px;font-size:12px;color:' + MUTE + ';text-align:center;">+' + fmtInt(hidden) + " more lead" + (hidden === 1 ? "" : "s") + " past SLA — view the full list in the console.</td></tr></table>"
