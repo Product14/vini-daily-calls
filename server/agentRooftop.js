@@ -50,7 +50,11 @@ const METRIC_COLS = `
   uniqExact(lead_id)                          AS touched_leads,
   uniqExactIf(lead_id, qualified = 1)         AS qualified_leads,
   uniqExactIf(lead_id, had_appt_intent = 1)   AS appointment_intent_leads,
-  sum(appointments_count)                     AS appointments,
+  -- canonical (matches reporting-vini's aggregate.ts _apptLeads set): AI-booked
+  -- appointments counted as DISTINCT LEADS with >=1 booked meeting, not raw
+  -- meeting rows — a lead with 2 meetings (reschedule/dupe) must count once,
+  -- same as every other funnel column here.
+  uniqExactIf(lead_id, appointment_booked = 1) AS appointments,
   toInt32(0)                                  AS appointment_value,
   sum(is_call)                                AS total_calls,
   sum(n_sms_messages)                         AS total_sms,

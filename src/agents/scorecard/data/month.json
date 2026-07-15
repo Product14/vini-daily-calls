@@ -1,1 +1,3244 @@
-{"rows": {"Sales IB": [{"metric": "After-hours STL", "prev": {"value": 6, "unit": "rooftops", "sub": "1837 touches", "list": [{"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 545}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 518}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 441}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 160}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 108}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 65}]}, "cur": {"value": 11, "unit": "rooftops", "sub": "1399 touches", "list": [{"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 358}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 335}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 326}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 127}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 108}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 91}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 23}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 15}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 10}, {"rooftop": "Automax Atlanta", "team_id": "1cfc2c415d", "count": 4}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 2}]}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "After-hours Calls", "prev": {"value": 23, "unit": "rooftops", "sub": "608 touches", "list": [{"rooftop": "Paragon Honda", "team_id": "5895de05b", "count": 123}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 100}, {"rooftop": "Super Autos Miami", "team_id": "7fb99e6ee1", "count": 66}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 44}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 39}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 36}, {"rooftop": "Zeigler Hyundai of Racine", "team_id": "f618492d10", "count": 36}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 31}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 20}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 20}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 19}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 17}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 15}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 13}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 10}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 5}, {"rooftop": "Grace auto group", "team_id": "ee805e22bd", "count": 3}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 2}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 2}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 2}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 2}, {"rooftop": "Auto Depot Of Navarre", "team_id": "b75e784fa2", "count": 2}, {"rooftop": "Automax Atlanta", "team_id": "1cfc2c415d", "count": 1}]}, "cur": {"value": 28, "unit": "rooftops", "sub": "1195 touches", "list": [{"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 167}, {"rooftop": "Paragon Honda", "team_id": "5895de05b", "count": 147}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 138}, {"rooftop": "Super Autos Miami", "team_id": "7fb99e6ee1", "count": 127}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 115}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 77}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 76}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 62}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 45}, {"rooftop": "Zeigler Hyundai of Racine", "team_id": "f618492d10", "count": 36}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 31}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 29}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 26}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 19}, {"rooftop": "Automax Atlanta", "team_id": "1cfc2c415d", "count": 16}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 13}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 12}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 11}, {"rooftop": "McDonald GMC Cadillac", "team_id": "49355ed19e", "count": 10}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 8}, {"rooftop": "Eddy's Volkswagen", "team_id": "5c99ab695a", "count": 6}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 6}, {"rooftop": "Bob Johnson Leroy", "team_id": "10787c0b1", "count": 5}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 5}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 3}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 2}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "team_id": "9a72db996f", "count": 2}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "team_id": "9c1ad81386", "count": 1}]}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Office-hrs STL", "prev": {"value": 0, "unit": "rooftops", "sub": "0 touches", "list": []}, "cur": {"value": 0, "unit": "rooftops", "sub": "0 touches", "list": []}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Office-hrs Overflow", "prev": {"value": 13, "unit": "rooftops", "sub": "496 calls (2nd+ simultaneous)", "list": [{"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 408}, {"rooftop": "Auto Depot Of Navarre", "team_id": "b75e784fa2", "count": 23}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 12}, {"rooftop": "Paragon Honda", "team_id": "5895de05b", "count": 10}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 8}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 7}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 7}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 6}, {"rooftop": "Grace auto group", "team_id": "ee805e22bd", "count": 5}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 4}, {"rooftop": "Super Autos Miami", "team_id": "7fb99e6ee1", "count": 2}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 2}, {"rooftop": "Automax Atlanta", "team_id": "1cfc2c415d", "count": 2}]}, "cur": {"value": 18, "unit": "rooftops", "sub": "3282 calls (2nd+ simultaneous)", "list": [{"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 2470}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 343}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 216}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 82}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 73}, {"rooftop": "Paragon Honda", "team_id": "5895de05b", "count": 29}, {"rooftop": "Super Autos Miami", "team_id": "7fb99e6ee1", "count": 20}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 10}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 8}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 8}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 6}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 4}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 3}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 2}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 2}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 2}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "team_id": "9a72db996f", "count": 2}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 2}]}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Office-hrs All Calls", "prev": {"value": 26, "unit": "rooftops", "sub": "1958 calls (inclusive)", "list": [{"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 634}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 209}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 200}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 198}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 198}, {"rooftop": "Paragon Honda", "team_id": "5895de05b", "count": 86}, {"rooftop": "Super Autos Miami", "team_id": "7fb99e6ee1", "count": 78}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 60}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 43}, {"rooftop": "Auto Depot Of Navarre", "team_id": "b75e784fa2", "count": 43}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 38}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 38}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 28}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 19}, {"rooftop": "Grace auto group", "team_id": "ee805e22bd", "count": 17}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 11}, {"rooftop": "Automax Atlanta", "team_id": "1cfc2c415d", "count": 9}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 8}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 8}, {"rooftop": "Zeigler Hyundai of Racine", "team_id": "f618492d10", "count": 7}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 6}, {"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 6}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 5}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 4}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 3}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "team_id": "9a72db996f", "count": 2}]}, "cur": {"value": 31, "unit": "rooftops", "sub": "5720 calls (inclusive)", "list": [{"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 3203}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 470}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 340}, {"rooftop": "WolfChase Nissan", "team_id": "d14b8b8338", "count": 326}, {"rooftop": "WolfChase Honda", "team_id": "405beccbe9", "count": 293}, {"rooftop": "Super Autos Miami", "team_id": "7fb99e6ee1", "count": 172}, {"rooftop": "Dream Nissan Legends", "team_id": "6730ea9132", "count": 153}, {"rooftop": "Paragon Honda", "team_id": "5895de05b", "count": 136}, {"rooftop": "Dream Nissan Midwest", "team_id": "3d3deabc98", "count": 117}, {"rooftop": "Dream Nissan Lawrence", "team_id": "7607d0e6f5", "count": 116}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 100}, {"rooftop": "Mcgrath Acura of Westmont", "team_id": "987d7cb5f5", "count": 77}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 28}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 28}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "team_id": "9a72db996f", "count": 20}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 19}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 19}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 17}, {"rooftop": "Automax Atlanta", "team_id": "1cfc2c415d", "count": 14}, {"rooftop": "Bob Johnson Leroy", "team_id": "10787c0b1", "count": 13}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 13}, {"rooftop": "McDonald GMC Cadillac", "team_id": "49355ed19e", "count": 10}, {"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 7}, {"rooftop": "Eddy's Volkswagen", "team_id": "5c99ab695a", "count": 6}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 6}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 6}, {"rooftop": "McDonald Chevrolet in Millington", "team_id": "60d1f60395", "count": 5}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 2}, {"rooftop": "Honda of Reseda", "team_id": "2b110492b6", "count": 2}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "team_id": "9c1ad81386", "count": 1}, {"rooftop": "Grace auto group", "team_id": "ee805e22bd", "count": 1}]}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "14 days follow-up", "prev": {"value": 2, "unit": "rooftops", "sub": "config snapshot, not month-scoped", "list": [{"rooftop": "I 40 Autos", "count": 1}, {"rooftop": "Bob Johnson Leroy", "count": 1}]}, "cur": {"value": 2, "unit": "rooftops", "sub": "confirmed live: I 40 Autos, Bob Johnson Leroy", "list": [{"rooftop": "I 40 Autos", "count": 1}, {"rooftop": "Bob Johnson Leroy", "count": 1}]}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Appointment Reminder Smartview", "prev": {"value": null, "unit": "no source", "sub": "no distinct source found \u2014 enter manually", "list": []}, "cur": {"value": null, "unit": "no source", "sub": "no distinct source found \u2014 enter manually", "list": []}, "total": {"value": 43, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}], "Sales OB": [{"metric": "Campaigns/Rooftop", "prev": {"value": 1.0, "unit": "avg", "sub": "16 distinct use-cases / 16 rooftops (May)", "list": [{"rooftop": "Grace auto group", "count": 1}, {"rooftop": "Horne Mazda", "count": 1}, {"rooftop": "Dream Nissan Midwest", "count": 1}, {"rooftop": "Dream Nissan Lawrence", "count": 1}, {"rooftop": "Lake Ford", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Super Autos Miami", "count": 1}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "WolfChase Nissan", "count": 1}, {"rooftop": "Vatland Honda", "count": 1}, {"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "Dream Nissan Legends", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 1}]}, "cur": {"value": 1.0, "unit": "avg", "sub": "22 distinct use-cases / 22 rooftops (June)", "list": [{"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "Dream Nissan Midwest", "count": 1}, {"rooftop": "Zeigler Hyundai of Racine", "count": 1}, {"rooftop": "Dream Nissan Lawrence", "count": 1}, {"rooftop": "Horne Mazda", "count": 1}, {"rooftop": "Grace auto group", "count": 1}, {"rooftop": "Corn Husker Nissan", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Automax Atlanta", "count": 1}, {"rooftop": "Super Autos Miami", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "WolfChase Nissan", "count": 1}, {"rooftop": "Rick Weaver Chevrolet", "count": 1}, {"rooftop": "Vatland Honda", "count": 1}, {"rooftop": "Lake Ford", "count": 1}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 1}, {"rooftop": "Corn Husker Auto Center", "count": 1}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 1}, {"rooftop": "Dream Nissan Legends", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Courtesy Ford", "count": 1}]}, "total": {"value": 27, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Appointments/Rooftop", "prev": {"value": 6.6, "unit": "avg", "sub": "105 appointments / 16 rooftops", "list": [{"rooftop": "Dream Nissan Midwest", "count": 25}, {"rooftop": "Dream Nissan Legends", "count": 24}, {"rooftop": "Dream Nissan Lawrence", "count": 15}, {"rooftop": "WolfChase Nissan", "count": 15}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 11}, {"rooftop": "WolfChase Honda", "count": 11}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 2}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "Grace auto group", "count": 1}, {"rooftop": "Horne Mazda", "count": 0}, {"rooftop": "Vatland Honda", "count": 0}, {"rooftop": "Super Autos Miami", "count": 0}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 0}, {"rooftop": "Covina Kia", "count": 0}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 0}, {"rooftop": "Lake Ford", "count": 0}]}, "cur": {"value": 3.3, "unit": "avg", "sub": "76 appointments / 23 rooftops", "list": [{"rooftop": "Dream Nissan Lawrence", "count": 14}, {"rooftop": "Dream Nissan Midwest", "count": 12}, {"rooftop": "Dream Nissan Legends", "count": 7}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 7}, {"rooftop": "Zeigler Hyundai of Racine", "count": 7}, {"rooftop": "Super Autos Miami", "count": 6}, {"rooftop": "WolfChase Honda", "count": 5}, {"rooftop": "Horne Mazda", "count": 3}, {"rooftop": "Vatland Honda", "count": 3}, {"rooftop": "Grace auto group", "count": 3}, {"rooftop": "WolfChase Nissan", "count": 2}, {"rooftop": "Rick Weaver Chevrolet", "count": 2}, {"rooftop": "Courtesy Ford", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Automax Atlanta", "count": 1}, {"rooftop": "Corn Husker Auto Center", "count": 0}, {"rooftop": "Corn Husker Nissan", "count": 0}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 0}, {"rooftop": "Honda of Reseda", "count": 0}, {"rooftop": "Used inventory", "count": 0}, {"rooftop": "Lake Ford", "count": 0}]}, "total": {"value": 27, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Rooftops with 10+ Appts", "prev": {"value": 6, "unit": "rooftops", "sub": "\u226510 appointments this month", "list": [{"rooftop": "Dream Nissan Midwest", "count": 25}, {"rooftop": "Dream Nissan Legends", "count": 24}, {"rooftop": "Dream Nissan Lawrence", "count": 15}, {"rooftop": "WolfChase Nissan", "count": 15}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 11}, {"rooftop": "WolfChase Honda", "count": 11}]}, "cur": {"value": 2, "unit": "rooftops", "sub": "\u226510 appointments this month", "list": [{"rooftop": "Dream Nissan Lawrence", "count": 14}, {"rooftop": "Dream Nissan Midwest", "count": 12}]}, "total": {"value": 27, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Active Rooftops", "prev": {"value": 16, "unit": "rooftops", "sub": "touched \u22651 outbound lead", "list": [{"rooftop": "Dream Nissan Lawrence", "count": 1478}, {"rooftop": "Dream Nissan Legends", "count": 933}, {"rooftop": "Dream Nissan Midwest", "count": 749}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 689}, {"rooftop": "WolfChase Honda", "count": 542}, {"rooftop": "WolfChase Nissan", "count": 428}, {"rooftop": "Horne Mazda", "count": 227}, {"rooftop": "Vatland Honda", "count": 181}, {"rooftop": "Super Autos Miami", "count": 125}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 93}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 66}, {"rooftop": "Covina Kia", "count": 65}, {"rooftop": "Honda of Reseda", "count": 57}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 43}, {"rooftop": "Grace auto group", "count": 42}, {"rooftop": "Lake Ford", "count": 1}]}, "cur": {"value": 23, "unit": "rooftops", "sub": "touched \u22651 outbound lead", "list": [{"rooftop": "Courtesy Ford", "count": 2333}, {"rooftop": "Corn Husker Auto Center", "count": 2286}, {"rooftop": "Corn Husker Nissan", "count": 2040}, {"rooftop": "Dream Nissan Lawrence", "count": 1105}, {"rooftop": "Dream Nissan Legends", "count": 1002}, {"rooftop": "Super Autos Miami", "count": 955}, {"rooftop": "Covina Kia", "count": 944}, {"rooftop": "Dream Nissan Midwest", "count": 917}, {"rooftop": "Horne Mazda", "count": 777}, {"rooftop": "WolfChase Honda", "count": 507}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 415}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 387}, {"rooftop": "Honda of Reseda", "count": 361}, {"rooftop": "WolfChase Nissan", "count": 328}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 321}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 318}, {"rooftop": "Zeigler Hyundai of Racine", "count": 313}, {"rooftop": "Vatland Honda", "count": 284}, {"rooftop": "Automax Atlanta", "count": 274}, {"rooftop": "Grace auto group", "count": 242}, {"rooftop": "Rick Weaver Chevrolet", "count": 181}, {"rooftop": "Used inventory", "count": 1}, {"rooftop": "Lake Ford", "count": 1}]}, "total": {"value": 27, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}], "Service IB": [{"metric": "After-hours Calls", "prev": {"value": 27, "unit": "rooftops", "sub": "1083 touches", "list": [{"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 193}, {"rooftop": "Bob King Mazda", "team_id": "a9e37101ea", "count": 183}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 137}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 134}, {"rooftop": "Mercedes Benz of Foothill Ranch", "team_id": "8f59b8483b", "count": 82}, {"rooftop": "Mercedes Benz of Laguna Niguel", "team_id": "f222a4f3ff", "count": 80}, {"rooftop": "World Car Kia South", "team_id": "48d0fea7-2", "count": 77}, {"rooftop": "John Hiester Chevrolet", "team_id": "0dcef03834", "count": 35}, {"rooftop": "World Car Kia San Antonio", "team_id": "d2999d21-c", "count": 31}, {"rooftop": "Sport Durst Hyundai", "team_id": "5f6644c1f1", "count": 29}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 23}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 14}, {"rooftop": "Sport Durst Mazda", "team_id": "27029bf75c", "count": 10}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 9}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 6}, {"rooftop": "World Car Mazda San Antonio", "team_id": "d4c824c0-9", "count": 6}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 6}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 6}, {"rooftop": "Heiser Chevrolet of West Allis", "team_id": "b7184697be", "count": 4}, {"rooftop": "Honda of Reseda", "team_id": "2b110492b6", "count": 4}, {"rooftop": "Zeigler Hyundai of Racine", "team_id": "f618492d10", "count": 4}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 3}, {"rooftop": "Sport Durst VolksWagen of Goldsboro", "team_id": "73ff62fd21", "count": 2}, {"rooftop": "Sport Durst Mazda of Goldsboro", "team_id": "a862eefd2e", "count": 2}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 1}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 1}, {"rooftop": "Eddy's Volkswagen", "team_id": "5c99ab695a", "count": 1}]}, "cur": {"value": 26, "unit": "rooftops", "sub": "1733 touches", "list": [{"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 218}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 204}, {"rooftop": "John Elway Harley-Davidson", "team_id": "cb5d950847", "count": 193}, {"rooftop": "Bob King Mazda", "team_id": "a9e37101ea", "count": 184}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 142}, {"rooftop": "Mercedes Benz of Laguna Niguel", "team_id": "f222a4f3ff", "count": 107}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 94}, {"rooftop": "Mercedes Benz of Foothill Ranch", "team_id": "8f59b8483b", "count": 89}, {"rooftop": "World Car Kia South", "team_id": "48d0fea7-2", "count": 80}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 66}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 56}, {"rooftop": "Heiser Chevrolet of West Allis", "team_id": "b7184697be", "count": 56}, {"rooftop": "John Hiester Chevrolet", "team_id": "0dcef03834", "count": 38}, {"rooftop": "World Car Kia San Antonio", "team_id": "d2999d21-c", "count": 37}, {"rooftop": "Sport Durst Hyundai", "team_id": "5f6644c1f1", "count": 29}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 27}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 25}, {"rooftop": "Sport Durst Mazda", "team_id": "27029bf75c", "count": 20}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 17}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 17}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 10}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 10}, {"rooftop": "World Car Mazda San Antonio", "team_id": "d4c824c0-9", "count": 6}, {"rooftop": "Sport Durst VolksWagen of Goldsboro", "team_id": "73ff62fd21", "count": 3}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "team_id": "9a72db996f", "count": 3}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 2}]}, "total": {"value": 39, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Office-hrs Overflow", "prev": {"value": 18, "unit": "rooftops", "sub": "2058 calls (2nd+ simultaneous)", "list": [{"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 1268}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 314}, {"rooftop": "World Car Kia South", "team_id": "48d0fea7-2", "count": 151}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 87}, {"rooftop": "Mercedes Benz of Laguna Niguel", "team_id": "f222a4f3ff", "count": 53}, {"rooftop": "World Car Kia San Antonio", "team_id": "d2999d21-c", "count": 49}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 47}, {"rooftop": "Mercedes Benz of Foothill Ranch", "team_id": "8f59b8483b", "count": 26}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 25}, {"rooftop": "Sport Durst Hyundai", "team_id": "5f6644c1f1", "count": 8}, {"rooftop": "Sport Durst Mazda", "team_id": "27029bf75c", "count": 8}, {"rooftop": "Heiser Chevrolet of West Allis", "team_id": "b7184697be", "count": 4}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 4}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 3}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 3}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 3}, {"rooftop": "Habberstad Kia", "team_id": "03f8bdc40c", "count": 3}, {"rooftop": "Bob King Mazda", "team_id": "a9e37101ea", "count": 2}]}, "cur": {"value": 23, "unit": "rooftops", "sub": "3444 calls (2nd+ simultaneous)", "list": [{"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 1061}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 1061}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 316}, {"rooftop": "World Car Kia South", "team_id": "48d0fea7-2", "count": 308}, {"rooftop": "Mercedes Benz of Laguna Niguel", "team_id": "f222a4f3ff", "count": 123}, {"rooftop": "Mercedes Benz of Foothill Ranch", "team_id": "8f59b8483b", "count": 113}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 84}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 68}, {"rooftop": "World Car Kia San Antonio", "team_id": "d2999d21-c", "count": 64}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 55}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 41}, {"rooftop": "John Elway Harley-Davidson", "team_id": "cb5d950847", "count": 33}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 30}, {"rooftop": "Sport Durst Hyundai", "team_id": "5f6644c1f1", "count": 22}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 17}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 12}, {"rooftop": "World Car Mazda San Antonio", "team_id": "d4c824c0-9", "count": 10}, {"rooftop": "Heiser Chevrolet of West Allis", "team_id": "b7184697be", "count": 10}, {"rooftop": "Sport Durst Mazda", "team_id": "27029bf75c", "count": 6}, {"rooftop": "Bob King Mazda", "team_id": "a9e37101ea", "count": 4}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 2}, {"rooftop": "Sport Durst Volkswagen of Jacks", "team_id": "5b65de92e5", "count": 2}, {"rooftop": "Habberstad Kia", "team_id": "03f8bdc40c", "count": 2}]}, "total": {"value": 39, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Office-hrs All Calls", "prev": {"value": 30, "unit": "rooftops", "sub": "7042 calls (inclusive)", "list": [{"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 3241}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 1193}, {"rooftop": "World Car Kia South", "team_id": "48d0fea7-2", "count": 744}, {"rooftop": "World Car Kia San Antonio", "team_id": "d2999d21-c", "count": 390}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 255}, {"rooftop": "Mercedes Benz of Laguna Niguel", "team_id": "f222a4f3ff", "count": 237}, {"rooftop": "Mercedes Benz of Foothill Ranch", "team_id": "8f59b8483b", "count": 214}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 203}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 111}, {"rooftop": "Sport Durst Hyundai", "team_id": "5f6644c1f1", "count": 104}, {"rooftop": "World Car Mazda San Antonio", "team_id": "d4c824c0-9", "count": 93}, {"rooftop": "Sport Durst Mazda", "team_id": "27029bf75c", "count": 46}, {"rooftop": "Bob King Mazda", "team_id": "a9e37101ea", "count": 32}, {"rooftop": "Heiser Chevrolet of West Allis", "team_id": "b7184697be", "count": 29}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 21}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 20}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 18}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 16}, {"rooftop": "Sport Durst VolksWagen of Goldsboro", "team_id": "73ff62fd21", "count": 14}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 11}, {"rooftop": "Habberstad Kia", "team_id": "03f8bdc40c", "count": 10}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 8}, {"rooftop": "Zeigler Hyundai of Racine", "team_id": "f618492d10", "count": 7}, {"rooftop": "Sport Durst Mazda of Goldsboro", "team_id": "a862eefd2e", "count": 7}, {"rooftop": "Sport Durst Volkswagen of Jacks", "team_id": "5b65de92e5", "count": 6}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 5}, {"rooftop": "Honda of Reseda", "team_id": "2b110492b6", "count": 2}, {"rooftop": "Eddy's Volkswagen", "team_id": "5c99ab695a", "count": 2}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 2}, {"rooftop": "John Elway Harley-Davidson", "team_id": "cb5d950847", "count": 1}]}, "cur": {"value": 32, "unit": "rooftops", "sub": "8047 calls (inclusive)", "list": [{"rooftop": "Honda of Downtown Los Angeles", "team_id": "9923577d07", "count": 2067}, {"rooftop": "Covina Kia", "team_id": "49a06313cf", "count": 2013}, {"rooftop": "World Car Kia South", "team_id": "48d0fea7-2", "count": 906}, {"rooftop": "Principle BMW MINI  of San Antonio", "team_id": "fdec030155", "count": 615}, {"rooftop": "World Car Kia San Antonio", "team_id": "d2999d21-c", "count": 385}, {"rooftop": "Mercedes Benz of Foothill Ranch", "team_id": "8f59b8483b", "count": 359}, {"rooftop": "Mercedes Benz of Laguna Niguel", "team_id": "f222a4f3ff", "count": 279}, {"rooftop": "John Elway Harley-Davidson", "team_id": "cb5d950847", "count": 193}, {"rooftop": "Lake Chevrolet", "team_id": "7c8ec43273", "count": 140}, {"rooftop": "Feldmann Imports Mercedes-Benz", "team_id": "5480771b21", "count": 136}, {"rooftop": "Dutch Miller Kia Charlotte", "team_id": "e08ec18b4f", "count": 135}, {"rooftop": "Lake Ford", "team_id": "3ba5db276f", "count": 132}, {"rooftop": "Sport Durst Hyundai", "team_id": "5f6644c1f1", "count": 111}, {"rooftop": "World Car Mazda San Antonio", "team_id": "d4c824c0-9", "count": 90}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "team_id": "c18a7a6d8d", "count": 80}, {"rooftop": "Heiser Chevrolet of West Allis", "team_id": "b7184697be", "count": 72}, {"rooftop": "Courtesy Ford", "team_id": "3f96401f8d", "count": 64}, {"rooftop": "Corn Husker Auto Center", "team_id": "3b8dee0632", "count": 62}, {"rooftop": "Sport Durst Mazda", "team_id": "27029bf75c", "count": 48}, {"rooftop": "Sport Durst VolksWagen of Goldsboro", "team_id": "73ff62fd21", "count": 34}, {"rooftop": "PalmEasy Motors PA LLC", "team_id": "5a4c21a96f", "count": 33}, {"rooftop": "Bob King Mazda", "team_id": "a9e37101ea", "count": 31}, {"rooftop": "Corn Husker Nissan", "team_id": "37329f9976", "count": 25}, {"rooftop": "Sport Durst Mazda of Goldsboro", "team_id": "a862eefd2e", "count": 7}, {"rooftop": "Sport Durst Volkswagen of Jacks", "team_id": "5b65de92e5", "count": 5}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "team_id": "9a72db996f", "count": 5}, {"rooftop": "Rick Weaver Chevrolet", "team_id": "d4a682cb2a", "count": 5}, {"rooftop": "Eddy's Volkswagen", "team_id": "5c99ab695a", "count": 4}, {"rooftop": "Vatland Honda", "team_id": "e05e67affb", "count": 4}, {"rooftop": "Habberstad Kia", "team_id": "03f8bdc40c", "count": 3}, {"rooftop": "Honda of Reseda", "team_id": "2b110492b6", "count": 2}, {"rooftop": "Zeigler Hyundai of Racine", "team_id": "f618492d10", "count": 2}]}, "total": {"value": 39, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Follow-ups", "prev": {"value": null, "unit": "no source", "sub": "no Service-side follow-up workflow live yet", "list": []}, "cur": {"value": null, "unit": "no source", "sub": "no Service-side follow-up workflow live yet", "list": []}, "total": {"value": 39, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Appointment Reminder", "prev": {"value": null, "unit": "no source", "sub": "no distinct source found \u2014 enter manually", "list": []}, "cur": {"value": null, "unit": "no source", "sub": "no distinct source found \u2014 enter manually", "list": []}, "total": {"value": 39, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}], "Service OB": [{"metric": "Campaigns/Rooftop", "prev": {"value": 1.4, "unit": "avg", "sub": "7 distinct use-cases / 5 rooftops (May)", "list": [{"rooftop": "World Car Kia South", "count": 3}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "WolfChase Nissan", "count": 1}, {"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "Lake Ford", "count": 1}]}, "cur": {"value": 1.0, "unit": "avg", "sub": "5 distinct use-cases / 5 rooftops (June)", "list": [{"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "Honda of Downtown Los Angeles", "count": 1}, {"rooftop": "Principle BMW MINI  of San Antonio", "count": 1}, {"rooftop": "Horne Mazda", "count": 1}]}, "total": {"value": 22, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Appointments/Rooftop", "prev": {"value": 7.2, "unit": "avg", "sub": "43 appointments / 6 rooftops", "list": [{"rooftop": "WolfChase Nissan", "count": 27}, {"rooftop": "Honda of Reseda", "count": 8}, {"rooftop": "WolfChase Honda", "count": 6}, {"rooftop": "World Car Kia South", "count": 2}, {"rooftop": "Lake Ford", "count": 0}, {"rooftop": "Used inventory", "count": 0}]}, "cur": {"value": 5.5, "unit": "avg", "sub": "44 appointments / 8 rooftops", "list": [{"rooftop": "Honda of Reseda", "count": 22}, {"rooftop": "WolfChase Honda", "count": 15}, {"rooftop": "Principle BMW MINI  of San Antonio", "count": 4}, {"rooftop": "Honda of Downtown Los Angeles", "count": 2}, {"rooftop": "World Car Kia South", "count": 1}, {"rooftop": "Horne Mazda", "count": 0}, {"rooftop": "Lake Ford", "count": 0}, {"rooftop": "Covina Kia", "count": 0}]}, "total": {"value": 22, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Rooftops with 20+ Appts", "prev": {"value": 1, "unit": "rooftops", "sub": "\u226520 appointments this month", "list": [{"rooftop": "WolfChase Nissan", "count": 27}]}, "cur": {"value": 1, "unit": "rooftops", "sub": "\u226520 appointments this month", "list": [{"rooftop": "Honda of Reseda", "count": 22}]}, "total": {"value": 22, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}, {"metric": "Active Rooftops", "prev": {"value": 6, "unit": "rooftops", "sub": "touched \u22651 outbound lead", "list": [{"rooftop": "Honda of Reseda", "count": 351}, {"rooftop": "WolfChase Nissan", "count": 285}, {"rooftop": "WolfChase Honda", "count": 183}, {"rooftop": "Lake Ford", "count": 10}, {"rooftop": "World Car Kia South", "count": 7}, {"rooftop": "Used inventory", "count": 1}]}, "cur": {"value": 8, "unit": "rooftops", "sub": "touched \u22651 outbound lead", "list": [{"rooftop": "Honda of Reseda", "count": 764}, {"rooftop": "Principle BMW MINI  of San Antonio", "count": 322}, {"rooftop": "WolfChase Honda", "count": 186}, {"rooftop": "Horne Mazda", "count": 66}, {"rooftop": "Honda of Downtown Los Angeles", "count": 7}, {"rooftop": "Lake Ford", "count": 6}, {"rooftop": "World Car Kia South", "count": 1}, {"rooftop": "Covina Kia", "count": 1}]}, "total": {"value": 22, "unit": "rooftops", "sub": "contract-Live rooftops on this exact product (credit_v2/aggregated_data registry)", "pool": true}}]}, "pools": {"Sales IB": [{"rooftop": "North End Motors", "count": 1}, {"rooftop": "John Hiester Chevrolet", "count": 1}, {"rooftop": "Bob Johnson Leroy", "count": 1}, {"rooftop": "Automax Atlanta", "count": 1}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "Corn Husker Nissan", "count": 1}, {"rooftop": "Corn Husker Auto Center", "count": 1}, {"rooftop": "Lake Ford", "count": 1}, {"rooftop": "Dream Nissan Midwest", "count": 1}, {"rooftop": "Courtesy Ford", "count": 1}, {"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "Acura of Paragon", "count": 1}, {"rooftop": "McDonald GMC Cadillac", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Feldmann Imports Mercedes-Benz", "count": 1}, {"rooftop": "Paragon Honda", "count": 1}, {"rooftop": "PalmEasy Motors PA LLC", "count": 1}, {"rooftop": "Eddy's Volkswagen", "count": 1}, {"rooftop": "McDonald Chevrolet in Millington", "count": 1}, {"rooftop": "Dream Nissan Legends", "count": 1}, {"rooftop": "Used inventory", "count": 1}, {"rooftop": "Dream Nissan Lawrence", "count": 1}, {"rooftop": "Honda CI_1", "count": 1}, {"rooftop": "Lake Chevrolet", "count": 1}, {"rooftop": "Super Autos Miami", "count": 1}, {"rooftop": "Chapman Chevrolet Buick GMC ltd.", "count": 1}, {"rooftop": "New inventory", "count": 1}, {"rooftop": "Mcgrath Acura of Westmont", "count": 1}, {"rooftop": "Honda of Downtown Los Angeles", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 1}, {"rooftop": "Auto Depot Of Navarre", "count": 1}, {"rooftop": "I40 Autos", "count": 1}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 1}, {"rooftop": "WolfChase Nissan", "count": 1}, {"rooftop": "Rick Weaver Chevrolet", "count": 1}, {"rooftop": "Vatland Honda", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Grace auto group", "count": 1}, {"rooftop": "Southey Ford", "count": 1}, {"rooftop": "Zeigler Hyundai of Racine", "count": 1}, {"rooftop": "Bridge Auto", "count": 1}, {"rooftop": "Principle BMW MINI  of San Antonio", "count": 1}], "Sales OB": [{"rooftop": "North End Motors", "count": 1}, {"rooftop": "Automax Atlanta", "count": 1}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "Corn Husker Nissan", "count": 1}, {"rooftop": "Corn Husker Auto Center", "count": 1}, {"rooftop": "Lake Ford", "count": 1}, {"rooftop": "Dream Nissan Midwest", "count": 1}, {"rooftop": "Courtesy Ford", "count": 1}, {"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Dream Nissan Legends", "count": 1}, {"rooftop": "Used inventory", "count": 1}, {"rooftop": "Dream Nissan Lawrence", "count": 1}, {"rooftop": "Super Autos Miami", "count": 1}, {"rooftop": "New inventory", "count": 1}, {"rooftop": "Honda of Downtown Los Angeles", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Jones Chrysler Dodge Jeep Ram", "count": 1}, {"rooftop": "Auto Depot Of Navarre", "count": 1}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 1}, {"rooftop": "Horne Mazda", "count": 1}, {"rooftop": "WolfChase Nissan", "count": 1}, {"rooftop": "Rick Weaver Chevrolet", "count": 1}, {"rooftop": "Vatland Honda", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Grace auto group", "count": 1}, {"rooftop": "Zeigler Hyundai of Racine", "count": 1}], "Service IB": [{"rooftop": "North End Motors", "count": 1}, {"rooftop": "Habberstad Kia", "count": 1}, {"rooftop": "John Hiester Chevrolet", "count": 1}, {"rooftop": "Sport Durst Mazda", "count": 1}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "Corn Husker Nissan", "count": 1}, {"rooftop": "Corn Husker Auto Center", "count": 1}, {"rooftop": "Lake Ford", "count": 1}, {"rooftop": "Courtesy Ford", "count": 1}, {"rooftop": "World Car Kia South", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Feldmann Imports Mercedes-Benz", "count": 1}, {"rooftop": "PalmEasy Motors PA LLC", "count": 1}, {"rooftop": "", "count": 1}, {"rooftop": "Sport Durst Volkswagen of Jacks", "count": 1}, {"rooftop": "Eddy's Volkswagen", "count": 1}, {"rooftop": "Sport Durst Hyundai", "count": 1}, {"rooftop": "Used inventory", "count": 1}, {"rooftop": "DeNooyer Chevrolet Kalamazoo", "count": 1}, {"rooftop": "Sport Durst VolksWagen of Goldsboro", "count": 1}, {"rooftop": "Lake Chevrolet", "count": 1}, {"rooftop": "Chapman Chevrolet Buick GMC ltd.", "count": 1}, {"rooftop": "New inventory", "count": 1}, {"rooftop": "Mercedes Benz of Foothill Ranch", "count": 1}, {"rooftop": "Honda of Downtown Los Angeles", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Sport Durst Mazda of Goldsboro", "count": 1}, {"rooftop": "Bob King Mazda", "count": 1}, {"rooftop": "Heiser Chevrolet of West Allis", "count": 1}, {"rooftop": "Landers Dodge Chrysler Jeep Ram", "count": 1}, {"rooftop": "John Elway Harley-Davidson", "count": 1}, {"rooftop": "World Car Kia San Antonio", "count": 1}, {"rooftop": "Rick Weaver Chevrolet", "count": 1}, {"rooftop": "World Car Mazda San Antonio", "count": 1}, {"rooftop": "Vatland Honda", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Mercedes Benz of Laguna Niguel", "count": 1}, {"rooftop": "Zeigler Hyundai of Racine", "count": 1}, {"rooftop": "Principle BMW MINI  of San Antonio", "count": 1}], "Service OB": [{"rooftop": "North End Motors", "count": 1}, {"rooftop": "Honda of Reseda", "count": 1}, {"rooftop": "Corn Husker Nissan", "count": 1}, {"rooftop": "Corn Husker Auto Center", "count": 1}, {"rooftop": "Lake Ford", "count": 1}, {"rooftop": "Courtesy Ford", "count": 1}, {"rooftop": "WolfChase Honda", "count": 1}, {"rooftop": "World Car Kia South", "count": 1}, {"rooftop": "Covina Kia", "count": 1}, {"rooftop": "Used inventory", "count": 1}, {"rooftop": "New inventory", "count": 1}, {"rooftop": "Honda of Downtown Los Angeles", "count": 1}, {"rooftop": "Beaver County Dodge Chrysler Jeep RAM", "count": 1}, {"rooftop": "Horne Mazda", "count": 1}, {"rooftop": "WolfChase Nissan", "count": 1}, {"rooftop": "World Car Kia San Antonio", "count": 1}, {"rooftop": "Rick Weaver Chevrolet", "count": 1}, {"rooftop": "World Car Mazda San Antonio", "count": 1}, {"rooftop": "Vatland Honda", "count": 1}, {"rooftop": "Dutch Miller Kia Charlotte", "count": 1}, {"rooftop": "Zeigler Hyundai of Racine", "count": 1}, {"rooftop": "Principle BMW MINI  of San Antonio", "count": 1}]}}
+{
+  "rows": {
+    "Sales IB": [
+      {
+        "metric": "After-hours STL",
+        "prev": {
+          "value": 0,
+          "unit": "rooftops",
+          "sub": "of pool with an after-hours speed-to-lead touch — 36 rooftops have no configured hours (excluded)",
+          "list": []
+        },
+        "cur": {
+          "value": 1,
+          "unit": "rooftops",
+          "sub": "of pool with an after-hours speed-to-lead touch — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 58
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "After-hours Calls",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with an after-hours call — 36 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 250
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 169
+            },
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 150
+            },
+            {
+              "rooftop": "Edwards Chevrolet 280",
+              "team_id": "8559da8aef",
+              "count": 41
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 30
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 5
+            },
+            {
+              "rooftop": "Edwards Honda",
+              "team_id": "d6947fc2e0",
+              "count": 4
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 3
+            }
+          ]
+        },
+        "cur": {
+          "value": 7,
+          "unit": "rooftops",
+          "sub": "of pool with an after-hours call — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 129
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 78
+            },
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 75
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 56
+            },
+            {
+              "rooftop": "Edwards Chevrolet 280",
+              "team_id": "8559da8aef",
+              "count": 22
+            },
+            {
+              "rooftop": "Edwards Honda",
+              "team_id": "d6947fc2e0",
+              "count": 1
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Office-hrs STL",
+        "prev": {
+          "value": 0,
+          "unit": "rooftops",
+          "sub": "of pool with an office-hours speed-to-lead touch — 36 rooftops have no configured hours (excluded)",
+          "list": []
+        },
+        "cur": {
+          "value": 1,
+          "unit": "rooftops",
+          "sub": "of pool with an office-hours speed-to-lead touch — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 74
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Office-hrs Overflow",
+        "prev": {
+          "value": 7,
+          "unit": "rooftops",
+          "sub": "of pool with a 2nd+ simultaneous office-hours call — 36 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 260
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 234
+            },
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 44
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 32
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 13
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 11
+            },
+            {
+              "rooftop": "Edwards Chevrolet 280",
+              "team_id": "8559da8aef",
+              "count": 11
+            }
+          ]
+        },
+        "cur": {
+          "value": 6,
+          "unit": "rooftops",
+          "sub": "of pool with a 2nd+ simultaneous office-hours call — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 154
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 119
+            },
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 26
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 13
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 2
+            },
+            {
+              "rooftop": "Edwards Chevrolet 280",
+              "team_id": "8559da8aef",
+              "count": 2
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Office-hrs All Calls",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with an office-hours call — 36 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 260
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 234
+            },
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 44
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 37
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 18
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 17
+            },
+            {
+              "rooftop": "Edwards Chevrolet 280",
+              "team_id": "8559da8aef",
+              "count": 16
+            },
+            {
+              "rooftop": "Edwards Honda",
+              "team_id": "d6947fc2e0",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 6,
+          "unit": "rooftops",
+          "sub": "of pool with an office-hours call — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 155
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 119
+            },
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 26
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 14
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 4
+            },
+            {
+              "rooftop": "Edwards Chevrolet 280",
+              "team_id": "8559da8aef",
+              "count": 4
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "14 days follow-up",
+        "prev": {
+          "value": 21,
+          "unit": "rooftops",
+          "sub": "of pool with a follow-up task",
+          "list": [
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 5536
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 4902
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 4607
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 3351
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 3345
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 2953
+            },
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 2106
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 1313
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 1171
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1100
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 999
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 928
+            },
+            {
+              "rooftop": "Lucki Mazda",
+              "team_id": "b60b1bb221",
+              "count": 883
+            },
+            {
+              "rooftop": "Dutch Miller Kia Charlotte",
+              "team_id": "e08ec18b4f",
+              "count": 838
+            },
+            {
+              "rooftop": "Lake Ford",
+              "team_id": "3ba5db276f",
+              "count": 379
+            },
+            {
+              "rooftop": "Lake Chhevrolet",
+              "team_id": "7c8ec43273",
+              "count": 351
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 244
+            },
+            {
+              "rooftop": "McGrath Acura",
+              "team_id": "987d7cb5f5",
+              "count": 184
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 29
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 11
+            },
+            {
+              "rooftop": "Bob Johnson Le Roy",
+              "team_id": "10787c0b1",
+              "count": 5
+            }
+          ]
+        },
+        "cur": {
+          "value": 4,
+          "unit": "rooftops",
+          "sub": "of pool with a follow-up task",
+          "list": [
+            {
+              "rooftop": "I-40 Autos, LLC",
+              "team_id": "b4df3297f5",
+              "count": 7974
+            },
+            {
+              "rooftop": "Bob Johnson Le Roy",
+              "team_id": "10787c0b1",
+              "count": 5399
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 1186
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 24
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Appointment Reminder",
+        "prev": {
+          "value": 5,
+          "unit": "rooftops",
+          "sub": "of pool with an appointment-reminder task",
+          "list": [
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 613
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 83
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 59
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 56
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 16
+            }
+          ]
+        },
+        "cur": {
+          "value": 5,
+          "unit": "rooftops",
+          "sub": "of pool with an appointment-reminder task",
+          "list": [
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 90
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 82
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 43
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 26
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 7
+            }
+          ]
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Smartview",
+        "prev": {
+          "value": null,
+          "unit": "rooftops",
+          "sub": "deployment_statuses not configured (SUPABASE_URL/SUPABASE_SECRET_KEY missing) — see .env.example",
+          "list": []
+        },
+        "cur": {
+          "value": null,
+          "unit": "rooftops",
+          "sub": "deployment_statuses not configured (SUPABASE_URL/SUPABASE_SECRET_KEY missing) — see .env.example",
+          "list": []
+        },
+        "total": {
+          "value": 49,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      }
+    ],
+    "Sales OB": [
+      {
+        "metric": "Campaigns/Rooftop",
+        "prev": {
+          "value": 0.8,
+          "unit": "avg",
+          "sub": "distinct campaign use-cases per rooftop",
+          "list": [
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 1
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 1
+            },
+            {
+              "rooftop": "Subaru Wichita",
+              "team_id": "a0a4332434",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 1
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 1
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 1
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 1
+            },
+            {
+              "rooftop": "Dutch Miller Kia Charlotte",
+              "team_id": "e08ec18b4f",
+              "count": 1
+            },
+            {
+              "rooftop": "CornHusker Nissan",
+              "team_id": "37329f9976",
+              "count": 1
+            },
+            {
+              "rooftop": "Courtesy Ford",
+              "team_id": "3f96401f8d",
+              "count": 1
+            },
+            {
+              "rooftop": "CornHusker Auto Center",
+              "team_id": "3b8dee0632",
+              "count": 1
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 1
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 1
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 1
+            },
+            {
+              "rooftop": "Rick Weaver Chevrolet",
+              "team_id": "d4a682cb2a",
+              "count": 1
+            },
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 1
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 1
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 1
+            },
+            {
+              "rooftop": "Weimer Hyundai of Morgantown",
+              "team_id": "c5544a1617",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 0.8,
+          "unit": "avg",
+          "sub": "distinct campaign use-cases per rooftop",
+          "list": [
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 1
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 1
+            },
+            {
+              "rooftop": "Subaru Wichita",
+              "team_id": "a0a4332434",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 1
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 1
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 1
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 1
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 1
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 1
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 1
+            },
+            {
+              "rooftop": "Rick Weaver Chevrolet",
+              "team_id": "d4a682cb2a",
+              "count": 1
+            },
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 1
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 1
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 1
+            },
+            {
+              "rooftop": "Weimer Hyundai of Morgantown",
+              "team_id": "c5544a1617",
+              "count": 1
+            },
+            {
+              "rooftop": "Inver Grove Ford",
+              "team_id": "d5f65eeace",
+              "count": 1
+            },
+            {
+              "rooftop": "Inver Grove Hyundai",
+              "team_id": "8142b14481",
+              "count": 1
+            },
+            {
+              "rooftop": "New Brighton Ford",
+              "team_id": "ab2aaab081",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 34,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Appointments/Rooftop",
+        "prev": {
+          "value": 11.8,
+          "unit": "avg",
+          "sub": "AI-booked (source=spyne) appts per rooftop",
+          "list": [
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 72
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 71
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 69
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 27
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 20
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 18
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 17
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 15
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 10
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 10
+            },
+            {
+              "rooftop": "Dutch Miller Kia Charlotte",
+              "team_id": "e08ec18b4f",
+              "count": 9
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 7
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 6
+            },
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 6
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 5
+            },
+            {
+              "rooftop": "Inver Grove Ford",
+              "team_id": "d5f65eeace",
+              "count": 5
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 4
+            },
+            {
+              "rooftop": "Inver Grove Hyundai",
+              "team_id": "8142b14481",
+              "count": 4
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 3
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 3
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 3
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 3
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 2
+            },
+            {
+              "rooftop": "CornHusker Nissan",
+              "team_id": "37329f9976",
+              "count": 2
+            },
+            {
+              "rooftop": "Courtesy Ford",
+              "team_id": "3f96401f8d",
+              "count": 2
+            },
+            {
+              "rooftop": "Rick Weaver Chevrolet",
+              "team_id": "d4a682cb2a",
+              "count": 2
+            },
+            {
+              "rooftop": "Weimer Hyundai of Morgantown",
+              "team_id": "c5544a1617",
+              "count": 2
+            },
+            {
+              "rooftop": "New Brighton Ford",
+              "team_id": "ab2aaab081",
+              "count": 2
+            },
+            {
+              "rooftop": "CornHusker Auto Center",
+              "team_id": "3b8dee0632",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 7.3,
+          "unit": "avg",
+          "sub": "AI-booked (source=spyne) appts per rooftop",
+          "list": [
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 107
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 37
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 29
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 18
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 11
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 9
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 7
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 6
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 5
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 3
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 3
+            },
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 2
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 2
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 2
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 2
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 1
+            },
+            {
+              "rooftop": "Rick Weaver Chevrolet",
+              "team_id": "d4a682cb2a",
+              "count": 1
+            },
+            {
+              "rooftop": "Inver Grove Ford",
+              "team_id": "d5f65eeace",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 34,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Rooftops with 10+ Appts",
+        "prev": {
+          "value": 10,
+          "unit": "rooftops",
+          "sub": "≥10 appts booked",
+          "list": [
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 72
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 71
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 69
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 27
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 20
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 18
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 17
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 15
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 10
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 10
+            }
+          ]
+        },
+        "cur": {
+          "value": 5,
+          "unit": "rooftops",
+          "sub": "≥10 appts booked",
+          "list": [
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 107
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 37
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 29
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 18
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 11
+            }
+          ]
+        },
+        "total": {
+          "value": 34,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Active Rooftops",
+        "prev": {
+          "value": 27,
+          "unit": "rooftops",
+          "sub": "of pool with a sales campaign",
+          "list": [
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 1
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 1
+            },
+            {
+              "rooftop": "Subaru Wichita",
+              "team_id": "a0a4332434",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 1
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 1
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 1
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 1
+            },
+            {
+              "rooftop": "Dutch Miller Kia Charlotte",
+              "team_id": "e08ec18b4f",
+              "count": 1
+            },
+            {
+              "rooftop": "CornHusker Nissan",
+              "team_id": "37329f9976",
+              "count": 1
+            },
+            {
+              "rooftop": "Courtesy Ford",
+              "team_id": "3f96401f8d",
+              "count": 1
+            },
+            {
+              "rooftop": "CornHusker Auto Center",
+              "team_id": "3b8dee0632",
+              "count": 1
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 1
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 1
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 1
+            },
+            {
+              "rooftop": "Rick Weaver Chevrolet",
+              "team_id": "d4a682cb2a",
+              "count": 1
+            },
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 1
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 1
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 1
+            },
+            {
+              "rooftop": "Weimer Hyundai of Morgantown",
+              "team_id": "c5544a1617",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 26,
+          "unit": "rooftops",
+          "sub": "of pool with a sales campaign",
+          "list": [
+            {
+              "rooftop": "Bridgeton Auto Mall",
+              "team_id": "e4047018-c",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Nissan",
+              "team_id": "d14b8b8338",
+              "count": 1
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 1
+            },
+            {
+              "rooftop": "Subaru Wichita",
+              "team_id": "a0a4332434",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Lawrence Nissan",
+              "team_id": "6730ea9132",
+              "count": 1
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Landers CDJR",
+              "team_id": "c18a7a6d8d",
+              "count": 1
+            },
+            {
+              "rooftop": "Jones CDJR",
+              "team_id": "9c1ad81386",
+              "count": 1
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Kansas City",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            },
+            {
+              "rooftop": "Vatland Honda",
+              "team_id": "e05e67affb",
+              "count": 1
+            },
+            {
+              "rooftop": "Super Autos Miami",
+              "team_id": "7fb99e6ee1",
+              "count": 1
+            },
+            {
+              "rooftop": "Autoplex",
+              "team_id": "34ddfad075",
+              "count": 1
+            },
+            {
+              "rooftop": "Hyundai of Canton",
+              "team_id": "a5c07ee7d2",
+              "count": 1
+            },
+            {
+              "rooftop": "Rick Weaver Chevrolet",
+              "team_id": "d4a682cb2a",
+              "count": 1
+            },
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 1
+            },
+            {
+              "rooftop": "Revolution Cars of Avenel",
+              "team_id": "7aa04a1a2d",
+              "count": 1
+            },
+            {
+              "rooftop": "Automax Atlanta",
+              "team_id": "1cfc2c415d",
+              "count": 1
+            },
+            {
+              "rooftop": "Weimer Hyundai of Morgantown",
+              "team_id": "c5544a1617",
+              "count": 1
+            },
+            {
+              "rooftop": "Inver Grove Ford",
+              "team_id": "d5f65eeace",
+              "count": 1
+            },
+            {
+              "rooftop": "Inver Grove Hyundai",
+              "team_id": "8142b14481",
+              "count": 1
+            },
+            {
+              "rooftop": "New Brighton Ford",
+              "team_id": "ab2aaab081",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 34,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      }
+    ],
+    "Service IB": [
+      {
+        "metric": "After-hours Calls",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with an after-hours call — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "Victory Toyota of Midtown",
+              "team_id": "bf718528af",
+              "count": 315
+            },
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 294
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 144
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 132
+            },
+            {
+              "rooftop": "Bob King Mazda",
+              "team_id": "a9e37101ea",
+              "count": 97
+            },
+            {
+              "rooftop": "DeNooyer Chevrolet Kalamazoo",
+              "team_id": "723708ae8f",
+              "count": 72
+            },
+            {
+              "rooftop": "John Hiester Chevrolet",
+              "team_id": "0dcef03834",
+              "count": 38
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 22
+            }
+          ]
+        },
+        "cur": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with an after-hours call — 32 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 246
+            },
+            {
+              "rooftop": "Victory Toyota of Midtown",
+              "team_id": "bf718528af",
+              "count": 133
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 120
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 47
+            },
+            {
+              "rooftop": "DeNooyer Chevrolet Kalamazoo",
+              "team_id": "723708ae8f",
+              "count": 45
+            },
+            {
+              "rooftop": "Bob King Mazda",
+              "team_id": "a9e37101ea",
+              "count": 28
+            },
+            {
+              "rooftop": "John Hiester Chevrolet",
+              "team_id": "0dcef03834",
+              "count": 21
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 20
+            }
+          ]
+        },
+        "total": {
+          "value": 48,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Office-hrs Overflow",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with a 2nd+ simultaneous office-hours call — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 695
+            },
+            {
+              "rooftop": "Victory Toyota of Midtown",
+              "team_id": "bf718528af",
+              "count": 624
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 290
+            },
+            {
+              "rooftop": "Bob King Mazda",
+              "team_id": "a9e37101ea",
+              "count": 118
+            },
+            {
+              "rooftop": "DeNooyer Chevrolet Kalamazoo",
+              "team_id": "723708ae8f",
+              "count": 79
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 69
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 67
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 31
+            }
+          ]
+        },
+        "cur": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with a 2nd+ simultaneous office-hours call — 32 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 613
+            },
+            {
+              "rooftop": "Victory Toyota of Midtown",
+              "team_id": "bf718528af",
+              "count": 332
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 168
+            },
+            {
+              "rooftop": "DeNooyer Chevrolet Kalamazoo",
+              "team_id": "723708ae8f",
+              "count": 40
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 37
+            },
+            {
+              "rooftop": "Bob King Mazda",
+              "team_id": "a9e37101ea",
+              "count": 35
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 19
+            },
+            {
+              "rooftop": "John Hiester Chevrolet",
+              "team_id": "0dcef03834",
+              "count": 2
+            }
+          ]
+        },
+        "total": {
+          "value": 48,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Office-hrs All Calls",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with an office-hours call — 35 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 695
+            },
+            {
+              "rooftop": "Victory Toyota of Midtown",
+              "team_id": "bf718528af",
+              "count": 625
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 290
+            },
+            {
+              "rooftop": "Bob King Mazda",
+              "team_id": "a9e37101ea",
+              "count": 118
+            },
+            {
+              "rooftop": "DeNooyer Chevrolet Kalamazoo",
+              "team_id": "723708ae8f",
+              "count": 82
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 74
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 70
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 33
+            }
+          ]
+        },
+        "cur": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with an office-hours call — 32 rooftops have no configured hours (excluded)",
+          "list": [
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 613
+            },
+            {
+              "rooftop": "Victory Toyota of Midtown",
+              "team_id": "bf718528af",
+              "count": 332
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 170
+            },
+            {
+              "rooftop": "DeNooyer Chevrolet Kalamazoo",
+              "team_id": "723708ae8f",
+              "count": 40
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 38
+            },
+            {
+              "rooftop": "Bob King Mazda",
+              "team_id": "a9e37101ea",
+              "count": 35
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 23
+            },
+            {
+              "rooftop": "John Hiester Chevrolet",
+              "team_id": "0dcef03834",
+              "count": 2
+            }
+          ]
+        },
+        "total": {
+          "value": 48,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Follow-ups",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "of pool with a follow-up task",
+          "list": [
+            {
+              "rooftop": "Pointe Buick GMC",
+              "team_id": "eba56ec9aa",
+              "count": 2106
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1100
+            },
+            {
+              "rooftop": "Lucki Mazda",
+              "team_id": "b60b1bb221",
+              "count": 883
+            },
+            {
+              "rooftop": "Dutch Miller Kia Charlotte",
+              "team_id": "e08ec18b4f",
+              "count": 838
+            },
+            {
+              "rooftop": "Lake Ford",
+              "team_id": "3ba5db276f",
+              "count": 379
+            },
+            {
+              "rooftop": "Lake Chhevrolet",
+              "team_id": "7c8ec43273",
+              "count": 351
+            },
+            {
+              "rooftop": "PalmEasy Motors PA LLC",
+              "team_id": "5a4c21a96f",
+              "count": 244
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 29
+            }
+          ]
+        },
+        "cur": {
+          "value": 0,
+          "unit": "rooftops",
+          "sub": "of pool with a follow-up task",
+          "list": []
+        },
+        "total": {
+          "value": 48,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Appointment Reminder",
+        "prev": {
+          "value": 0,
+          "unit": "rooftops",
+          "sub": "of pool with an appointment-reminder task",
+          "list": []
+        },
+        "cur": {
+          "value": 0,
+          "unit": "rooftops",
+          "sub": "of pool with an appointment-reminder task",
+          "list": []
+        },
+        "total": {
+          "value": 48,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      }
+    ],
+    "Service OB": [
+      {
+        "metric": "Campaigns/Rooftop",
+        "prev": {
+          "value": 0.4,
+          "unit": "avg",
+          "sub": "distinct campaign use-cases per rooftop",
+          "list": [
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 2
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 1
+            },
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Legends",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 0.4,
+          "unit": "avg",
+          "sub": "distinct campaign use-cases per rooftop",
+          "list": [
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 2
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 1
+            },
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Legends",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 25,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Appointments/Rooftop",
+        "prev": {
+          "value": 34.2,
+          "unit": "avg",
+          "sub": "AI-booked (source=spyne) appts per rooftop",
+          "list": [
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 263
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 235
+            },
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 104
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 73
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 59
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 36
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 22
+            },
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 20
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 15
+            },
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 12
+            },
+            {
+              "rooftop": "Dutch Miller Kia Charlotte",
+              "team_id": "e08ec18b4f",
+              "count": 6
+            },
+            {
+              "rooftop": "CornHusker Nissan",
+              "team_id": "37329f9976",
+              "count": 3
+            },
+            {
+              "rooftop": "Courtesy Ford",
+              "team_id": "3f96401f8d",
+              "count": 2
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 1
+            },
+            {
+              "rooftop": "Carson Hyundai",
+              "team_id": "1a916c0965",
+              "count": 1
+            },
+            {
+              "rooftop": "Subaru Wichita",
+              "team_id": "a0a4332434",
+              "count": 1
+            },
+            {
+              "rooftop": "Beaver County Auto",
+              "team_id": "9a72db996f",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "CornHusker Auto Center",
+              "team_id": "3b8dee0632",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 18.4,
+          "unit": "avg",
+          "sub": "AI-booked (source=spyne) appts per rooftop",
+          "list": [
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 117
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 100
+            },
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 71
+            },
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 48
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 34
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 33
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 14
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 12
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 10
+            },
+            {
+              "rooftop": "Subaru Wichita",
+              "team_id": "a0a4332434",
+              "count": 7
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 7
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 3
+            },
+            {
+              "rooftop": "Carson Hyundai",
+              "team_id": "1a916c0965",
+              "count": 3
+            },
+            {
+              "rooftop": "World Car Mazda San Antonio",
+              "team_id": "d4c824c0-9",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 25,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Rooftops with 20+ Appts",
+        "prev": {
+          "value": 8,
+          "unit": "rooftops",
+          "sub": "≥20 appts booked",
+          "list": [
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 263
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 235
+            },
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 104
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 73
+            },
+            {
+              "rooftop": "World Car Kia San Antonio",
+              "team_id": "d2999d21-c",
+              "count": 59
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 36
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 22
+            },
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 20
+            }
+          ]
+        },
+        "cur": {
+          "value": 6,
+          "unit": "rooftops",
+          "sub": "≥20 appts booked",
+          "list": [
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 117
+            },
+            {
+              "rooftop": "Covina Kia",
+              "team_id": "49a06313cf",
+              "count": 100
+            },
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 71
+            },
+            {
+              "rooftop": "World Car Kia South",
+              "team_id": "48d0fea7-2",
+              "count": 48
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 34
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 33
+            }
+          ]
+        },
+        "total": {
+          "value": 25,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      },
+      {
+        "metric": "Active Rooftops",
+        "prev": {
+          "value": 10,
+          "unit": "rooftops",
+          "sub": "of pool with a service campaign",
+          "list": [
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 2
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda DTLA",
+              "team_id": "9923577d07",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Horne Mazda",
+              "team_id": "c885afdbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 1
+            },
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Legends",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            }
+          ]
+        },
+        "cur": {
+          "value": 9,
+          "unit": "rooftops",
+          "sub": "of pool with a service campaign",
+          "list": [
+            {
+              "rooftop": "Toronto Honda",
+              "team_id": "26fe9492b9",
+              "count": 2
+            },
+            {
+              "rooftop": "Feldmann Imports, Inc.",
+              "team_id": "5480771b21",
+              "count": 1
+            },
+            {
+              "rooftop": "Wolfchase Honda",
+              "team_id": "405beccbe9",
+              "count": 1
+            },
+            {
+              "rooftop": "Honda Reseda",
+              "team_id": "2b110492b6",
+              "count": 1
+            },
+            {
+              "rooftop": "Zeigler Hyundai of Racine",
+              "team_id": "f618492d10",
+              "count": 1
+            },
+            {
+              "rooftop": "Principle BMW MINI of San Antonio",
+              "team_id": "fdec030155",
+              "count": 1
+            },
+            {
+              "rooftop": "Paragon Acura",
+              "team_id": "e9e19bca63",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Midwest",
+              "team_id": "3d3deabc98",
+              "count": 1
+            },
+            {
+              "rooftop": "Dream Nissan Legends",
+              "team_id": "7607d0e6f5",
+              "count": 1
+            }
+          ]
+        },
+        "total": {
+          "value": 25,
+          "unit": "rooftops",
+          "sub": "contract-Live count from the master sheet",
+          "list": [],
+          "pool": true
+        }
+      }
+    ]
+  },
+  "pools": {
+    "Sales IB": [
+      {
+        "team_id": "b4df3297f5",
+        "rooftop": "I-40 Autos, LLC",
+        "count": 1
+      },
+      {
+        "team_id": "987d7cb5f5",
+        "rooftop": "McGrath Acura",
+        "count": 1
+      },
+      {
+        "team_id": "5895de05b",
+        "rooftop": "Paragon Honda",
+        "count": 1
+      },
+      {
+        "team_id": "5480771b21",
+        "rooftop": "Feldmann Imports, Inc.",
+        "count": 1
+      },
+      {
+        "team_id": "e4047018-c",
+        "rooftop": "Bridgeton Auto Mall",
+        "count": 1
+      },
+      {
+        "team_id": "8559da8aef",
+        "rooftop": "Edwards Chevrolet 280",
+        "count": 1
+      },
+      {
+        "team_id": "4e24c50b58",
+        "rooftop": "Edwards Chevrolet Downtown",
+        "count": 1
+      },
+      {
+        "team_id": "d6947fc2e0",
+        "rooftop": "Edwards Honda",
+        "count": 1
+      },
+      {
+        "team_id": "405beccbe9",
+        "rooftop": "Wolfchase Honda",
+        "count": 1
+      },
+      {
+        "team_id": "d14b8b8338",
+        "rooftop": "Wolfchase Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "5a4c21a96f",
+        "rooftop": "PalmEasy Motors PA LLC",
+        "count": 1
+      },
+      {
+        "team_id": "49a06313cf",
+        "rooftop": "Covina Kia",
+        "count": 1
+      },
+      {
+        "team_id": "1a916c0965",
+        "rooftop": "Carson Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "c18a7a6d8d",
+        "rooftop": "Landers CDJR",
+        "count": 1
+      },
+      {
+        "team_id": "5c99ab695a",
+        "rooftop": "Eddie VW",
+        "count": 1
+      },
+      {
+        "team_id": "9923577d07",
+        "rooftop": "Honda DTLA",
+        "count": 1
+      },
+      {
+        "team_id": "a0a4332434",
+        "rooftop": "Subaru Wichita",
+        "count": 1
+      },
+      {
+        "team_id": "2b110492b6",
+        "rooftop": "Honda Reseda",
+        "count": 1
+      },
+      {
+        "team_id": "6730ea9132",
+        "rooftop": "Dream Lawrence Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "9c1ad81386",
+        "rooftop": "Jones CDJR",
+        "count": 1
+      },
+      {
+        "team_id": "9a72db996f",
+        "rooftop": "Beaver County Auto",
+        "count": 1
+      },
+      {
+        "team_id": "f618492d10",
+        "rooftop": "Zeigler Hyundai of Racine",
+        "count": 1
+      },
+      {
+        "team_id": "80dc6dcf0",
+        "rooftop": "Chapman Chevrolet Buick gmc ltd.",
+        "count": 1
+      },
+      {
+        "team_id": "b75e784fa2",
+        "rooftop": "Auto Depot of Navarre",
+        "count": 1
+      },
+      {
+        "team_id": "3d3deabc98",
+        "rooftop": "Dream Nissan Midwest",
+        "count": 1
+      },
+      {
+        "team_id": "7607d0e6f5",
+        "rooftop": "Dream Nissan Kansas City",
+        "count": 1
+      },
+      {
+        "team_id": "e05e67affb",
+        "rooftop": "Vatland Honda",
+        "count": 1
+      },
+      {
+        "team_id": "eee817b4cd",
+        "rooftop": "Southey Ford",
+        "count": 1
+      },
+      {
+        "team_id": "3ba5db276f",
+        "rooftop": "Lake Ford",
+        "count": 1
+      },
+      {
+        "team_id": "7c8ec43273",
+        "rooftop": "Lake Chhevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "e08ec18b4f",
+        "rooftop": "Dutch Miller Kia Charlotte",
+        "count": 1
+      },
+      {
+        "team_id": "37329f9976",
+        "rooftop": "CornHusker Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "3f96401f8d",
+        "rooftop": "Courtesy Ford",
+        "count": 1
+      },
+      {
+        "team_id": "3b8dee0632",
+        "rooftop": "CornHusker Auto Center",
+        "count": 1
+      },
+      {
+        "team_id": "fdec030155",
+        "rooftop": "Principle BMW MINI of San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "7fb99e6ee1",
+        "rooftop": "Super Autos Miami",
+        "count": 1
+      },
+      {
+        "team_id": "ff28681761",
+        "rooftop": "Si Vallet Auto Sales",
+        "count": 1
+      },
+      {
+        "team_id": "34ddfad075",
+        "rooftop": "Autoplex",
+        "count": 1
+      },
+      {
+        "team_id": "a5c07ee7d2",
+        "rooftop": "Hyundai of Canton",
+        "count": 1
+      },
+      {
+        "team_id": "d4a682cb2a",
+        "rooftop": "Rick Weaver Chevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "b60b1bb221",
+        "rooftop": "Lucki Mazda",
+        "count": 1
+      },
+      {
+        "team_id": "eba56ec9aa",
+        "rooftop": "Pointe Buick GMC",
+        "count": 1
+      },
+      {
+        "team_id": "7aa04a1a2d",
+        "rooftop": "Revolution Cars of Avenel",
+        "count": 1
+      },
+      {
+        "team_id": "1cfc2c415d",
+        "rooftop": "Automax Atlanta",
+        "count": 1
+      },
+      {
+        "team_id": "10787c0b1",
+        "rooftop": "Bob Johnson Le Roy",
+        "count": 1
+      },
+      {
+        "team_id": "c5544a1617",
+        "rooftop": "Weimer Hyundai of Morgantown",
+        "count": 1
+      },
+      {
+        "team_id": "49355ed19e",
+        "rooftop": "McDonald GMC Cadillac",
+        "count": 1
+      },
+      {
+        "team_id": "60d1f60395",
+        "rooftop": "McDonald Chevrolet Milington",
+        "count": 1
+      },
+      {
+        "team_id": "8dce905e41",
+        "rooftop": "Principle Volkswagen of Grapevine",
+        "count": 1
+      }
+    ],
+    "Sales OB": [
+      {
+        "team_id": "e4047018-c",
+        "rooftop": "Bridgeton Auto Mall",
+        "count": 1
+      },
+      {
+        "team_id": "405beccbe9",
+        "rooftop": "Wolfchase Honda",
+        "count": 1
+      },
+      {
+        "team_id": "d14b8b8338",
+        "rooftop": "Wolfchase Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "49a06313cf",
+        "rooftop": "Covina Kia",
+        "count": 1
+      },
+      {
+        "team_id": "1a916c0965",
+        "rooftop": "Carson Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "5c99ab695a",
+        "rooftop": "Eddie VW",
+        "count": 1
+      },
+      {
+        "team_id": "9923577d07",
+        "rooftop": "Honda DTLA",
+        "count": 1
+      },
+      {
+        "team_id": "a0a4332434",
+        "rooftop": "Subaru Wichita",
+        "count": 1
+      },
+      {
+        "team_id": "2b110492b6",
+        "rooftop": "Honda Reseda",
+        "count": 1
+      },
+      {
+        "team_id": "6730ea9132",
+        "rooftop": "Dream Lawrence Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "c885afdbe9",
+        "rooftop": "Horne Mazda",
+        "count": 1
+      },
+      {
+        "team_id": "c18a7a6d8d",
+        "rooftop": "Landers CDJR",
+        "count": 1
+      },
+      {
+        "team_id": "9c1ad81386",
+        "rooftop": "Jones CDJR",
+        "count": 1
+      },
+      {
+        "team_id": "9a72db996f",
+        "rooftop": "Beaver County Auto",
+        "count": 1
+      },
+      {
+        "team_id": "f618492d10",
+        "rooftop": "Zeigler Hyundai of Racine",
+        "count": 1
+      },
+      {
+        "team_id": "b75e784fa2",
+        "rooftop": "Auto Depot of Navarre",
+        "count": 1
+      },
+      {
+        "team_id": "3d3deabc98",
+        "rooftop": "Dream Nissan Midwest",
+        "count": 1
+      },
+      {
+        "team_id": "7607d0e6f5",
+        "rooftop": "Dream Nissan Kansas City",
+        "count": 1
+      },
+      {
+        "team_id": "e05e67affb",
+        "rooftop": "Vatland Honda",
+        "count": 1
+      },
+      {
+        "team_id": "e08ec18b4f",
+        "rooftop": "Dutch Miller Kia Charlotte",
+        "count": 1
+      },
+      {
+        "team_id": "37329f9976",
+        "rooftop": "CornHusker Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "3f96401f8d",
+        "rooftop": "Courtesy Ford",
+        "count": 1
+      },
+      {
+        "team_id": "3b8dee0632",
+        "rooftop": "CornHusker Auto Center",
+        "count": 1
+      },
+      {
+        "team_id": "7fb99e6ee1",
+        "rooftop": "Super Autos Miami",
+        "count": 1
+      },
+      {
+        "team_id": "34ddfad075",
+        "rooftop": "Autoplex",
+        "count": 1
+      },
+      {
+        "team_id": "a5c07ee7d2",
+        "rooftop": "Hyundai of Canton",
+        "count": 1
+      },
+      {
+        "team_id": "d4a682cb2a",
+        "rooftop": "Rick Weaver Chevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "eba56ec9aa",
+        "rooftop": "Pointe Buick GMC",
+        "count": 1
+      },
+      {
+        "team_id": "7aa04a1a2d",
+        "rooftop": "Revolution Cars of Avenel",
+        "count": 1
+      },
+      {
+        "team_id": "1cfc2c415d",
+        "rooftop": "Automax Atlanta",
+        "count": 1
+      },
+      {
+        "team_id": "c5544a1617",
+        "rooftop": "Weimer Hyundai of Morgantown",
+        "count": 1
+      },
+      {
+        "team_id": "d5f65eeace",
+        "rooftop": "Inver Grove Ford",
+        "count": 1
+      },
+      {
+        "team_id": "8142b14481",
+        "rooftop": "Inver Grove Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "ab2aaab081",
+        "rooftop": "New Brighton Ford",
+        "count": 1
+      }
+    ],
+    "Service IB": [
+      {
+        "team_id": "838e507a-e",
+        "rooftop": "CallSource",
+        "count": 1
+      },
+      {
+        "team_id": "0dcef03834",
+        "rooftop": "John Hiester Chevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "bf524480-3",
+        "rooftop": "McGrath Acura",
+        "count": 1
+      },
+      {
+        "team_id": "a9e37101ea",
+        "rooftop": "Bob King Mazda",
+        "count": 1
+      },
+      {
+        "team_id": "5480771b21",
+        "rooftop": "Feldmann Imports, Inc.",
+        "count": 1
+      },
+      {
+        "team_id": "bf718528af",
+        "rooftop": "Victory Toyota of Midtown",
+        "count": 1
+      },
+      {
+        "team_id": "48d0fea7-2",
+        "rooftop": "World Car Kia South",
+        "count": 1
+      },
+      {
+        "team_id": "d2999d21-c",
+        "rooftop": "World Car Kia San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "d4c824c0-9",
+        "rooftop": "World Car Mazda San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "5a4c21a96f",
+        "rooftop": "PalmEasy Motors PA LLC",
+        "count": 1
+      },
+      {
+        "team_id": "723708ae8f",
+        "rooftop": "DeNooyer Chevrolet Kalamazoo",
+        "count": 1
+      },
+      {
+        "team_id": "49a06313cf",
+        "rooftop": "Covina Kia",
+        "count": 1
+      },
+      {
+        "team_id": "1a916c0965",
+        "rooftop": "Carson Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "5c99ab695a",
+        "rooftop": "Eddie VW",
+        "count": 1
+      },
+      {
+        "team_id": "9923577d07",
+        "rooftop": "Honda DTLA",
+        "count": 1
+      },
+      {
+        "team_id": "a0a4332434",
+        "rooftop": "Subaru Wichita",
+        "count": 1
+      },
+      {
+        "team_id": "2b110492b6",
+        "rooftop": "Honda Reseda",
+        "count": 1
+      },
+      {
+        "team_id": "f222a4f3ff",
+        "rooftop": "Mercedes Laguna Niguel",
+        "count": 1
+      },
+      {
+        "team_id": "8f59b8483b",
+        "rooftop": "Mercedes Benz Foothill",
+        "count": 1
+      },
+      {
+        "team_id": "c18a7a6d8d",
+        "rooftop": "Landers CDJR",
+        "count": 1
+      },
+      {
+        "team_id": "27029bf75c",
+        "rooftop": "Sport Durst Mazda",
+        "count": 1
+      },
+      {
+        "team_id": "5f6644c1f1",
+        "rooftop": "Sport Durst Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "a862eefd2e",
+        "rooftop": "Sport Durst Mazda of Goldsboro",
+        "count": 1
+      },
+      {
+        "team_id": "73ff62fd21",
+        "rooftop": "Sport Durst VW of Goldsboro",
+        "count": 1
+      },
+      {
+        "team_id": "5b65de92e5",
+        "rooftop": "Sport Durst VW of Jacksonville",
+        "count": 1
+      },
+      {
+        "team_id": "cb9198f115",
+        "rooftop": "Sport Durst Subaru",
+        "count": 1
+      },
+      {
+        "team_id": "03f8bdc40c",
+        "rooftop": "Habberstad Kia",
+        "count": 1
+      },
+      {
+        "team_id": "9a72db996f",
+        "rooftop": "Beaver County Auto",
+        "count": 1
+      },
+      {
+        "team_id": "b7184697be",
+        "rooftop": "Heiser Chevrolet of West Allis",
+        "count": 1
+      },
+      {
+        "team_id": "f618492d10",
+        "rooftop": "Zeigler Hyundai of Racine",
+        "count": 1
+      },
+      {
+        "team_id": "80dc6dcf0",
+        "rooftop": "Chapman Chevrolet Buick gmc ltd.",
+        "count": 1
+      },
+      {
+        "team_id": "eee817b4cd",
+        "rooftop": "Southey Ford",
+        "count": 1
+      },
+      {
+        "team_id": "3ba5db276f",
+        "rooftop": "Lake Ford",
+        "count": 1
+      },
+      {
+        "team_id": "7c8ec43273",
+        "rooftop": "Lake Chhevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "26fe9492b9",
+        "rooftop": "Toronto Honda",
+        "count": 1
+      },
+      {
+        "team_id": "e08ec18b4f",
+        "rooftop": "Dutch Miller Kia Charlotte",
+        "count": 1
+      },
+      {
+        "team_id": "37329f9976",
+        "rooftop": "CornHusker Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "3f96401f8d",
+        "rooftop": "Courtesy Ford",
+        "count": 1
+      },
+      {
+        "team_id": "3b8dee0632",
+        "rooftop": "CornHusker Auto Center",
+        "count": 1
+      },
+      {
+        "team_id": "fdec030155",
+        "rooftop": "Principle BMW MINI of San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "d4a682cb2a",
+        "rooftop": "Rick Weaver Chevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "b60b1bb221",
+        "rooftop": "Lucki Mazda",
+        "count": 1
+      },
+      {
+        "team_id": "eba56ec9aa",
+        "rooftop": "Pointe Buick GMC",
+        "count": 1
+      },
+      {
+        "team_id": "c5544a1617",
+        "rooftop": "Weimer Hyundai of Morgantown",
+        "count": 1
+      },
+      {
+        "team_id": "d5f65eeace",
+        "rooftop": "Inver Grove Ford",
+        "count": 1
+      },
+      {
+        "team_id": "8142b14481",
+        "rooftop": "Inver Grove Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "ab2aaab081",
+        "rooftop": "New Brighton Ford",
+        "count": 1
+      },
+      {
+        "team_id": "8dce905e41",
+        "rooftop": "Principle Volkswagen of Grapevine",
+        "count": 1
+      }
+    ],
+    "Service OB": [
+      {
+        "team_id": "5480771b21",
+        "rooftop": "Feldmann Imports, Inc.",
+        "count": 1
+      },
+      {
+        "team_id": "405beccbe9",
+        "rooftop": "Wolfchase Honda",
+        "count": 1
+      },
+      {
+        "team_id": "d14b8b8338",
+        "rooftop": "Wolfchase Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "48d0fea7-2",
+        "rooftop": "World Car Kia South",
+        "count": 1
+      },
+      {
+        "team_id": "d2999d21-c",
+        "rooftop": "World Car Kia San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "d4c824c0-9",
+        "rooftop": "World Car Mazda San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "49a06313cf",
+        "rooftop": "Covina Kia",
+        "count": 1
+      },
+      {
+        "team_id": "1a916c0965",
+        "rooftop": "Carson Hyundai",
+        "count": 1
+      },
+      {
+        "team_id": "5c99ab695a",
+        "rooftop": "Eddie VW",
+        "count": 1
+      },
+      {
+        "team_id": "9923577d07",
+        "rooftop": "Honda DTLA",
+        "count": 1
+      },
+      {
+        "team_id": "a0a4332434",
+        "rooftop": "Subaru Wichita",
+        "count": 1
+      },
+      {
+        "team_id": "2b110492b6",
+        "rooftop": "Honda Reseda",
+        "count": 1
+      },
+      {
+        "team_id": "c885afdbe9",
+        "rooftop": "Horne Mazda",
+        "count": 1
+      },
+      {
+        "team_id": "9a72db996f",
+        "rooftop": "Beaver County Auto",
+        "count": 1
+      },
+      {
+        "team_id": "f618492d10",
+        "rooftop": "Zeigler Hyundai of Racine",
+        "count": 1
+      },
+      {
+        "team_id": "26fe9492b9",
+        "rooftop": "Toronto Honda",
+        "count": 1
+      },
+      {
+        "team_id": "e08ec18b4f",
+        "rooftop": "Dutch Miller Kia Charlotte",
+        "count": 1
+      },
+      {
+        "team_id": "37329f9976",
+        "rooftop": "CornHusker Nissan",
+        "count": 1
+      },
+      {
+        "team_id": "3f96401f8d",
+        "rooftop": "Courtesy Ford",
+        "count": 1
+      },
+      {
+        "team_id": "3b8dee0632",
+        "rooftop": "CornHusker Auto Center",
+        "count": 1
+      },
+      {
+        "team_id": "fdec030155",
+        "rooftop": "Principle BMW MINI of San Antonio",
+        "count": 1
+      },
+      {
+        "team_id": "d4a682cb2a",
+        "rooftop": "Rick Weaver Chevrolet",
+        "count": 1
+      },
+      {
+        "team_id": "e9e19bca63",
+        "rooftop": "Paragon Acura",
+        "count": 1
+      },
+      {
+        "team_id": "3d3deabc98",
+        "rooftop": "Dream Nissan Midwest",
+        "count": 1
+      },
+      {
+        "team_id": "7607d0e6f5",
+        "rooftop": "Dream Nissan Legends",
+        "count": 1
+      }
+    ]
+  }
+}

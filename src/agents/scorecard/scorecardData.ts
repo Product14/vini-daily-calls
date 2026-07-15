@@ -12,13 +12,13 @@ export type ScorecardCell = {
   value: number | null;
   unit: string;
   sub: string;
-  list?: { rooftop: string; count: number }[];
+  list?: { rooftop: string; team_id: string; count: number }[];
   pool?: boolean;
 };
 export type ScorecardRow = { metric: string; prev: ScorecardCell; cur: ScorecardCell; total: ScorecardCell };
 export type ScorecardPayload = {
   rows: Record<string, ScorecardRow[]>;
-  pools: Record<string, { rooftop: string; count: number }[]>;
+  pools: Record<string, { rooftop: string; team_id: string; count: number }[]>;
 };
 
 export type ScorecardPeriod = "week" | "month";

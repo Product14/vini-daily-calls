@@ -138,7 +138,7 @@ export function ScorecardView() {
       </div>
 
       <div style={{ marginTop: 14, fontSize: 11.5, color: "#9ca3af", lineHeight: 1.6 }}>
-        <strong>Reading the numbers.</strong> Most rows count distinct rooftops with a qualifying touch — click a cell to see which. Office-hrs Overflow (2nd+ simultaneous call) is a subset of Office-hrs All Calls. Total Rooftops is the contract-Live count for that exact product (Sales/Service × Inbound/Outbound) from the billing registry, not just ClickHouse activity. Campaigns/Rooftop counts distinct campaign use-cases, not campaign IDs. Target is saved in this browser only.
+        <strong>Reading the numbers.</strong> Most rows count distinct rooftops with a qualifying touch — click a cell to see a ✓ Counted / ✗ Not counted split against the full Total-Rooftop roster, so a bare number becomes an actionable list of who still needs a follow-up. Office-hrs Overflow (2nd+ simultaneous call) is a subset of Office-hrs All Calls. Total Rooftops is the contract-Live count for that exact product (Sales/Service × Inbound/Outbound), pulled from the master Live/Churned sheet at generation time — not just ClickHouse activity. Rooftops with unconfigured business hours are excluded from both After-hours and Office-hrs buckets (noted in each cell) rather than defaulting to After-hours. Campaigns/Rooftop counts distinct campaign use-cases, not campaign IDs; Appointments/Rooftop counts AI-booked (source=spyne) meetings only. Target is saved in this browser only.
       </div>
 
       {drawer && (
@@ -160,12 +160,40 @@ export function ScorecardView() {
               </div>
             </div>
             <div style={{ overflowY: "auto", padding: "8px 0", flex: 1 }}>
-              {(drawer.column === "total" ? payload.pools[drawer.agent] : drawer.row[drawer.column].list ?? []).map((item) => (
-                <div key={item.rooftop} style={{ display: "flex", justifyContent: "space-between", padding: "9px 20px", borderBottom: `1px solid ${BORDER}`, fontSize: 13.5 }}>
-                  <span>{item.rooftop}</span>
-                  <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, color: "#6b7280" }}>{item.count.toLocaleString()}</span>
-                </div>
-              ))}
+              {drawer.column === "total" ? (
+                payload.pools[drawer.agent].map((item) => (
+                  <div key={item.team_id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 20px", borderBottom: `1px solid ${BORDER}`, fontSize: 13.5 }}>
+                    <span>{item.rooftop}</span>
+                    <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, color: "#6b7280" }}>{item.count.toLocaleString()}</span>
+                  </div>
+                ))
+              ) : (() => {
+                const matched = drawer.row[drawer.column].list ?? [];
+                const matchedIds = new Set(matched.map((i) => i.team_id));
+                const unmatched = (payload.pools[drawer.agent] ?? []).filter((p) => !matchedIds.has(p.team_id));
+                return (
+                  <>
+                    <div style={{ padding: "10px 20px 4px", fontSize: 11, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: "#15803d" }}>
+                      ✓ Counted ({matched.length})
+                    </div>
+                    {matched.map((item) => (
+                      <div key={item.team_id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 20px", borderBottom: `1px solid ${BORDER}`, fontSize: 13.5 }}>
+                        <span>{item.rooftop}</span>
+                        <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, color: "#6b7280" }}>{item.count.toLocaleString()}</span>
+                      </div>
+                    ))}
+                    <div style={{ padding: "14px 20px 4px", fontSize: 11, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: "#b91c1c" }}>
+                      ✗ Not counted ({unmatched.length})
+                    </div>
+                    {unmatched.map((item) => (
+                      <div key={item.team_id} style={{ display: "flex", justifyContent: "space-between", padding: "9px 20px", borderBottom: `1px solid ${BORDER}`, fontSize: 13.5, color: "#9ca3af" }}>
+                        <span>{item.rooftop}</span>
+                        <span style={{ fontVariantNumeric: "tabular-nums" }}>0</span>
+                      </div>
+                    ))}
+                  </>
+                );
+              })()}
             </div>
           </div>
         </>
