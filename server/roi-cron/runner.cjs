@@ -311,6 +311,40 @@ async function apiCampaigns(teamId, dept, start, end) {
 // metric fetchers — Reporting API only (day window = apiStart..apiEnd, MTD = apiMonthStart..apiEnd)
 const getMetrics = (teamId, dept, w, win) => apiMetrics(teamId, dept, win === "mtd" ? w.apiMonthStart : w.apiStart, w.apiEnd);
 
+// ── Department liveness (lull-tolerant 90-day lifecycle signal) ──────────────
+// A digest section (Sales/Service · Inbound/Outbound) shows when its direction is genuinely ALIVE — i.e. it
+// had ANY real activity within the last LIFE_DAYS. This is deliberately NOT the single-day window (which
+// would hide a live-but-quiet dept on a slow day) and NOT a config/provisioning flag (Paragon's inbound
+// agent IS provisioned yet does no real inbound — all its calls are outbound call-backs). An activity lull
+// is not churn; only genuine ~90-day silence (or an upstream-churned rooftop, already excluded) hides it.
+const LIFE_DAYS = 90;
+const N = (v) => Number(v) || 0;
+const ibActivity = (x) => { x = x || {}; return N(x.appointmentsInbound) + N(x.inboundUniqueLeads) + N(x.conversationsInbound) + N(x.conversationsCallIn) + N(x.conversationsSmsIn) + N(x.conversationsChatIn) + N(x.warmTransfers); };
+const obActivity = (x) => { x = x || {}; return N(x.outboundTotalCalls) + N(x.outboundUniqueReached) + N(x.outboundConnected) + N(x.outboundAppointmentsSet); };
+const subDaysISO = (iso, days) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() - days); return d.toISOString().slice(0, 10); };
+// Returns {inboundLive, outboundLive}. LAZY: day-activity ⊆ 90d-activity, so a direction that was active in
+// the current window is trivially alive (no extra fetch); we only pay the 90d /api/reports round-trip for a
+// direction that had ZERO activity this window (to tell "quiet today but alive" from "genuinely dead").
+// FAIL-OPEN to the day-window verdict if the 90d fetch errors (never blocks a send on a monitoring blip).
+async function deriveLiveness(teamId, dept, w, day) {
+  let inboundLive = ibActivity(day) > 0, outboundLive = obActivity(day) > 0;
+  if (!inboundLive || !outboundLive) {
+    try {
+      const life = await apiMetrics(teamId, dept, subDaysISO(w.apiEnd, LIFE_DAYS), w.apiEnd);
+      if (!inboundLive) inboundLive = ibActivity(life) > 0;
+      if (!outboundLive) outboundLive = obActivity(life) > 0;
+    } catch (e) { console.warn("[roi-cron] liveness 90d probe failed (fail-open to day window):", String(e && e.message ? e.message : e).slice(0, 100)); }
+  }
+  return { inboundLive, outboundLive };
+}
+// Day-window metrics with the 90d liveness flags folded in, so every downstream `{ ...day }` spread carries
+// inboundLive/outboundLive into the stored metrics `m` (templates gate their IB/OB sections on these).
+const getDayWithLiveness = async (teamId, dept, w) => {
+  const day = await getMetrics(teamId, dept, w, "day");
+  const live = await deriveLiveness(teamId, dept, w, day);
+  return { ...day, inboundLive: live.inboundLive, outboundLive: live.outboundLive };
+};
+
 // ── Aggregate freshness probe (send-time staleness gate) ─────────────────────
 // The digest reads agent_daily via /api/reports. A STALLED sync leaves agent_daily
 // frozen-but-READABLE, so /api/reports returns degraded:false with ZEROS — byte-for-byte
@@ -510,13 +544,15 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
   const hasConv = (call + sms + chat) > 0;                 // hero (total)
   const hasInboundConv = (callIn + smsIn + chatIn) > 0;    // inbound channel breakdown
   const hasOutboundConv = (callOut + smsOut + chatOut) > 0; // outbound channel breakdown
-  const hasOutbound = (m.outboundTotalCalls || 0) + (m.outboundUniqueReached || 0) + (m.outboundConnected || 0) + (m.outboundAppointmentsSet || 0) > 0;
-  // Inbound section gate — mirror hasOutbound. An outbound-only rooftop (e.g. a Service account whose only
-  // "inbound" is outbound call-backs, already re-attributed to Outbound upstream in agent_daily) has zero
-  // genuine inbound activity; without this gate the section renders anyway and its "Appointments" tile
-  // read the COMBINED total (appointmentsYesterday = inbound+outbound), mislabeling outbound bookings as
-  // inbound. Uses inbound-only fields exclusively.
-  const hasInbound = (m.appointmentsInbound || 0) + (m.inboundUniqueLeads || 0) + (m.conversationsInbound || 0) + callIn + smsIn + chatIn + (m.warmTransfers || 0) > 0;
+  const hasOutbound = (m.outboundLive != null) ? !!m.outboundLive : ((m.outboundTotalCalls || 0) + (m.outboundUniqueReached || 0) + (m.outboundConnected || 0) + (m.outboundAppointmentsSet || 0) > 0);
+  // Inbound section gate — mirror hasOutbound. Prefer the lull-tolerant 90d liveness flag (m.inboundLive,
+  // set in getDayWithLiveness): show the section when an inbound agent is genuinely ALIVE over the lifecycle
+  // window, NOT just when it happened to have activity in this single day (a live-but-quiet inbound must
+  // still show). Falls back to the day-window inbound-only signal for older stored runs that predate the
+  // flag. Without this, an outbound-only rooftop (e.g. Paragon — its only "inbound" is outbound call-backs,
+  // re-attributed to Outbound upstream) rendered a phantom inbound panel whose Appointments tile showed the
+  // COMBINED total (mislabeling outbound bookings as inbound).
+  const hasInbound = (m.inboundLive != null) ? !!m.inboundLive : ((m.appointmentsInbound || 0) + (m.inboundUniqueLeads || 0) + (m.conversationsInbound || 0) + callIn + smsIn + chatIn + (m.warmTransfers || 0) > 0);
   // channel bar + legend for any (call,sms,chat) triple
   const mkBar = (cc, ss, hh) => { const t = cc + ss + hh || 1; const p = (x) => `${(x / t) * 100}%`; return `<table width="100%" cellpadding="0" cellspacing="0" style="height:8px;border-radius:9999px;overflow:hidden;margin-top:8px;"><tr>${cc > 0 ? `<td style="width:${p(cc)};background:#0369A1;font-size:0;line-height:0;">&nbsp;</td>` : ""}${ss > 0 ? `<td style="width:${p(ss)};background:#0891B2;font-size:0;line-height:0;">&nbsp;</td>` : ""}${hh > 0 ? `<td style="width:${p(hh)};background:#0D9488;font-size:0;line-height:0;">&nbsp;</td>` : ""}</tr></table><div style="margin-top:8px;"><span style="display:inline-block;margin-right:14px;font-size:11px;color:#171717;"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#0369A1;margin-right:5px;"></span>Call <span style="color:#525252;">${cc}</span></span><span style="display:inline-block;margin-right:14px;font-size:11px;color:#171717;"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#0891B2;margin-right:5px;"></span>Sms <span style="color:#525252;">${ss}</span></span><span style="display:inline-block;margin-right:14px;font-size:11px;color:#171717;"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#0D9488;margin-right:5px;"></span>Chat <span style="color:#525252;">${hh}</span></span></div>`; };
   const channelBar = mkBar(call, sms, chat); // hero = total
@@ -833,7 +869,7 @@ async function runOnce() {
         return;
       }
       // step 2 — fetch via embedding (daily window + MTD window) + action items, store queued
-      const day = await getMetrics(L.team_id, L.department, w, "day");
+      const day = await getDayWithLiveness(L.team_id, L.department, w);
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
       const m = {
@@ -1013,7 +1049,7 @@ async function backfill(start, end) {
       const w = windowsForDate(day, tz);
       const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: day, dealer_timezone: tz, trigger: "backfill" };
       try {
-        const dayM = await getMetrics(L.team_id, L.department, w, "day");
+        const dayM = await getDayWithLiveness(L.team_id, L.department, w);
         const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
         const ai = await getActionItems(L.team_id, L.department, w);
         const camps = await getCampaigns(L.team_id, L.department, w);
@@ -1236,7 +1272,7 @@ async function generateAndSendNow(opts) {
     try {
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing", subject }); out.no_recipients++; note("no_recipients"); return; }
-      const day = await getMetrics(L.team_id, L.department, w, "day");
+      const day = await getDayWithLiveness(L.team_id, L.department, w);
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
       const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
@@ -1306,7 +1342,7 @@ async function previewDigestNow(opts) {
   const subject = `${Dep} ${Cad} Digest — ${name}`;
 
   // Same metric assembly as process1 (on-demand send), so the preview is byte-identical to what sends.
-  const day = await getMetrics(teamId, department, w, "day");
+  const day = await getDayWithLiveness(teamId, department, w);
   const mtd = await getMetrics(teamId, department, w, "mtd");
   const ai = await getActionItems(teamId, department, w);
   const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
@@ -1360,7 +1396,7 @@ async function runCadence(cadence) {
       if (done && !FORCE_RESEND) { out.already_sent++; return; }
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; return; }
-      const day = await getMetrics(L.team_id, L.department, w, "day");
+      const day = await getDayWithLiveness(L.team_id, L.department, w);
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
       const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };

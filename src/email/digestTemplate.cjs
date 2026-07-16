@@ -630,7 +630,10 @@ function renderDigestHtml(metrics, opts) {
   // inbound activity; without this gate the section still renders and its big number falls back to warmCount
   // (BLENDED inbound+outbound qualified) under an "Inbound … performance" heading — mislabeling outbound work
   // as inbound. Uses inbound-only signals exclusively.
-  var hasInbound = (inAppts + num(m.conversationsInbound) + callIn + smsIn + chatIn + inTransfers + during + after + num(m.inboundUniqueLeads) + num(m.qualifiedLeads)) > 0;
+  // Prefer the lull-tolerant 90d liveness flag (m.inboundLive, set by the runner) — show the section when an
+  // inbound agent is genuinely ALIVE over the lifecycle window, not merely when it had activity this window.
+  // Falls back to the window's inbound-only activity for older stored runs that predate the flag.
+  var hasInbound = (m.inboundLive != null) ? !!m.inboundLive : ((inAppts + num(m.conversationsInbound) + callIn + smsIn + chatIn + inTransfers + during + after + num(m.inboundUniqueLeads) + num(m.qualifiedLeads)) > 0);
   var inboundSection = !hasInbound ? "" :
     '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Inbound " + Dept.toLowerCase() + " performance") +
     panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
@@ -657,7 +660,7 @@ function renderDigestHtml(metrics, opts) {
 
   // ── OUTBOUND ACTIVITY (spec §6) ─────────────────────────────────────────────
   var callOut = num(m.conversationsCallOut), smsOut = num(m.conversationsSmsOut), chatOut = num(m.conversationsChatOut);
-  var hasOutbound = num(m.outboundTotalCalls) + num(m.outboundUniqueReached) + num(m.outboundConnected) + num(m.outboundAppointmentsSet) > 0;
+  var hasOutbound = (m.outboundLive != null) ? !!m.outboundLive : (num(m.outboundTotalCalls) + num(m.outboundUniqueReached) + num(m.outboundConnected) + num(m.outboundAppointmentsSet) > 0);
   var outboundSection = "";
   if (hasOutbound) {
     var obAppts = num(m.outboundAppointmentsSet);
