@@ -511,6 +511,12 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
   const hasInboundConv = (callIn + smsIn + chatIn) > 0;    // inbound channel breakdown
   const hasOutboundConv = (callOut + smsOut + chatOut) > 0; // outbound channel breakdown
   const hasOutbound = (m.outboundTotalCalls || 0) + (m.outboundUniqueReached || 0) + (m.outboundConnected || 0) + (m.outboundAppointmentsSet || 0) > 0;
+  // Inbound section gate — mirror hasOutbound. An outbound-only rooftop (e.g. a Service account whose only
+  // "inbound" is outbound call-backs, already re-attributed to Outbound upstream in agent_daily) has zero
+  // genuine inbound activity; without this gate the section renders anyway and its "Appointments" tile
+  // read the COMBINED total (appointmentsYesterday = inbound+outbound), mislabeling outbound bookings as
+  // inbound. Uses inbound-only fields exclusively.
+  const hasInbound = (m.appointmentsInbound || 0) + (m.inboundUniqueLeads || 0) + (m.conversationsInbound || 0) + callIn + smsIn + chatIn + (m.warmTransfers || 0) > 0;
   // channel bar + legend for any (call,sms,chat) triple
   const mkBar = (cc, ss, hh) => { const t = cc + ss + hh || 1; const p = (x) => `${(x / t) * 100}%`; return `<table width="100%" cellpadding="0" cellspacing="0" style="height:8px;border-radius:9999px;overflow:hidden;margin-top:8px;"><tr>${cc > 0 ? `<td style="width:${p(cc)};background:#0369A1;font-size:0;line-height:0;">&nbsp;</td>` : ""}${ss > 0 ? `<td style="width:${p(ss)};background:#0891B2;font-size:0;line-height:0;">&nbsp;</td>` : ""}${hh > 0 ? `<td style="width:${p(hh)};background:#0D9488;font-size:0;line-height:0;">&nbsp;</td>` : ""}</tr></table><div style="margin-top:8px;"><span style="display:inline-block;margin-right:14px;font-size:11px;color:#171717;"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#0369A1;margin-right:5px;"></span>Call <span style="color:#525252;">${cc}</span></span><span style="display:inline-block;margin-right:14px;font-size:11px;color:#171717;"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#0891B2;margin-right:5px;"></span>Sms <span style="color:#525252;">${ss}</span></span><span style="display:inline-block;margin-right:14px;font-size:11px;color:#171717;"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#0D9488;margin-right:5px;"></span>Chat <span style="color:#525252;">${hh}</span></span></div>`; };
   const channelBar = mkBar(call, sms, chat); // hero = total
@@ -535,17 +541,16 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
   </tr></table></td></tr>
   <tr><td class="pad" style="padding:14px 28px 4px;">${btnP("View appointments", L.appts)} ${btnS("Open conversation inbox", L.conv)}</td></tr>
   ${items.length ? `<tr><td class="pad" style="padding:4px 28px;">${rule}${sect("Action required")}<table width="100%">${items.map((it) => `<tr><td style="padding:7px 0;"><span style="display:inline-block;min-width:22px;height:22px;line-height:22px;text-align:center;background:#111827;color:#fff;border-radius:6px;font-size:12px;font-weight:700;">${it.count}</span><span style="font-size:13px;color:#111827;margin-left:10px;">${esc(humanizeIntent(it.intent))}</span></td></tr>`).join("")}</table><div style="margin-top:12px;">${btnP("Review action items", L.action)}</div></td></tr>` : ""}
-  <tr><td class="pad" style="padding:4px 22px;">
+  ${hasInbound ? `<tr><td class="pad" style="padding:4px 22px;">
     <div style="padding:0 6px;">${rule}${sect("Inbound activity")}</div>
     <table width="100%"><tr>
-      ${mini("Appointments", m.appointmentsYesterday || 0, `Yesterday · ${m.appointmentsYesterdayMTD || 0} MTD`)}
+      ${mini("Appointments", m.appointmentsInbound || 0, `Yesterday · ${m.appointmentsInboundMTD || 0} MTD`)}
       ${mini("Unique leads", m.inboundUniqueLeads || 0, `Yesterday · ${m.inboundUniqueLeadsMTD || 0} MTD`)}
       ${mini("Warm transfers", m.warmTransfers || 0, `Yesterday · ${m.warmTransfersMTD || 0} MTD`)}
     </tr></table>
-    <div style="padding:0 6px;">${hasInboundConv ? `${sect("Channel breakdown")}${mkBar(callIn, smsIn, chatIn)}` : ""}
-      ${tv.length ? `${sect("Top vehicles of interest")}<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;">${tv.map((v, i) => `<tr><td style="padding:12px 14px;${i ? "border-top:1px solid #E5E7EB;" : ""}"><table width="100%"><tr><td style="font-size:13px;color:#111827;">${esc(v.name)}</td><td align="right" style="font-size:13px;font-weight:700;color:#111827;">${v.count}</td></tr></table></td></tr>`).join("")}</table>` : ""}
-    </div>
-  </td></tr>
+    ${hasInboundConv ? `<div style="padding:0 6px;">${sect("Channel breakdown")}${mkBar(callIn, smsIn, chatIn)}</div>` : ""}
+  </td></tr>` : ""}
+  ${tv.length ? `<tr><td class="pad" style="padding:4px 22px;"><div style="padding:0 6px;">${rule}${sect("Top vehicles of interest")}<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;">${tv.map((v, i) => `<tr><td style="padding:12px 14px;${i ? "border-top:1px solid #E5E7EB;" : ""}"><table width="100%"><tr><td style="font-size:13px;color:#111827;">${esc(v.name)}</td><td align="right" style="font-size:13px;font-weight:700;color:#111827;">${v.count}</td></tr></table></td></tr>`).join("")}</table></div></td></tr>` : ""}
   ${hasOutbound ? `<tr><td class="pad" style="padding:4px 22px;">
     <div style="padding:0 6px;">${rule}${sect("Outbound activity")}<div style="font-size:11px;color:#9CA3AF;margin:-4px 0 4px;">Yesterday's activity</div></div>
     <table width="100%"><tr>
@@ -834,6 +839,7 @@ async function runOnce() {
       const m = {
         ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday,
         appointmentsYesterdayMTD: mtd.appointmentsYesterday,
+        appointmentsInboundMTD: mtd.appointmentsInbound,
         warmTransfersMTD: mtd.warmTransfers,
         inboundUniqueLeadsMTD: mtd.inboundUniqueLeads,
         // real-conversations MTD drives the hero's "…this month" pop-out; without it the hero
@@ -1011,7 +1017,7 @@ async function backfill(start, end) {
         const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
         const ai = await getActionItems(L.team_id, L.department, w);
         const camps = await getCampaigns(L.team_id, L.department, w);
-        const m = { ...dayM, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, conversationsReachedMTD: mtd.conversationsReached, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
+        const m = { ...dayM, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, conversationsReachedMTD: mtd.conversationsReached, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
         const tpl = pickTemplate(c, "daily");
         const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day, daily_template: tpl, digest_focus: pickFocus(c, m) };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
@@ -1233,7 +1239,7 @@ async function generateAndSendNow(opts) {
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
-      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
       const tpl = pickTemplate(c, cadence);
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const g = guardrailFor(tpl, m);
@@ -1303,7 +1309,7 @@ async function previewDigestNow(opts) {
   const day = await getMetrics(teamId, department, w, "day");
   const mtd = await getMetrics(teamId, department, w, "mtd");
   const ai = await getActionItems(teamId, department, w);
-  const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+  const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
   const tpl = pickTemplate(cfg, cadence);
   const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(cfg, m) };
   const g = guardrailFor(tpl, m);
@@ -1357,7 +1363,7 @@ async function runCadence(cadence) {
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
       const ai = await getActionItems(L.team_id, L.department, w);
-      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
       const tpl = pickTemplate(c, cadence); // weekly/monthly → always v2
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const subject = `${L.department === "service" ? "Service" : "Sales"} ${cadence === "weekly" ? "Weekly" : "Monthly"} Digest — ${name}`;

@@ -107,11 +107,18 @@ function kpiCard(label, big, unit, deltaPct, sub) {
   // Suppress the "vs prior" chip on a zero metric — a delta off zero is noise (Jul-2026 feedback #3).
   var isZero = num(String(big).replace(/[^0-9.\-]/g, "")) === 0;
   var showDelta = !isZero && deltaPct != null && deltaPct !== "";
+  // Bottom row is ALWAYS emitted (delta chip · else sub · else an invisible &nbsp; placeholder) so every
+  // card carries the same line count; paired with height:100% on the inner card + valign:top on the row
+  // cell, all KPI boxes render the SAME height even when some have a chip/sub and the zero cards don't
+  // (was: cards with neither collapsed shorter, giving the ragged row).
+  var bottom = showDelta
+    ? '<div style="margin-top:11px;">' + deltaChip(deltaPct, { tail: " vs prior" }) + "</div>"
+    : '<div style="font-size:11px;color:' + MUTE + ';margin-top:11px;line-height:1.4;">' + (sub ? esc(sub) : "&nbsp;") + "</div>";
   return '<td class="col" width="25%" valign="top" style="padding:6px;">' +
-    '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:16px 16px;">' +
+    '<table width="100%" height="100%" cellpadding="0" cellspacing="0" style="height:100%;border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td valign="top" style="padding:16px 16px;">' +
     '<div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:800;">' + esc(label) + "</div>" +
     '<div style="margin-top:9px;line-height:1;"><span style="font-size:26px;font-weight:900;color:' + INK + ';">' + esc(big) + "</span>" + (unit ? ' <span style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(unit) + "</span>" : "") + "</div>" +
-    (showDelta ? '<div style="margin-top:11px;">' + deltaChip(deltaPct, { tail: " vs prior" }) + "</div>" : (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:11px;">' + esc(sub) + "</div>" : "")) +
+    bottom +
     "</td></tr></table></td>";
 }
 
@@ -274,6 +281,12 @@ function renderDigestHtml(metrics, opts) {
   //  est-pipeline line were removed in the Jun-2026 review.)
   var leads = num(m.totalLeads != null ? m.totalLeads : m.inboundUniqueLeads);
   var qualified = num(m.qualifiedLeads != null ? m.qualifiedLeads : m.qualifiedLeadsYesterday);
+  // WHOLE-ROOFTOP qualified (IB+OB) for the glance-funnel KPI row. m.qualifiedLeads is INBOUND-ONLY (runner
+  // apiMetrics), so on an outbound-dominant rooftop it reads ~0 sitting between combined Real-conversations
+  // and combined Appointments — an impossible funnel (0 qualified yet N booked). warmCount = ibf.qualified +
+  // obf.qualified (the combined funnel qualified stage), matching how the hero ladder + outbound section
+  // already count qualified. The inbound SECTION keeps `qualified` (inbound-only) — it's inbound-scoped.
+  var qualifiedAll = Math.max(num(m.warmCount), qualified);
   var callsHandled = num(m.callsHandled != null ? m.callsHandled : m.conversationsCall);
   var convHandled = num(m.conversationsHandled) || callsHandled;
   var dollarRate = num(opts.dollarRate != null ? opts.dollarRate : m.dollarRate);
@@ -355,7 +368,7 @@ function renderDigestHtml(metrics, opts) {
     // canonical glance funnel: Real conversations → Qualified leads → Appointments (AI-booked) → Due action items.
     cardList = [
       kpiCard("Real conversations", fmtInt(convHero), "", d.totalCalls, ""),
-      kpiCard("Qualified leads", fmtInt(qualified), "", d.leadsQualified, ""),
+      kpiCard("Qualified leads", fmtInt(qualifiedAll), "", d.leadsQualified, ""),
       kpiCard("Appointments — AI-booked", fmtInt(apptsAny), "", null, apptSub),
       dueCard,
     ];
@@ -363,7 +376,7 @@ function renderDigestHtml(metrics, opts) {
     cardList = [
       kpiCard("Leads touched", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : ""),
       kpiCard("Real conversations", fmtInt(convHero), "", d.totalCalls, ""),
-      kpiCard("Qualified leads", fmtInt(qualified), "", d.leadsQualified, ""),
+      kpiCard("Qualified leads", fmtInt(qualifiedAll), "", d.leadsQualified, ""),
       kpiCard("Appointments — AI-booked", fmtInt(apptsAny), "", null, apptSub),
     ];
   }
@@ -612,7 +625,13 @@ function renderDigestHtml(metrics, opts) {
     resCallout = "";
   }
 
-  var inboundSection =
+  // Inbound section gate — mirror the outbound gate. An outbound-only rooftop (e.g. a Service account whose
+  // only "inbound" is outbound call-backs, already re-attributed to Outbound in agent_daily) has zero genuine
+  // inbound activity; without this gate the section still renders and its big number falls back to warmCount
+  // (BLENDED inbound+outbound qualified) under an "Inbound … performance" heading — mislabeling outbound work
+  // as inbound. Uses inbound-only signals exclusively.
+  var hasInbound = (inAppts + num(m.conversationsInbound) + callIn + smsIn + chatIn + inTransfers + during + after + num(m.inboundUniqueLeads) + num(m.qualifiedLeads)) > 0;
+  var inboundSection = !hasInbound ? "" :
     '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Inbound " + Dept.toLowerCase() + " performance") +
     panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
     // LEFT — appointment-booked numbers
