@@ -1443,16 +1443,46 @@ async function syncLive() {
   // query-endpoint. The endpoint path needed 3 extra secrets (CLICKHOUSE_CANDIDATES_ENDPOINT/KEY_ID/
   // KEY_SECRET) that were never set, so this cron errored every run — the identical fix already applied
   // to syncLifecycle. dealer_leads is reachable by that client. Rows come back keyed e/t/d.
+  //
+  // SCOPE (2026-07-16): CANDIDATES_SQL (teamAgentMappings.isOnboarded) matches the ENTIRE onboarded
+  // Spyne voice-AI fleet — ~2,300 teams / ~4,500 (team,dept) pairs — NOT the ROI-digest program (~320
+  // configured rooftops). Unfiltered it floods roi_live_departments (it inserted 4,372 dry_run rows in a
+  // single run the morning the long-broken endpoint was revived) and buries real customers in the
+  // tracker. The tracker's live universe is "rooftops that are Live OR have activity going on, minus
+  // churn", so scope discovery to exactly that: an eligible team is (lifecycle bucket 'Live' OR ≥1
+  // call/SMS in the last 30d) AND NOT 'Churned'. teamAgentMappings stays the SOLE source of the
+  // Sales/Service dept split — keep it for enumeration, then intersect its teams with the eligible set.
+  // LIFECYCLE_SQL/ACTIVITY_SQL are the same proven queries syncLifecycle runs.
   const { runClickhouse } = await import("../agentMetrics.js");
-  const rows = await runClickhouse(CANDIDATES_SQL);
+  const [rows, lifeRows, actRows] = await Promise.all([
+    runClickhouse(CANDIDATES_SQL),
+    runClickhouse(LIFECYCLE_SQL),
+    runClickhouse(ACTIVITY_SQL),
+  ]);
 
-  // normalize → {team_id, department}; held as is_live=true + dry_run=true
+  // eligible-team gate — (Live ∪ 30d-active) \ Churned
+  const churned = new Set(), liveT = new Set();
+  for (const r of (lifeRows || [])) {
+    const t = String(r.t ?? r.teamId ?? "").trim(); if (!t) continue;
+    const b = ARR_BUCKET_TO_LIFECYCLE[r.arr_bucket] || "";
+    if (b === "churn") churned.add(t); else if (b === "live") liveT.add(t);
+  }
+  const activeT = new Set();
+  for (const r of (actRows || [])) {
+    const t = String(r.t ?? r.teamId ?? "").trim(); if (!t) continue;
+    if ((Number(r.calls_30d) || 0) + (Number(r.sms_30d) || 0) > 0) activeT.add(t);
+  }
+  const eligible = (t) => (liveT.has(t) || activeT.has(t)) && !churned.has(t);
+
+  // normalize → {team_id, department}; held as is_live=true + dry_run=true — eligible teams only
   const seen = new Set();
   const cand = [];
+  let skipped = 0;
   for (const r of rows) {
     const team_id = String(r.t ?? r.team_id ?? "").trim();
     const department = String(r.d ?? r.department ?? "").trim().toLowerCase();
     if (!team_id || (department !== "sales" && department !== "service")) continue;
+    if (!eligible(team_id)) { skipped++; continue; }   // outside the Live/active-minus-churn universe
     const k = `${team_id}|${department}`;
     if (seen.has(k)) continue;
     seen.add(k);
@@ -1474,9 +1504,9 @@ async function syncLive() {
     if (error) throw new Error(`upsert roi_live_departments failed: ${error.message}`);
   }
 
-  const summary = { candidates: cand.length, new_rooftops: fresh.length, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
+  const summary = { candidates: cand.length, skipped_ineligible: skipped, new_rooftops: fresh.length, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
   await sb.from("roi_cron_runs").insert({ source: "sync-live", ok: true, summary }).then(() => {}, () => {});
-  console.log(`[sync-live] candidates=${cand.length} new=${fresh.length}`);
+  console.log(`[sync-live] eligible candidates=${cand.length} (skipped ${skipped} outside Live/active-minus-churn) new=${fresh.length}`);
   return { ranAt: ts, ...summary };
 }
 
