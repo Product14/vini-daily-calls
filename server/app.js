@@ -3336,31 +3336,89 @@ function _trackerRoiSb() {
 // Column lists copied VERBATIM from src/email/dataSource.ts so shapes match exactly.
 const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
 const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
+const _ROI_RUN_COLS = "team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count";
 
-// 1) Full grid load — digest runs (windowed) + config + recipients + live depts.
+/** Shift an ISO "YYYY-MM-DD" by n days (UTC). */
+function _isoShiftDays(iso, n) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
+}
+
+/**
+ * Page past PostgREST's db-max-rows cap when reading roi_digest_runs.
+ * supabase-js `.limit()`/`.range()` are SILENTLY truncated to db-max-rows (1000 by default) per
+ * request, so a single `.limit(5000)` never returns >1000 rows — and when one day's row count
+ * spikes (e.g. the sync-live discovery flood put 900+ rows on a single date), the newest-1000
+ * budget gets consumed by one or two days and every older date returns ZERO rows, blanking the
+ * tracker's history. We instead fetch in 1000-row pages, ordered by a unique key (id) so paging
+ * is deterministic across ties, until a short page signals the end. Callers bound volume with a
+ * date floor + the live-team set so the number of pages stays small.
+ */
+const _ROI_PAGE = 1000;
+async function _fetchRoiRunsPaged(sb, { floor, capDate, cadenceEq, cadenceNeq, teamIds }) {
+  if (Array.isArray(teamIds) && teamIds.length === 0) return []; // no live teams → nothing to show
+  const out = [];
+  for (let offset = 0; ; offset += _ROI_PAGE) {
+    let q = sb.from("roi_digest_runs")
+      .select(_ROI_RUN_COLS)
+      .gte("local_date", floor)
+      .order("local_date", { ascending: false })
+      .order("id", { ascending: true }) // unique tiebreak → stable paging across requests
+      .range(offset, offset + _ROI_PAGE - 1);
+    if (capDate) q = q.lte("local_date", capDate);
+    if (cadenceEq) q = q.eq("cadence", cadenceEq);
+    if (cadenceNeq) q = q.neq("cadence", cadenceNeq);
+    if (Array.isArray(teamIds) && teamIds.length) q = q.in("team_id", teamIds);
+    const { data, error } = await q;
+    if (error) throw error;
+    out.push(...(data ?? []));
+    if (!data || data.length < _ROI_PAGE) break;
+  }
+  return out;
+}
+
+// 1) Full grid load — digest runs (windowed + paged) + config + recipients + live depts.
 app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
   try {
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const a = String(req.query.anchor || "");
     const anchor = /^\d{4}-\d{2}-\d{2}$/.test(a) ? a : null;
-    let runsQ = sb.from("roi_digest_runs")
-      .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
-      .order("local_date", { ascending: false });
-    if (anchor) runsQ = runsQ.lte("local_date", anchor);
-    const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
-      runsQ.limit(5000),
+    // Config/recipients/live depts first — live depts give us the team set to scope the runs read
+    // to, so discovery/phantom rows for non-live teams never consume the read budget.
+    const [cfgRes, recRes, liveRes] = await Promise.all([
       sb.from("roi_rooftop_config").select(_ROI_CFG_COLS),
       sb.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
       sb.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
     ]);
-    // CRITICAL: runs/config/live define the rows themselves. recipients only enrich → degrade to [].
-    const critErr = runsRes.error || cfgRes.error || liveRes.error;
+    // CRITICAL: config/live define the rows themselves. recipients only enrich → degrade to [].
+    const critErr = cfgRes.error || liveRes.error;
     if (critErr) return res.status(500).json({ error: critErr.message });
     if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
+    const liveTeamIds = [...new Set((liveRes.data ?? []).filter((l) => l.is_live).map((l) => l.team_id))];
+
+    // Windowed + paged runs read (see _fetchRoiRunsPaged). Anchor ceiling for the floors is the
+    // explicit history anchor, else today — the client's default anchor (max of latest run /
+    // yesterday) is always ≤ today, so today's floor covers it. Daily needs ~14 cells (30d buffer
+    // absorbs cron lag); weekly/monthly reach back up to ~6 months. Splitting keeps the
+    // high-volume daily read tight instead of paging 200 days of daily rows.
+    const floorBase = anchor || new Date().toISOString().slice(0, 10);
+    let runs;
+    try {
+      const [daily, nonDaily] = await Promise.all([
+        _fetchRoiRunsPaged(sb, { floor: _isoShiftDays(floorBase, -30), capDate: anchor, cadenceEq: "daily", teamIds: liveTeamIds }),
+        _fetchRoiRunsPaged(sb, { floor: _isoShiftDays(floorBase, -200), capDate: anchor, cadenceNeq: "daily", teamIds: liveTeamIds }),
+      ]);
+      runs = daily.concat(nonDaily);
+    } catch (e) {
+      console.error("GET /api/tracker/rooftops-data runs read error:", e?.message ?? e);
+      return res.status(500).json({ error: e?.message ?? "runs read failed" });
+    }
     return res.json({
       ok: true,
-      runs: runsRes.data ?? [],
+      runs,
       configs: cfgRes.data ?? [],
       recipients: recRes.error ? [] : (recRes.data ?? []),
       lives: liveRes.data ?? [],
