@@ -306,6 +306,34 @@ async function apiCampaigns(teamId, dept, start, end) {
 }
 // metric fetchers — Reporting API only (day window = apiStart..apiEnd, MTD = apiMonthStart..apiEnd)
 const getMetrics = (teamId, dept, w, win) => apiMetrics(teamId, dept, win === "mtd" ? w.apiMonthStart : w.apiStart, w.apiEnd);
+
+// ── Aggregate freshness probe (send-time staleness gate) ─────────────────────
+// The digest reads agent_daily via /api/reports. A STALLED sync leaves agent_daily
+// frozen-but-READABLE, so /api/reports returns degraded:false with ZEROS — byte-for-byte
+// identical to a genuine quiet day (the `degraded` flag only catches a read FAILURE, not
+// staleness — verified on prod). This probe reads reporting-vini's /api/sync-health (the
+// newest agent_daily day) so the send path can REFUSE to email stale zeros: if the
+// aggregate hasn't reached the day being reported, HOLD + alert instead of shipping a
+// frozen snapshot. Best-effort / FAIL-OPEN: on a probe failure we do NOT block sends — the
+// sync fixes + watchdog stay the primary guard, and holding every customer digest on a
+// monitoring blip is the worse failure. Fetched ONCE per pass, passed into processOne.
+async function probeAggregateFreshness() {
+  try {
+    const res = await fetch(`${REPORTING_API_BASE}/api/sync-health`, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    if (j && j.ok && j.maxActivityDay) return { maxActivityDay: String(j.maxActivityDay), lastRunAt: j.lastRunAt || null, known: true };
+    return { known: false };
+  } catch (e) {
+    console.warn("[roi-cron] aggregate freshness probe unreachable — sends proceed (fail-open):", String(e && e.message ? e.message : e).slice(0, 120));
+    return { known: false };
+  }
+}
+// Stale = we KNOW the newest aggregated day and it is BEFORE the day being reported → the
+// sync has not processed that day yet, so any figure for it would be frozen/zero, not real.
+function aggregateStaleForDate(freshness, reportLocalDate) {
+  return !!(freshness && freshness.known && freshness.maxActivityDay < reportLocalDate);
+}
 const getActionItems = async (teamId, dept, w) => {
   const [items, stats] = await Promise.all([
     apiActionItems(teamId, dept, w.apiStart, w.apiEnd),
@@ -734,9 +762,15 @@ async function runOnce() {
   for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || "";
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0 };
+  const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0, stale_held: 0 };
   const failures = []; // genuine send failures this pass → the Slack breakage alert (postSlackAlert)
   const smsFailures = []; // genuine digest-SMS send failures this pass → shared Slack breakage alert (SMS)
+  const staleHeld = []; // rooftops held this pass because the aggregate hadn't reached the report day
+  // Probe the aggregate's freshness ONCE for the whole pass (not per rooftop). If the sync is stalled,
+  // agent_daily is frozen and every rooftop would read stale zeros — we hold them all rather than email
+  // frozen snapshots (see probeAggregateFreshness). One fetch, shared by every processOne below.
+  const freshness = await probeAggregateFreshness();
+  if (freshness.known) console.log(`  aggregate freshness: newest day = ${freshness.maxActivityDay} (last sync ${freshness.lastRunAt || "?"})`);
   // optional scoping for targeted dry-runs:
   //   ONLY_TEAMS=team1,team2   → run only these team_ids
   //   IGNORE_SEND_HOUR=true    → skip the local send-hour gate (render now regardless of time)
@@ -777,6 +811,18 @@ async function runOnce() {
       // recipients (step 1 finalized) for this dept — email filtered by the subscription matrix.
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); return; }
+      // ── AGGREGATE FRESHNESS HARD-GATE ────────────────────────────────────────────────────────────
+      // Before we read /api/reports: if the sync hasn't reached the day we're reporting, agent_daily is
+      // frozen and would hand us stale ZEROS with degraded:false (indistinguishable from a quiet day —
+      // the Sport Durst incident). Refuse to email a frozen snapshot: HOLD (not_sent/aggregate_stale) and
+      // let the pass raise ONE systemic alert. Sends resume automatically next pass once the sync catches
+      // up (the held row is re-evaluated). Fail-open: if freshness is unknown, we proceed as before.
+      if (aggregateStaleForDate(freshness, w.localDate)) {
+        await upsert({ status: "not_sent", reason: "aggregate_stale", reason_detail: `agg newest day ${freshness.maxActivityDay} < report ${w.localDate}` });
+        out.stale_held++; staleHeld.push(name);
+        console.log(`  · ${name} [${L.department}] HELD → aggregate_stale (agg max=${freshness.maxActivityDay} < report ${w.localDate}) — not emailing frozen zeros`);
+        return;
+      }
       // step 2 — fetch via embedding (daily window + MTD window) + action items, store queued
       const day = await getMetrics(L.team_id, L.department, w, "day");
       const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
@@ -888,6 +934,21 @@ async function runOnce() {
     while (_i < targets.length) { const L = targets[_i++]; await processOne(L); }
   }));
   console.log("  summary:", JSON.stringify(out));
+  // Systemic alert (ONCE) when the aggregate was stale enough to hold sends. Distinct from send failures:
+  // nothing broke in the digest — the UPSTREAM sync is behind, so we deliberately withheld frozen zeros.
+  // The sync-health watchdog also pages, but this fires at the exact moment a customer would have gotten
+  // stale numbers, and names the affected rooftops. Best-effort; never throws.
+  if (staleHeld.length) {
+    try {
+      const { postSystemicAlert } = require("./slackAlert.cjs");
+      await postSystemicAlert({
+        source: "Daily digest",
+        title: `${staleHeld.length} digest(s) HELD — reporting aggregate is stale`,
+        detail: `agent_daily's newest day (${freshness.maxActivityDay}) is behind the report date, so the digest would have emailed frozen zeros. Held instead — sends resume automatically once the sync catches up. Rooftops: ${staleHeld.slice(0, 12).join(", ")}${staleHeld.length > 12 ? ` +${staleHeld.length - 12} more` : ""}.`,
+        windowLabel: "daily digest cron",
+      });
+    } catch (e) { console.warn("[roi-cron] stale-hold alert skipped:", String(e).slice(0, 140)); }
+  }
   // Breakage alert → Slack when any digest genuinely failed to send this pass. Best-effort; never throws.
   await postBreakageAlert({ source: "Daily digest", failures, sentOk: out.sent, windowLabel: "daily digest send pass" })
     .catch((e) => console.warn("[roi-cron] slack alert skipped:", String(e).slice(0, 140)));
