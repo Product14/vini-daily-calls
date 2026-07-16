@@ -420,7 +420,7 @@ export async function loadEventCounts(): Promise<EventCounts> {
   }
   // 2) ClickHouse totals → override `total` with the REAL event count (keep `sent` from the view).
   try {
-    const r = await fetch(`/api/email/roi-event-counts`, { cache: "no-store" });
+    const r = await fetch(`/api/email/roi-event-counts`, { cache: "no-store", headers: trackerAuthHeaders() });
     const j = await r.json().catch(() => ({}));
     if (r.ok && Array.isArray((j as { counts?: unknown }).counts)) {
       // CH returns one row per (team×dept×type×direction) — fold to per (team::dept::type) with a
@@ -535,7 +535,7 @@ export async function loadEventDayCounts(
   try {
     const qs = new URLSearchParams({ teamId, department: department || "", emailType });
     if (tz) qs.set("tz", tz);
-    const r = await fetch(`/api/email/roi-event-daycounts?${qs.toString()}`, { cache: "no-store" });
+    const r = await fetch(`/api/email/roi-event-daycounts?${qs.toString()}`, { cache: "no-store", headers: trackerAuthHeaders() });
     const j = await r.json().catch(() => ({}));
     if (r.ok && j && typeof (j as { days?: unknown }).days === "object") return (j as { days: EventDayCounts }).days || {};
   } catch { /* fall through */ }
@@ -598,7 +598,7 @@ export async function loadEventFeed(
   try {
     const qs = new URLSearchParams({ teamId, department: department || "", emailType, sinceDays: "365", limit: String(limit), offset: String(offset) });
     if (direction) qs.set("direction", direction);
-    const r = await fetch(`/api/email/roi-event-list?${qs.toString()}`, { cache: "no-store" });
+    const r = await fetch(`/api/email/roi-event-list?${qs.toString()}`, { cache: "no-store", headers: trackerAuthHeaders() });
     const j = await r.json().catch(() => ({}));
     if (r.ok && Array.isArray((j as { events?: unknown }).events)) ch = (j as { events: CHEvent[] }).events;
   } catch { /* fall through to stored-only */ }

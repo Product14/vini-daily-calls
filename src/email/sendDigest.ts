@@ -161,7 +161,7 @@ export async function renderStoredPreview(opts: { teamId: string; dept: DeptKind
       cadence: opts.cadence || "daily",
       tpl: opts.tpl,
     });
-    const res = await fetch(`/api/email/roi-render-preview?${q.toString()}`);
+    const res = await fetch(`/api/email/roi-render-preview?${q.toString()}`, { headers: trackerAuthHeaders() });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) {
       return { ok: false, error: (body as { error?: string }).error || `Preview failed (HTTP ${res.status})` };
@@ -176,7 +176,7 @@ export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: stri
   try {
     const res = await fetch("/api/email/roi-generate-preview", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
       body: JSON.stringify({ cadence: opts.cadence, teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales" }),
     });
     const body = await res.json().catch(() => ({}));
@@ -194,7 +194,7 @@ export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: stri
     const r = await sendWithOverridePrompt((override) =>
       fetch("/api/email/roi-generate-send", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           cadence: opts.cadence,
           teamId: opts.teamId,
@@ -218,7 +218,7 @@ export async function generateSendEventNow(opts: { teamId?: string; enterpriseId
   try {
     const r = await sendWithOverridePrompt((override) =>
       fetch("/api/email/roi-event-generate-send", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           teamId: opts.teamId, enterpriseId: opts.enterpriseId,
           department: opts.department === "service" ? "service" : "sales",
@@ -248,7 +248,7 @@ export async function sendDigestNow(opts: SendDigestOpts): Promise<{ ok: boolean
     const r = await sendWithOverridePrompt((override) =>
       fetch("/api/email/roi-send-now", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({ teamId: opts.teamId, department: dept, localDate: opts.localDate, to: recipients, subject, html, override }),
       }));
     if (!r.ok) return { ok: false, error: r.error };
@@ -267,7 +267,7 @@ export async function sendStoredEventNow(opts: { id: string; to?: string[] }): P
     const r = await sendWithOverridePrompt((override) =>
       fetch("/api/email/roi-event-send-now", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({ id: opts.id, to: opts.to, override }),
       }));
     if (!r.ok) return { ok: false, error: r.error };

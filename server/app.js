@@ -2426,7 +2426,7 @@ const eventPixel = (id) => pixelTag(`id=${encodeURIComponent(id)}`);
 // the ROI Supabase (status=sent, recipients received, rendered_html stored) so
 // the tracker shows it as sent and the exact HTML is viewable.
 // Body: { teamId, department, localDate, to:[emails], subject, html }
-app.post("/api/email/roi-send-now", async (req, res) => {
+app.post("/api/email/roi-send-now", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, department, localDate, to, subject, html, override } = req.body ?? {};
     const requested = (Array.isArray(to) ? to : [to]).map((s) => String(s || "").trim()).filter(Boolean);
@@ -2508,7 +2508,7 @@ app.post("/api/email/roi-send-now", async (req, res) => {
 // live rooftops. Honours dry-run (server DRY_RUN + each rooftop's dry_run); pass
 // { dryRun: true } to force a suppressed preview (renders + stores, no email).
 // Body: { cadence, teamId?, department?, dryRun? }
-app.post("/api/email/roi-generate-send", async (req, res) => {
+app.post("/api/email/roi-generate-send", requireTrackerAuth, async (req, res) => {
   try {
     const { cadence, teamId, department, dryRun, override } = req.body ?? {};
     const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
@@ -2533,7 +2533,7 @@ app.post("/api/email/roi-generate-send", async (req, res) => {
 // Render-ONLY (no DB write, no email): builds the same metrics + HTML the on-demand
 // send would produce for ONE rooftop, so the tracker can preview a weekly/monthly
 // digest before the user manually triggers the send. Body: { cadence, teamId, department }
-app.post("/api/email/roi-generate-preview", async (req, res) => {
+app.post("/api/email/roi-generate-preview", requireTrackerAuth, async (req, res) => {
   try {
     const { cadence, teamId, department } = req.body ?? {};
     const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
@@ -2553,7 +2553,7 @@ app.post("/api/email/roi-generate-preview", async (req, res) => {
 // feeds, so the tracker's "Latest design" toggle shows the up-to-date email per customer
 // even when the stored copy is older or no event was sent yet.
 // Body: { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz }
-app.post("/api/email/roi-event-preview", async (req, res) => {
+app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
@@ -2600,7 +2600,7 @@ app.post("/api/email/roi-event-preview", async (req, res) => {
 // Backfill + live: lists every event in the window (history included) so the
 // transactional drill-down shows all data, not just generated rows. Read-only.
 // Query: ?teamId&department&emailType&sinceDays?&limit?
-app.get("/api/email/roi-event-list", async (req, res) => {
+app.get("/api/email/roi-event-list", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, department, emailType, direction, sinceDays, limit, offset } = req.query;
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
@@ -2618,7 +2618,7 @@ app.get("/api/email/roi-event-list", async (req, res) => {
 // Created / Closed (action items only) / Eligible from ClickHouse (dealer-local days), with
 // Sent overlaid from roi_event_emails. Powers the drill-down's per-day header.
 // Query: ?teamId&department&emailType&tz?&sinceDays?
-app.get("/api/email/roi-event-daycounts", async (req, res) => {
+app.get("/api/email/roi-event-daycounts", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, department, emailType, tz, sinceDays } = req.query;
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
@@ -2663,7 +2663,7 @@ app.get("/api/email/roi-event-daycounts", async (req, res) => {
 let eventCountsCache = { rows: null, fetchedAt: 0 };
 let eventCountsInflight = null;
 const EVENT_COUNTS_TTL_MS = 5 * 60 * 1000;
-app.get("/api/email/roi-event-counts", async (req, res) => {
+app.get("/api/email/roi-event-counts", requireTrackerAuth, async (req, res) => {
   try {
     if (!hasClickhouseCreds()) return res.json({ ok: true, counts: [], note: "ClickHouse not configured" });
     const force = req.query.refresh === "1";
@@ -2709,7 +2709,7 @@ async function postMailWithRetry(mailUrl, payload) {
 // Sends the stored rendered_html of a single per-event email to its recipients
 // (override `to`, else the row's recipients, else the rooftop's configured ones),
 // then marks the row sent. Used by the tracker's per-email "Send now" button.
-app.post("/api/email/roi-event-send-now", async (req, res) => {
+app.post("/api/email/roi-event-send-now", requireTrackerAuth, async (req, res) => {
   try {
     const { id, to, override } = req.body ?? {};
     if (!id) return res.status(400).json({ error: "id required" });
@@ -2725,15 +2725,24 @@ app.post("/api/email/roi-event-send-now", async (req, res) => {
     if (rowErr || !row) return res.status(404).json({ error: "event email not found" });
     if (!row.rendered_html) return res.status(400).json({ error: "no rendered copy to send" });
 
-    // recipients: explicit override → the row's recipients → the rooftop's enabled recipients for this dept
-    let recipients = (Array.isArray(to) ? to : to ? [to] : []).map((s) => String(s || "").trim()).filter(Boolean);
-    if (!recipients.length) recipients = (row.recipients ?? []).map((r) => String(r?.email || "").trim()).filter(Boolean);
+    // recipients: explicit override → the row's stored recipients → the rooftop's enabled recipients.
+    // GATE (verified_at): whichever source supplies the addresses, a rooftop only ever emails
+    // addresses a human verified for it. Previously an explicit `to` (or the stored row.recipients)
+    // was used with NO verification — the one hole that let a manual resend deliver a stored email's
+    // dealer/customer PII to an arbitrary address. Now every source is intersected with the verified set.
+    const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", row.team_id);
+    const verifiedRecs = (recs ?? []).filter((r) => r.verified_at && (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled);
+    const verifiedEmails = verifiedRecs.map((r) => String(r.email || "").trim()).filter(Boolean);
+    const verifiedSet = new Set(verifiedEmails.map((e) => e.toLowerCase()));
+    let requested = (Array.isArray(to) ? to : to ? [to] : []).map((s) => String(s || "").trim()).filter(Boolean);
+    if (!requested.length) requested = (row.recipients ?? []).map((r) => String(r?.email || "").trim()).filter(Boolean);
+    // Explicit/stored → keep only those that are verified; none supplied → the full verified set for the dept.
+    const recipients = requested.length ? requested.filter((e) => verifiedSet.has(e.toLowerCase())) : verifiedEmails;
     if (!recipients.length) {
-      const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", row.team_id);
-      // GATE (r.verified_at): a rooftop only emails recipients a human verified for it (PR #27).
-      recipients = (recs ?? []).filter((r) => r.verified_at && (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
+      return res.status(400).json({ error: requested.length
+        ? "None of the requested recipients are verified for this rooftop/department — add + verify them first."
+        : "no recipients configured for this rooftop/department" });
     }
-    if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
 
     // Anti-churn gate: refuse a no-value email unless the DANGER override is typed.
     let wireHtml = row.rendered_html;
@@ -2771,7 +2780,7 @@ const EVENT_SUBJECTS = {
   post_appointment: "New appointment", post_conversation: "Conversation summary",
   action_item: "Action items", action_item_overdue: "Overdue action items",
 };
-app.post("/api/email/roi-event-generate-send", async (req, res) => {
+app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz, override } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
@@ -3623,7 +3632,7 @@ app.get("/api/cron/roi-email", async (req, res) => {
 // (teamId, department, cadence, localDate) under tpl=v1|v2 so any past day can be viewed in either
 // template. Pure render — no email, no DB write. Returns 404 when that day has no stored metrics.
 //   GET /api/email/roi-render-preview?teamId&department&localDate[&cadence=daily][&tpl=v1|v2]
-app.get("/api/email/roi-render-preview", async (req, res) => {
+app.get("/api/email/roi-render-preview", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, department, localDate, cadence, tpl } = req.query ?? {};
     if (!teamId || !department || !localDate) return res.status(400).json({ error: "teamId, department, localDate required" });

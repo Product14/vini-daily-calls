@@ -19,7 +19,7 @@ import {
   type SubType,
   type SendCell,
 } from "./mockData";
-import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, updateRooftopDryRun, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
+import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, updateRooftopDryRun, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, trackerAuthHeaders, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
 import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
@@ -1185,7 +1185,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     setLiveState("loading"); setLiveErr("");
     try {
       const res = await fetch("/api/email/roi-event-preview", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           teamId: entry.rooftop.team_id, enterpriseId: entry.rooftop.enterprise_id, department: entry.rooftop.department,
           emailType: entry.type, eventKey: preview.event_key, rooftopName: entry.rooftop.name, tz: entry.rooftop.timezone,
