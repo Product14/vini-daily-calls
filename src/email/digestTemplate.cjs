@@ -203,9 +203,15 @@ function primaryMetric(m, leads, pn) {
   pn = pn || "yesterday";
   var appts = num(m.appointmentsYesterday);
   if (appts > 0) return { n: appts, label: "Appointments — AI-booked", mode: "appts" };
-  var warm = num(m.warmLeads) || leads;
+  var warm = num(m.warmCount);                 // real IB+OB qualified — NOT total leads (no inflation)
   if (warm > 0) return { n: warm, label: "Leads warmed " + pn, mode: "warm" };
-  return { n: num(m.qualifiedLeads), label: "Qualified leads", mode: "qual" };
+  var qual = num(m.qualifiedLeads != null ? m.qualifiedLeads : m.qualifiedLeadsYesterday);
+  if (qual > 0) return { n: qual, label: "Qualified leads", mode: "qual" };
+  // Never lead with a scary 0 — but fall to a TRUTHFULLY-labeled volume metric,
+  // never total-leads-relabeled-as-"warmed" (the old `|| leads` bug).
+  var reached = num(m.conversationsReached) || (num(m.conversationsInbound) + num(m.outboundUniqueReached));
+  if (reached > 0) return { n: reached, label: "Real conversations", mode: "reached" };
+  return { n: num(leads), label: "Leads worked " + pn, mode: "leads" };
 }
 
 // data-driven commentary — always an interpretation (what · so-what · hope)
@@ -217,7 +223,9 @@ function buildCommentary(m, mode, pn) {
   var leads = num(m.totalLeads != null ? m.totalLeads : m.inboundUniqueLeads), appts = num(m.appointmentsYesterday);
   var pct = function (v) { return (v > 0 ? "+" : "") + v + "%"; };
   if (leads === 0 && appts === 0) return "Quiet day — no new lead activity captured. Agents stayed live and ready for inbound.";
-  if (mode === "warm" || mode === "qual") return "No appointments booked " + pn + ", but " + fmtInt(num(m.warmLeads) || leads) + " leads were warmed and kept moving (" + pct(leadsD) + " vs prior). The pipeline is alive — the gap is in closing, not volume.";
+  if (mode === "warm") return "No appointments booked " + pn + ", but " + fmtInt(num(m.warmCount)) + " " + plural(num(m.warmCount), "lead was", "leads were") + " warmed and kept moving (" + pct(leadsD) + " vs prior). The pipeline is alive — the gap is in closing, not volume.";
+  if (mode === "qual") return "No appointments booked " + pn + ", but " + fmtInt(num(m.qualifiedLeads)) + " " + plural(num(m.qualifiedLeads), "lead", "leads") + " qualified (" + pct(qualD) + " vs prior). Turn qualified into booked with fast follow-ups.";
+  if (mode === "reached" || mode === "leads") return "No appointments or qualified leads " + pn + " — agents stayed live and worked " + fmtInt(leads) + " " + plural(leads, "lead", "leads") + " (" + pct(leadsD) + " vs prior). Keep the follow-ups moving.";
   if (leadsD > 5 && abrD < -5) return "Lead volume grew strongly (" + pct(leadsD) + "), but booking rate slipped " + Math.abs(abrD) + "% versus the prior period. Volume is healthy — the gap is in closing.";
   if (apptD > 5) return "Strong day — appointments up " + pct(apptD) + " vs prior on " + fmtInt(leads) + " leads worked. Momentum is building.";
   if (apptD < -5) return "Appointments dipped " + pct(apptD) + " vs prior. " + fmtInt(leads) + " " + plural(leads, "lead was", "leads were") + " still engaged" + (qualD > 0 ? " and qualification held up" : "") + " — focus follow-ups to recover the booking rate.";
@@ -520,7 +528,7 @@ function renderDigestHtml(metrics, opts) {
     ? { n: inboundConv, label: "Real conversations" }
     : (inAppts > 0
       ? { n: inAppts, label: "Appointments — AI-booked" }
-      : (num(m.warmLeads) > 0 ? { n: num(m.warmLeads), label: "Leads warmed " + pn } : { n: qualified, label: "Qualified leads" }));
+      : (num(m.warmCount) > 0 ? { n: num(m.warmCount), label: "Leads warmed " + pn } : { n: qualified, label: "Qualified leads" }));
   var hasInAppts = focus !== "conversation" && inAppts > 0;
   // mini metrics under the inbound big number — canonical wordings (Leads reached / Real conversations /
   // Qualified leads). conversation-focus already leads with conversations, so its minis carry reach + qualified.
@@ -634,7 +642,7 @@ function renderDigestHtml(metrics, opts) {
   var outboundSection = "";
   if (hasOutbound) {
     var obAppts = num(m.outboundAppointmentsSet);
-    var obWarm = num((m.leadFunnel || {}).qualified) || num(m.warmLeads);
+    var obWarm = num((m.leadFunnel || {}).qualified) || num(m.warmCount);
     var obBig = obAppts > 0 ? { n: obAppts, label: "Appointments — AI-booked" } : { n: obWarm, label: "Qualified leads" };
     var outcomes = arr(m.outcomes).filter(function (o) { return num(o.value) > 0; }), funnel = m.leadFunnel || null, outcomesHtml = "";
     if (outcomes.length) {
