@@ -206,8 +206,12 @@ async function apiMetrics(teamId, dept, start, end) {
     // guardrail used before the leadFunnel.contacted switch. Kept so a rooftop still on the
     // 'v1' (classic) daily template renders byte-for-byte the same numbers it does in prod.
     inboundUniqueLeadsLegacy: n(ir.leadsAttempted),
-    // warm leads kept moving even when nothing booked (drives the no-appointment hero) — both funnels
+    // warm leads kept moving even when nothing booked (drives the no-appointment hero) — both funnels.
+    // NOTE: `warmLeads` is OVERWRITTEN downstream (metricsFull) with the enrichment LIST that feeds the
+    // "work these now" card, so the v2 hero must read the numeric `warmCount` below — never
+    // num(m.warmLeads) (that reads the array → NaN → 0, which silently mislabels total leads as "warmed").
     warmLeads: warmWorked || totalLeadsWorked,
+    warmCount: warmWorked,
     conversationsCall: callIn + callOut, conversationsSms: smsIn + smsOut, conversationsChat: 0, conversationsHandled: callIn + callOut + smsIn + smsOut,
     // DISPLAYED "Conversations" = reached/two-way conversations, deduped per lead (the funnel's
     // `connected` stage: a connected call OR an SMS that got a human reply). This is what the console's
@@ -1415,26 +1419,32 @@ async function runCadence(cadence) {
 // (dry_run) so NO email goes out until a human flips dry_run off. Additive only:
 // ON CONFLICT DO NOTHING preserves every existing human-set is_live/dry_run flag,
 // and we never auto-deactivate a rooftop (that stays a deliberate human action).
+// Live-candidate discovery SQL — onboarded + active Sales/Service (team, dept) pairs. Embedded mirror
+// of vini-roi-daily-report/db/clickhouse-endpoints/candidates.sql so the serverless bundle carries it.
+// Columns aliased e/t/d to match the row mapping below. runClickhouse appends `FORMAT JSONEachRow`, so
+// no trailing semicolon / FORMAT here.
+const CANDIDATES_SQL = `SELECT DISTINCT
+  tam.enterpriseId        AS e,
+  tam.teamId              AS t,
+  lower(at.agentType)     AS d
+FROM dealer_leads.teamAgentMappings tam
+INNER JOIN dealer_leads.agentTypes at ON at.agentTypeId = tam.agentTypeId
+WHERE tam.isOnboarded = 1
+  AND ifNull(tam.isActive,1) = 1
+  AND ifNull(tam.__deleted,0) = 0
+  AND ifNull(at.__deleted,0) = 0
+  AND at.agentType IN ('Sales','Service')`;
+
 async function syncLive() {
   const ts = new Date().toISOString();
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
-  const endpoint = process.env.CLICKHOUSE_CANDIDATES_ENDPOINT;
-  const keyId = process.env.CLICKHOUSE_KEY_ID, keySecret = process.env.CLICKHOUSE_KEY_SECRET;
-  if (!endpoint || !keyId || !keySecret) {
-    throw new Error("Missing CLICKHOUSE_CANDIDATES_ENDPOINT / CLICKHOUSE_KEY_ID / CLICKHOUSE_KEY_SECRET (set them as Vercel env vars)");
-  }
-
-  // saved ClickHouse Query API endpoint: POST + Basic auth, returns rows {e,t,d}
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}` },
-    body: JSON.stringify({ queryVariables: {}, format: "JSONEachRow" }),
-  });
-  if (!res.ok) throw new Error(`ClickHouse candidates ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const text = await res.text();
-  let rows;
-  try { const j = JSON.parse(text); rows = Array.isArray(j) ? j : (j.data ?? [j]); }
-  catch { rows = text.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); }
+  // Discover candidates through the SAME ClickHouse client the rest of the app uses
+  // (CLICKHOUSE_HOST/USER/PASSWORD — already provisioned in prod), NOT a bespoke ClickHouse Cloud
+  // query-endpoint. The endpoint path needed 3 extra secrets (CLICKHOUSE_CANDIDATES_ENDPOINT/KEY_ID/
+  // KEY_SECRET) that were never set, so this cron errored every run — the identical fix already applied
+  // to syncLifecycle. dealer_leads is reachable by that client. Rows come back keyed e/t/d.
+  const { runClickhouse } = await import("../agentMetrics.js");
+  const rows = await runClickhouse(CANDIDATES_SQL);
 
   // normalize → {team_id, department}; held as is_live=true + dry_run=true
   const seen = new Set();
