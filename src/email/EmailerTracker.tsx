@@ -19,8 +19,7 @@ import {
   type SubType,
   type SendCell,
 } from "./mockData";
-import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
-import { supabase } from "./supabaseClient";
+import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, updateRooftopDryRun, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
 import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
@@ -2363,11 +2362,9 @@ function DryRunToggle({ rooftop, onChanged }: { rooftop: RooftopRow; onChanged?:
 
   const persist = async (nextDry: boolean): Promise<boolean> => {
     setBusy(true);
-    if (supabase && rooftop.team_id && rooftop.department) {
-      const { error } = await supabase
-        .from("roi_live_departments").update({ dry_run: nextDry })
-        .eq("team_id", rooftop.team_id).eq("department", rooftop.department);
-      if (error) { setBusy(false); return false; }
+    if (rooftop.team_id && rooftop.department) {
+      const r = await updateRooftopDryRun(rooftop.team_id, rooftop.department, nextDry);
+      if (!r.ok) { setBusy(false); return false; }
     }
     setOn(nextDry); setBusy(false);
     // Optimistic local update done — now reload the parent so liveCount / "Send live (N)" /

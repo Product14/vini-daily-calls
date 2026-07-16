@@ -3317,6 +3317,220 @@ app.post("/api/missing-rooftop", requireTrackerAuth, async (req, res) => {
   }
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// Tracker READ/WRITE endpoints for the roi_* tables (service-role key).
+// These replace the browser's former DIRECT anon-key reads/writes of
+// roi_digest_runs / roi_rooftop_config / roi_recipients / roi_live_departments /
+// roi_event_emails (+ the roi_event_email_counts view), so Row-Level Security can
+// be ENABLED on those tables — the publishable/anon key no longer needs (or has)
+// any access, which closes the customer-PII exposure. Every route is gated by
+// requireTrackerAuth and returns the SAME row shapes the tracker UI already
+// consumes (see src/email/dataSource.ts), so the client mapping is unchanged.
+// ────────────────────────────────────────────────────────────────────────────
+function _trackerRoiSb() {
+  const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+  const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+  if (!sbUrl || !sbKey) return null;
+  return createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+}
+// Column lists copied VERBATIM from src/email/dataSource.ts so shapes match exactly.
+const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
+const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
+
+// 1) Full grid load — digest runs (windowed) + config + recipients + live depts.
+app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
+  try {
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const a = String(req.query.anchor || "");
+    const anchor = /^\d{4}-\d{2}-\d{2}$/.test(a) ? a : null;
+    let runsQ = sb.from("roi_digest_runs")
+      .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
+      .order("local_date", { ascending: false });
+    if (anchor) runsQ = runsQ.lte("local_date", anchor);
+    const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
+      runsQ.limit(5000),
+      sb.from("roi_rooftop_config").select(_ROI_CFG_COLS),
+      sb.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
+      sb.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
+    ]);
+    // CRITICAL: runs/config/live define the rows themselves. recipients only enrich → degrade to [].
+    const critErr = runsRes.error || cfgRes.error || liveRes.error;
+    if (critErr) return res.status(500).json({ error: critErr.message });
+    if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
+    return res.json({
+      ok: true,
+      runs: runsRes.data ?? [],
+      configs: cfgRes.data ?? [],
+      recipients: recRes.error ? [] : (recRes.data ?? []),
+      lives: liveRes.data ?? [],
+    });
+  } catch (err) {
+    console.error("GET /api/tracker/rooftops-data error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 2) Lifecycle-only rooftops (onboarding/contracting/churn) + team_ids that already have a grid row.
+app.get("/api/tracker/lifecycle-rooftops", requireTrackerAuth, async (req, res) => {
+  try {
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const [cfgRes, liveRes] = await Promise.all([
+      sb.from("roi_rooftop_config").select(_ROI_CFG_COLS_LIFECYCLE).in("lifecycle_status", ["onboarding", "contracting", "churn"]),
+      sb.from("roi_live_departments").select("team_id"),
+    ]);
+    if (cfgRes.error) return res.status(500).json({ error: cfgRes.error.message });
+    return res.json({ ok: true, configs: cfgRes.data ?? [], liveTeamIds: (liveRes.data ?? []).map((l) => l.team_id) });
+  } catch (err) {
+    console.error("GET /api/tracker/lifecycle-rooftops error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 3) Transactional per-(team,dept,type) counts VIEW (roi_event_email_counts).
+app.get("/api/tracker/event-counts", requireTrackerAuth, async (req, res) => {
+  try {
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data, error } = await sb.from("roi_event_email_counts").select("team_id,department,email_type,total,sent,not_sent,opened,last_at");
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, rows: data ?? [] });
+  } catch (err) {
+    console.error("GET /api/tracker/event-counts error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 4) All recipients for a team (both departments) — ConfigDrawer.
+app.get("/api/tracker/team-recipients", requireTrackerAuth, async (req, res) => {
+  try {
+    const teamId = String(req.query.teamId || "").trim();
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data, error } = await sb.from("roi_recipients")
+      .select("id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at")
+      .eq("team_id", teamId);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, rows: data ?? [] });
+  } catch (err) {
+    console.error("GET /api/tracker/team-recipients error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 5) One page of produced transactional emails for (team, dept, type).
+app.get("/api/tracker/event-emails", requireTrackerAuth, async (req, res) => {
+  try {
+    const teamId = String(req.query.teamId || "").trim();
+    const department = String(req.query.department || "").trim();
+    const emailType = String(req.query.emailType || "").trim();
+    if (!teamId || !emailType) return res.status(400).json({ error: "teamId + emailType required" });
+    const limit = Math.min(1000, Math.max(1, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const q = sb.from("roi_event_emails")
+      .select("id,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
+      .eq("team_id", teamId).eq("department", department).eq("email_type", emailType)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, rows: data ?? [] });
+  } catch (err) {
+    console.error("GET /api/tracker/event-emails error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 6) Every produced email of ONE type across teams (cross-rooftop analytics modal).
+app.post("/api/tracker/event-emails-by-type", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamIds, emailType, department, limit } = req.body ?? {};
+    if (!Array.isArray(teamIds) || teamIds.length === 0 || !emailType) return res.status(400).json({ error: "teamIds[] + emailType required" });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    let q = sb.from("roi_event_emails")
+      .select("id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
+      .in("team_id", teamIds).eq("email_type", emailType)
+      .order("created_at", { ascending: false })
+      .limit(Math.min(5000, Math.max(1, Number(limit) || 3000)));
+    if (department) q = q.eq("department", department);
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, rows: data ?? [] });
+  } catch (err) {
+    console.error("POST /api/tracker/event-emails-by-type error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 7) Lifetime SENT digest count across teams (head-only exact count).
+app.post("/api/tracker/count-digest-sent", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamIds, cadence, department } = req.body ?? {};
+    if (!Array.isArray(teamIds) || teamIds.length === 0) return res.json({ ok: true, count: 0 });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    let q = sb.from("roi_digest_runs").select("id", { count: "exact", head: true }).in("team_id", teamIds).eq("status", "sent");
+    if (cadence) q = q.eq("cadence", cadence);
+    if (department) q = q.eq("department", department);
+    const { count, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, count: count ?? 0 });
+  } catch (err) {
+    console.error("POST /api/tracker/count-digest-sent error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "count failed" });
+  }
+});
+
+// 8) Lifetime transactional count by metric (sent | opened) across teams (head-only exact count).
+app.post("/api/tracker/count-event", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamIds, emailType, metric, department } = req.body ?? {};
+    if (!Array.isArray(teamIds) || teamIds.length === 0 || !emailType) return res.json({ ok: true, count: 0 });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    let q = sb.from("roi_event_emails").select("id", { count: "exact", head: true }).in("team_id", teamIds).eq("email_type", emailType);
+    if (metric === "opened") q = q.not("opened_at", "is", null);
+    else q = q.eq("status", "sent");
+    if (department) q = q.eq("department", department);
+    const { count, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, count: count ?? 0 });
+  } catch (err) {
+    console.error("POST /api/tracker/count-event error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "count failed" });
+  }
+});
+
+// 9) Toggle a single (team, department)'s dry_run hold — was the LAST direct browser write to
+//    roi_live_departments (DryRunToggle). Audited to roi_config_audit_log for parity.
+app.post("/api/tracker/dry-run", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamId, department, dryRun, actor } = req.body ?? {};
+    if (!teamId || !department) return res.status(400).json({ error: "teamId + department required" });
+    if (typeof dryRun !== "boolean") return res.status(400).json({ error: "dryRun must be a boolean" });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: before } = await sb.from("roi_live_departments").select("dry_run").eq("team_id", teamId).eq("department", department).maybeSingle();
+    const { error } = await sb.from("roi_live_departments").update({ dry_run: dryRun }).eq("team_id", teamId).eq("department", department);
+    if (error) return res.status(500).json({ error: error.message });
+    try {
+      if (!before || before.dry_run !== dryRun) {
+        const { error: auditErr } = await sb.from("roi_config_audit_log").insert([{ team_id: teamId, actor: actor || null, field: `dry_run (${department})`, old_value: before ? String(before.dry_run) : null, new_value: String(dryRun), source: "tracker" }]);
+        if (auditErr) console.warn("[audit] roi_config_audit_log insert failed:", auditErr.message);
+      }
+    } catch (e) { console.warn("[audit] dry-run audit insert failed:", e?.message ?? e); }
+    return res.json({ ok: true, teamId, department, dryRun });
+  } catch (err) {
+    console.error("POST /api/tracker/dry-run error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "update failed" });
+  }
+});
+
 // ── Hourly ROI digest cron (Vercel Cron → this route) ───────────────────────
 // Runs the full daily-digest pass for EVERY live rooftop (roi_live_departments.is_live=true).
 // With DRY_RUN=false it really emails the rooftops where dry_run=false and suppresses the rest,

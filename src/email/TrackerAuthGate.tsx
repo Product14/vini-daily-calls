@@ -6,8 +6,9 @@ import { TRACKER_TOKEN_KEY as TOKEN_KEY } from "./dataSource";
 // SERVER (POST /api/tracker/login) and is NOT shipped in this bundle; on success the server returns
 // a short HMAC-signed token we store and re-check via /api/tracker/verify. The same token now also
 // gates every config-mutation route (recipients*, rooftop-config, csm, …) — see trackerAuthHeaders()
-// in dataSource.ts. NOTE: /api/email/* send routes and Supabase RLS are a separate, still-deferred
-// hardening pass (the anon key can still read roi_* directly).
+// in dataSource.ts. The roi_* tables are now RLS-protected: ALL reads/writes go through the
+// gated /api/tracker/* + /api/recipients* server routes (service-role key), so the publishable/anon
+// key has no access to customer PII. This sign-in gates that authenticated server surface.
 
 
 export function TrackerAuthGate({ children }: { children: ReactNode }) {
