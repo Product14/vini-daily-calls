@@ -1,13 +1,14 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * ROI Email-tracker Supabase client. Reads the roi_* tables (digest runs, live
- * departments, rooftop config, recipients) from the ROI Supabase project —
- * separate from the VIN tracker / programs projects.
+ * ROI Email-tracker Supabase client (publishable / anon key — browser-safe).
  *   VITE_ROI_SUPABASE_URL
- *   VITE_ROI_SUPABASE_KEY   (publishable / anon — browser-safe)
- * When unset, the tracker falls back to mock data (see dataSource.ts).
- * ⚠️ roi_digest_runs holds dealer PII — gate reads behind Supabase Auth + RLS in production.
+ *   VITE_ROI_SUPABASE_KEY
+ * isSupabaseConfigured (below) is the tracker's "connected" gate.
+ * ⚠️ The roi_* tables (digest runs, live depts, config, recipients — dealer PII) are RLS-PROTECTED:
+ * this anon key can NO LONGER read them. All roi_* reads/writes go through the authenticated
+ * server (/api/tracker/* + /api/recipients*, service-role key) — see dataSource.ts. This client
+ * remains only for the few non-PII, non-RLS uses that still read directly.
  */
 const env = (import.meta as { env?: Record<string, string | undefined> }).env ?? {};
 const url = env.VITE_ROI_SUPABASE_URL;

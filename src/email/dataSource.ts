@@ -10,7 +10,10 @@
  *   roi_recipients         → recipient list + department routing
  *   roi_live_departments   → which departments/agents are live
  */
-import { supabase, isSupabaseConfigured } from "./supabaseClient";
+// roi_* reads/writes now go through the authenticated same-origin server (/api/tracker/*,
+// service-role key) instead of the browser's publishable/anon key — the tables are RLS-protected,
+// so the anon key can no longer read them. isSupabaseConfigured still gates the "connected" state.
+import { isSupabaseConfigured } from "./supabaseClient";
 import {
   type AgentType,
   type Cadence,
@@ -167,38 +170,30 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   // Optional history anchor (YYYY-MM-DD) — becomes the right-most column, so the tracker can jump to
   // ANY past date instead of only the fixed window ending "today".
   const anchorReq = opts.anchor && /^\d{4}-\d{2}-\d{2}$/.test(opts.anchor) ? opts.anchor : null;
-  if (!isSupabaseConfigured || !supabase) {
+  if (!isSupabaseConfigured) {
     // No mock fallback — surface an explicit unconfigured state so the UI shows a message, not fake data.
     return { rooftops: [], source: "unconfigured", today: todayIso, lastSynced: new Date() };
   }
 
-  // When browsing history, fetch the 5000 rows AT/BEFORE the anchor so an older window isn't crowded
-  // out by the newest rows (the 5000-row cap otherwise only covers the most recent ~3 weeks).
-  const runsBase = supabase.from("roi_digest_runs")
-    .select("team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count")
-    .order("local_date", { ascending: false });
-  const [runsRes, cfgRes, recRes, liveRes] = await Promise.all([
-    (anchorReq ? runsBase.lte("local_date", anchorReq) : runsBase).limit(5000),
-    supabase.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc"),
-    supabase.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
-    supabase.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
-  ]);
-
-  // CRITICAL reads — these define the rooftop rows themselves (runs, config, and the live
-  // departments that seed one row per (team, dept)). If any fail, the tracker has nothing to show.
-  const critErr = runsRes.error || cfgRes.error || liveRes.error;
-  if (critErr) {
-    console.warn("[tracker] Supabase read failed:", critErr.message);
+  // Data comes from the authenticated server endpoint (service-role key). The server runs the same
+  // 4 queries (windowed digest_runs + config + recipients + live depts) and returns identical
+  // rows/columns, so every mapping below is unchanged. A failed fetch → "error" (same as before).
+  let runs: RunRow[]; let configs: ConfigRow[]; let recipients: RecipientRow[]; let lives: LiveRow[];
+  try {
+    const res = await fetch(`/api/tracker/rooftops-data${anchorReq ? `?anchor=${anchorReq}` : ""}`, { cache: "no-store", headers: trackerAuthHeaders() });
+    if (!res.ok) {
+      console.warn("[tracker] rooftops-data read failed: HTTP", res.status);
+      return { rooftops: [], source: "error", today: todayIso, lastSynced: new Date() };
+    }
+    const j = await res.json();
+    runs = (j.runs ?? []) as RunRow[];
+    configs = (j.configs ?? []) as ConfigRow[];
+    recipients = (j.recipients ?? []) as RecipientRow[];
+    lives = (j.lives ?? []) as LiveRow[];
+  } catch (e) {
+    console.warn("[tracker] rooftops-data read error:", e);
     return { rooftops: [], source: "error", today: todayIso, lastSynced: new Date() };
   }
-  // NON-CRITICAL: recipients only enrich the rows (recipient lists / received overlay). A failure
-  // here shouldn't nuke the whole tracker — degrade to empty recipients rather than "error".
-  if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
-
-  const runs = (runsRes.data ?? []) as RunRow[];
-  const configs = (cfgRes.data ?? []) as ConfigRow[];
-  const recipients = (recRes.data ?? []) as RecipientRow[];
-  const lives = (liveRes.data ?? []) as LiveRow[];
 
   // index by team
   const cfgByTeam = new Map(configs.map(c => [c.team_id, c]));
@@ -340,16 +335,17 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
  * columns unset never appears here (it's plain "live" back-compat, already covered by the grid
  * or genuinely unclassified). */
 export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
-  if (!isSupabaseConfigured || !supabase) return [];
-  const [cfgRes, liveRes] = await Promise.all([
-    supabase.from("roi_rooftop_config")
-      .select("team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc")
-      .in("lifecycle_status", ["onboarding", "contracting", "churn"]),
-    supabase.from("roi_live_departments").select("team_id"),
-  ]);
-  if (cfgRes.error) { console.warn("[tracker] lifecycle-only read failed:", cfgRes.error.message); return []; }
-  const haveGridRow = new Set((liveRes.data ?? []).map((l: { team_id: string }) => l.team_id));
-  return (cfgRes.data ?? [])
+  if (!isSupabaseConfigured) return [];
+  let configs: ConfigRow[]; let liveTeamIds: string[];
+  try {
+    const res = await fetch(`/api/tracker/lifecycle-rooftops`, { cache: "no-store", headers: trackerAuthHeaders() });
+    if (!res.ok) { console.warn("[tracker] lifecycle-only read failed: HTTP", res.status); return []; }
+    const j = await res.json();
+    configs = (j.configs ?? []) as ConfigRow[];
+    liveTeamIds = (j.liveTeamIds ?? []) as string[];
+  } catch (e) { console.warn("[tracker] lifecycle-only read error:", e); return []; }
+  const haveGridRow = new Set(liveTeamIds);
+  return configs
     .filter((c) => !haveGridRow.has(c.team_id))
     .map((c): RooftopRow => ({
       rooftop_id: `${c.team_id}::lifecycle`,
@@ -409,17 +405,18 @@ export type EventEmailRow = {
 export async function loadEventCounts(): Promise<EventCounts> {
   const m: EventCounts = new Map();
   // 1) generated-rows view → seeds all types + the `sent` overlay.
-  if (isSupabaseConfigured && supabase) {
-    const { data, error } = await supabase
-      .from("roi_event_email_counts")
-      .select("team_id,department,email_type,total,sent,not_sent,opened,last_at");
-    if (error) console.warn("[tracker] event counts (view) read failed:", error.message);
-    for (const r of (data ?? []) as Array<{ team_id: string; department: string; email_type: string; total: number; sent: number; not_sent: number; opened: number | null; last_at: string | null }>) {
-      const key = `${r.team_id}::${r.department}`;
-      const rec = m.get(key) ?? {};
-      rec[r.email_type] = { total: r.total, sent: r.sent, notSent: r.not_sent, opened: r.opened ?? 0, lastAt: r.last_at };
-      m.set(key, rec);
-    }
+  if (isSupabaseConfigured) {
+    try {
+      const res = await fetch(`/api/tracker/event-counts`, { cache: "no-store", headers: trackerAuthHeaders() });
+      if (!res.ok) console.warn("[tracker] event counts (view) read failed: HTTP", res.status);
+      const j = res.ok ? await res.json() : {};
+      for (const r of ((j.rows ?? []) as Array<{ team_id: string; department: string; email_type: string; total: number; sent: number; not_sent: number; opened: number | null; last_at: string | null }>)) {
+        const key = `${r.team_id}::${r.department}`;
+        const rec = m.get(key) ?? {};
+        rec[r.email_type] = { total: r.total, sent: r.sent, notSent: r.not_sent, opened: r.opened ?? 0, lastAt: r.last_at };
+        m.set(key, rec);
+      }
+    } catch (e) { console.warn("[tracker] event counts read error:", e); }
   }
   // 2) ClickHouse totals → override `total` with the REAL event count (keep `sent` from the view).
   try {
@@ -455,15 +452,16 @@ export type TeamRecipient = { id: string; email: string; name: string | null; re
 
 /** All recipients for a team (both departments) — powers the ConfigDrawer's side-by-side Sales /
  * Service recipient lists. Each RooftopRow only carries its own department's recipients, so the
- * drawer fetches the full set here (roi_recipients; RLS off so the browser anon key can read). */
+ * drawer fetches the full set here (roi_recipients, via the gated /api/tracker/team-recipients
+ * server route — the table is RLS-protected, so the browser anon key can no longer read it). */
 export async function loadTeamRecipients(teamId: string): Promise<TeamRecipient[]> {
-  if (!isSupabaseConfigured || !supabase || !teamId) return [];
-  const { data, error } = await supabase
-    .from("roi_recipients")
-    .select("id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at")
-    .eq("team_id", teamId);
-  if (error) { console.warn("[tracker] team recipients read failed:", error.message); return []; }
-  return (data ?? []) as TeamRecipient[];
+  if (!isSupabaseConfigured || !teamId) return [];
+  try {
+    const res = await fetch(`/api/tracker/team-recipients?teamId=${encodeURIComponent(teamId)}`, { cache: "no-store", headers: trackerAuthHeaders() });
+    if (!res.ok) { console.warn("[tracker] team recipients read failed: HTTP", res.status); return []; }
+    const j = await res.json();
+    return (j.rows ?? []) as TeamRecipient[];
+  } catch (e) { console.warn("[tracker] team recipients read error:", e); return []; }
 }
 
 export type EventEmailPage = { rows: EventEmailRow[]; hasMore: boolean };
@@ -485,15 +483,13 @@ export async function loadEventEmails(
   const limit = opts.limit ?? 50;
   const offset = Math.max(0, opts.offset ?? 0);
   let stored: EventEmailRow[] = [];
-  if (isSupabaseConfigured && supabase) {
-    const { data, error } = await supabase
-      .from("roi_event_emails")
-      .select("id,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
-      .eq("team_id", teamId).eq("department", department).eq("email_type", emailType)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
-    if (error) console.warn("[tracker] event emails read failed:", error.message);
-    stored = (data ?? []) as EventEmailRow[];
+  if (isSupabaseConfigured) {
+    try {
+      const qs = new URLSearchParams({ teamId, department: department || "", emailType, limit: String(limit), offset: String(offset) });
+      const res = await fetch(`/api/tracker/event-emails?${qs.toString()}`, { cache: "no-store", headers: trackerAuthHeaders() });
+      if (!res.ok) console.warn("[tracker] event emails read failed: HTTP", res.status);
+      else { const j = await res.json(); stored = (j.rows ?? []) as EventEmailRow[]; }
+    } catch (e) { console.warn("[tracker] event emails read error:", e); }
   }
   return { rows: stored, hasMore: stored.length === limit };
 }
@@ -513,18 +509,17 @@ export async function loadEventEmailsByType(
   teamIds: string[], emailType: string,
   opts: { department?: string | null; limit?: number } = {},
 ): Promise<EventEmailDayRow[]> {
-  if (!isSupabaseConfigured || !supabase || teamIds.length === 0) return [];
-  let q = supabase
-    .from("roi_event_emails")
-    .select("id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
-    .in("team_id", teamIds)
-    .eq("email_type", emailType)
-    .order("created_at", { ascending: false })
-    .limit(opts.limit ?? 3000);
-  if (opts.department) q = q.eq("department", opts.department);
-  const { data, error } = await q;
-  if (error) { console.warn("[tracker] event emails by type read failed:", error.message); return []; }
-  return (data ?? []) as EventEmailDayRow[];
+  if (!isSupabaseConfigured || teamIds.length === 0) return [];
+  try {
+    const res = await fetch(`/api/tracker/event-emails-by-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamIds, emailType, department: opts.department ?? null, limit: opts.limit ?? 3000 }),
+    });
+    if (!res.ok) { console.warn("[tracker] event emails by type read failed: HTTP", res.status); return []; }
+    const j = await res.json();
+    return (j.rows ?? []) as EventEmailDayRow[];
+  } catch (e) { console.warn("[tracker] event emails by type read error:", e); return []; }
 }
 
 /** Per-day mini-report counts for ONE (team×dept×type): Created / Closed (action items only) /
@@ -551,28 +546,33 @@ export async function loadEventDayCounts(
  * window. Optionally scoped to a cadence (to match the modal's current daily/weekly/monthly view)
  * and a department. Uses a head-only exact count (no rows fetched). */
 export async function countDigestSent(teamIds: string[], opts: { cadence?: string; department?: string | null } = {}): Promise<number> {
-  if (!isSupabaseConfigured || !supabase || teamIds.length === 0) return 0;
-  let q = supabase.from("roi_digest_runs").select("id", { count: "exact", head: true })
-    .in("team_id", teamIds).eq("status", "sent");
-  if (opts.cadence) q = q.eq("cadence", opts.cadence);
-  if (opts.department) q = q.eq("department", opts.department);
-  const { count, error } = await q;
-  if (error) { console.warn("[tracker] lifetime digest-sent count failed:", error.message); return 0; }
-  return count ?? 0;
+  if (!isSupabaseConfigured || teamIds.length === 0) return 0;
+  try {
+    const res = await fetch(`/api/tracker/count-digest-sent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamIds, cadence: opts.cadence ?? null, department: opts.department ?? null }),
+    });
+    if (!res.ok) { console.warn("[tracker] lifetime digest-sent count failed: HTTP", res.status); return 0; }
+    const j = await res.json();
+    return (j.count ?? 0) as number;
+  } catch (e) { console.warn("[tracker] lifetime digest-sent count error:", e); return 0; }
 }
 
 /** Lifetime count of a transactional type's produced emails for the given rooftops — all-time.
  * metric 'sent' = status='sent'; 'opened' = an open was recorded (opened_at set). Head-only count. */
 export async function countEventByMetric(teamIds: string[], emailType: string, metric: "sent" | "opened", opts: { department?: string | null } = {}): Promise<number> {
-  if (!isSupabaseConfigured || !supabase || teamIds.length === 0) return 0;
-  let q = supabase.from("roi_event_emails").select("id", { count: "exact", head: true })
-    .in("team_id", teamIds).eq("email_type", emailType);
-  if (metric === "opened") q = q.not("opened_at", "is", null);
-  else q = q.eq("status", "sent");
-  if (opts.department) q = q.eq("department", opts.department);
-  const { count, error } = await q;
-  if (error) { console.warn("[tracker] lifetime event count failed:", error.message); return 0; }
-  return count ?? 0;
+  if (!isSupabaseConfigured || teamIds.length === 0) return 0;
+  try {
+    const res = await fetch(`/api/tracker/count-event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamIds, emailType, metric, department: opts.department ?? null }),
+    });
+    if (!res.ok) { console.warn("[tracker] lifetime event count failed: HTTP", res.status); return 0; }
+    const j = await res.json();
+    return (j.count ?? 0) as number;
+  } catch (e) { console.warn("[tracker] lifetime event count error:", e); return 0; }
 }
 
 /** One eligible event from ClickHouse (history + live), via /api/email/roi-event-list. */
@@ -648,8 +648,7 @@ export function setActorName(name: string): void {
   try { localStorage.setItem(ACTOR_KEY, name.trim()); } catch { /* ignore */ }
 }
 
-/** Persist a per-rooftop email-type toggle (roi_rooftop_config). Browser write — RLS is off
- * on this project and anon has been granted UPDATE, so the tracker writes directly. */
+/** Persist a per-rooftop email-type toggle (roi_rooftop_config) through the gated server route. */
 // Persist rooftop config (email-type toggles + daily template) through the backend
 // (service key) so the browser's publishable key never needs write grants on
 // roi_rooftop_config. The server whitelists the columns it accepts.
@@ -691,6 +690,25 @@ export async function updateRooftopLiveStatus(teamId: string, isLive: boolean): 
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
       body: JSON.stringify({ teamId, isLive, actor: getActorName() }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/** Toggle a single (team, department)'s dry_run hold (Live ↔ Paused). Routed through the server
+ * (service key, audited) so the browser's publishable/anon key never needs write grants on
+ * roi_live_departments — this was the last direct browser write to a roi_* table. */
+export async function updateRooftopDryRun(teamId: string, department: string, dryRun: boolean): Promise<{ ok: boolean; error?: string }> {
+  if (!teamId || !department) return { ok: false, error: "teamId + department required" };
+  try {
+    const res = await fetch("/api/tracker/dry-run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamId, department, dryRun, actor: getActorName() }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
