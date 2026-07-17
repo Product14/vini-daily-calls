@@ -1700,12 +1700,59 @@ async function syncLifecycle() {
     });
   }
 
+  // LIFECYCLE_SQL fans out CDC-duplicate ledger rows (2026-07-17: 804 rows over 321 teams — 278
+  // exact-duplicate groups, 2 teams with differing copies). An upsert batch holding the same
+  // team_id twice makes Postgres throw 21000 ("ON CONFLICT DO UPDATE command cannot affect row a
+  // second time") — the crash that kept this cron from ever completing in prod. Merge per team:
+  // non-null wins, the later value wins for lifecycle dates, a Churned copy wins the bucket.
+  const LIFECYCLE_DATE_FIELDS = ["contracted_date", "onboarding_date", "ob_live_date", "live_date", "churn_date"];
+  const byTeam = new Map();
+  for (const p of patches) {
+    const prev = byTeam.get(p.team_id);
+    if (!prev) { byTeam.set(p.team_id, p); continue; }
+    for (const [k, v] of Object.entries(p)) {
+      if (v == null) continue;
+      if (prev[k] == null) { prev[k] = v; continue; }
+      if (LIFECYCLE_DATE_FIELDS.includes(k) && String(v) > String(prev[k])) prev[k] = v;
+    }
+    if (p.arr_bucket === "Churned") { prev.arr_bucket = "Churned"; prev.lifecycle_status = "churn"; }
+  }
+  const merged = [...byTeam.values()];
+
+  // A past churn_date always means Churned. The ledger's bucket CASE lags it — is_churned needs
+  // product-level churn events that are often missing, which is why 12 rooftops sat Live/Onboarding
+  // with a past churn_date (the 2026-07-15 manual fix-up) and would be resurrected on every sync.
+  for (const p of merged) {
+    if (p.churn_date && String(p.churn_date).slice(0, 10) <= ts.slice(0, 10)) {
+      p.arr_bucket = "Churned";
+      p.lifecycle_status = "churn";
+    }
+  }
+
+  // Manual churn is sticky: user-confirmed churns (e.g. the Edwards group) can have NO churn
+  // signal in the ledger at all. Never downgrade a rooftop already churn in roi_rooftop_config,
+  // and never blank a stored churn_date. (~320 rows — under PostgREST's 1000-row cap.)
+  const { data: existingRows, error: exErr } = await sb.from("roi_rooftop_config").select("team_id,lifecycle_status,churn_date");
+  if (exErr) throw new Error(`read roi_rooftop_config (churn guard) failed: ${exErr.message}`);
+  const existing = new Map((existingRows ?? []).map((e) => [e.team_id, e]));
+  let preservedChurn = 0;
+  for (const p of merged) {
+    const ex = existing.get(p.team_id);
+    if (!ex) continue;
+    if (ex.churn_date && !p.churn_date) p.churn_date = ex.churn_date;
+    if (ex.lifecycle_status === "churn" && p.lifecycle_status !== "churn") {
+      p.arr_bucket = "Churned";
+      p.lifecycle_status = "churn";
+      preservedChurn++;
+    }
+  }
+
   // Merge the operational-activity rollup onto the same rows (best-effort — a failure here must not
   // break the lifecycle sync). Epoch/1970 timestamps (no real activity) are nulled.
   try {
     const actRows = await runClickhouse(ACTIVITY_SQL);
     const act = new Map(actRows.map((a) => [String(a.t ?? "").trim(), a]));
-    for (const p of patches) {
+    for (const p of merged) {
       const a = act.get(p.team_id);
       p.calls_30d = a ? (Number(a.calls_30d) || 0) : 0;
       p.sms_30d = a ? (Number(a.sms_30d) || 0) : 0;
@@ -1714,22 +1761,43 @@ async function syncLifecycle() {
     }
   } catch (e) { console.warn("[sync-lifecycle] activity rollup skipped:", String(e).slice(0, 140)); }
 
-  for (let i = 0; i < patches.length; i += 500) {
+  for (let i = 0; i < merged.length; i += 500) {
     const { error } = await sb.from("roi_rooftop_config")
-      .upsert(patches.slice(i, i + 500), { onConflict: "team_id" });
+      .upsert(merged.slice(i, i + 500), { onConflict: "team_id" });
     if (error) throw new Error(`upsert roi_rooftop_config (lifecycle) failed: ${error.message}`);
   }
 
-  const byStatus = patches.reduce((acc, p) => { acc[p.lifecycle_status] = (acc[p.lifecycle_status] ?? 0) + 1; return acc; }, {});
-  const activeRooftops = patches.filter((p) => (p.calls_30d || 0) + (p.sms_30d || 0) > 0).length;
-  const summary = { rooftops: patches.length, activeRooftops, byStatus };
+  const byStatus = merged.reduce((acc, p) => { acc[p.lifecycle_status] = (acc[p.lifecycle_status] ?? 0) + 1; return acc; }, {});
+  const activeRooftops = merged.filter((p) => (p.calls_30d || 0) + (p.sms_30d || 0) > 0).length;
+  const summary = { rooftops: merged.length, dedupedFrom: patches.length, preservedChurn, activeRooftops, byStatus };
   await sb.from("roi_cron_runs").insert({ source: "sync-lifecycle", ok: true, summary }).then(() => {}, () => {});
-  console.log(`[sync-lifecycle] rooftops=${patches.length}`, JSON.stringify(byStatus));
+  console.log(`[sync-lifecycle] rooftops=${merged.length} (deduped from ${patches.length}, preserved ${preservedChurn} manual churn)`, JSON.stringify(byStatus));
   return { ranAt: ts, ...summary };
 }
 
+// Failure trail for the sync crons. Success writes its own ok:true roi_cron_runs row inside each
+// sync — but a crash used to vanish (the trail was success-only and the route just 500s into
+// Vercel logs nobody watches): sync-lifecycle failed every scheduled prod run since it shipped
+// with zero trace. Record ok:false + raise the systemic Slack alert, then rethrow so the route
+// still returns 500.
+function withCronTrail(source, fn) {
+  return async (...args) => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      const detail = String(err?.message ?? err).slice(0, 300);
+      await sb.from("roi_cron_runs").insert({ source, ok: false, summary: { error: detail } }).then(() => {}, () => {});
+      try {
+        const { postSystemicAlert } = require("./slackAlert.cjs");
+        await postSystemicAlert({ source, title: `${source} cron FAILED`, detail, windowLabel: "daily sync cron" });
+      } catch { /* best-effort */ }
+      throw err;
+    }
+  };
+}
+
 // Importable surface for the Vercel serverless cron + tests.
-module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive, syncLifecycle, apiMetrics, apiActionItems, apiCampaigns };
+module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive: withCronTrail("sync-live", syncLive), syncLifecycle: withCronTrail("sync-lifecycle", syncLifecycle), apiMetrics, apiActionItems, apiCampaigns };
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {
