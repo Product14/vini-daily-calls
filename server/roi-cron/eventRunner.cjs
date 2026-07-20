@@ -235,11 +235,13 @@ async function apiJson(path) {
 // truncation" rule as the rest of this pass.
 const ACTION_ITEMS_PAGE_LIMIT = 200;
 const ACTION_ITEMS_MAX_PAGES = 10;
-// Intents that are NEVER actionable — nothing for a rep to do about a lead that's already lost —
-// so they never generate a notification on either channel. Filtered here (the one place every
+// Intents that are NEVER actionable — nothing for a rep to do about a lead that's already lost,
+// or about the AI having left a voicemail (Vini keeps retrying per cadence on its own) — so they
+// never generate a notification on either channel. Filtered here (the one place every
 // scope=recent/open/overdue caller goes through) rather than at each call site, so a new caller
 // can't forget to apply it. Extend this set later without another design pass.
-const NON_ACTIONABLE_INTENTS = new Set(["sales_lost_lead"]);
+// sales_left_voicemail: user request 2026-07-21 — "Sales left voicemail (low)" alert lines are noise.
+const NON_ACTIONABLE_INTENTS = new Set(["sales_lost_lead", "sales_left_voicemail"]);
 const isActionable = (it) => !NON_ACTIONABLE_INTENTS.has(String(it && it.intent || "").trim().toLowerCase());
 async function fetchAllActionItems(qs) {
   let all = [];
