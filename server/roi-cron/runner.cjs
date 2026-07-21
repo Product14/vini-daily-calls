@@ -792,7 +792,7 @@ async function runOnce() {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
@@ -831,7 +831,7 @@ async function runOnce() {
   // Process ONE rooftop·dept. Independent per row → safe to run many in parallel.
   const processOne = async (L) => {
     const c = cfgOf.get(L.team_id);
-    const name = c?.rooftop_name || L.team_id;
+    const name = c?.rooftop_name || c?.team_name || L.team_id;
     if (c && c.daily_enabled === false) return;
     const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
     const w = RUN_LOCAL_DATE
@@ -1028,7 +1028,7 @@ async function backfill(start, end) {
   console.log(`\n── BACKFILL ${start}…${end} (record-only, NO emails) ──`);
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_enabled,daily_template,digest_focus"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_enabled,daily_template,digest_focus"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
@@ -1042,7 +1042,7 @@ async function backfill(start, end) {
 
   async function worker(L) {
     const c = cfgOf.get(L.team_id);
-    const name = c?.rooftop_name || L.team_id;
+    const name = c?.rooftop_name || c?.team_name || L.team_id;
     const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
     const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
     for (const day of days) {
@@ -1098,8 +1098,8 @@ async function backfill(start, end) {
 // carry rendered_html (sent/suppressed) so the stored bytes match the latest template.
 async function rerender() {
   console.log("\n── RERENDER stored rendered_html from stored metrics (Supabase-only · NO emails · NO data change) ──");
-  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name,daily_template,digest_focus");
-  const nameOf = new Map((cfg ?? []).map((c) => [c.team_id, c.rooftop_name]));
+  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name,team_name,daily_template,digest_focus");
+  const nameOf = new Map((cfg ?? []).map((c) => [c.team_id, c.rooftop_name || c.team_name]));
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   const out = { updated: 0, errors: 0 };
   const PAGE = 400;
@@ -1150,9 +1150,9 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
   if (error) throw new Error(error.message);
   if (!row || !row.metrics) return null;
   const { data: cfg } = await sb.from("roi_rooftop_config")
-    .select("rooftop_name,daily_template,digest_focus").eq("team_id", teamId).maybeSingle();
+    .select("rooftop_name,team_name,daily_template,digest_focus").eq("team_id", teamId).maybeSingle();
   const m = row.metrics || {};
-  const name = (cfg && cfg.rooftop_name) || teamId;
+  const name = (cfg && (cfg.rooftop_name || cfg.team_name)) || teamId;
   const tz = await resolveTz(sb, teamId, row.dealer_timezone, name);
   const dateLabel = new Date(`${localDate}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
   const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
@@ -1237,7 +1237,7 @@ async function generateAndSendNow(opts) {
 
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1254,7 +1254,7 @@ async function generateAndSendNow(opts) {
   const smsFailures = []; // on-demand digest-SMS failures this pass → shared Slack breakage alert (SMS)
 
   const process1 = async (L) => {
-    const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || L.team_id;
+    const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || c?.team_name || L.team_id;
     // Same pause toggle the daily cron honors (roi_rooftop_config.daily_enabled) — a CSM who paused
     // a rooftop's digest must not have a manual "Generate & send now" bypass that hold.
     if (cadence === "daily" && c && c.daily_enabled === false) { out.paused++; return; }
@@ -1330,10 +1330,10 @@ async function previewDigestNow(opts) {
 
   const [liveRes, cfgRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department").eq("team_id", teamId).eq("department", department).maybeSingle(),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,daily_template,digest_focus").eq("team_id", teamId).maybeSingle(),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_template,digest_focus").eq("team_id", teamId).maybeSingle(),
   ]);
   const cfg = cfgRes.data || {};
-  const name = cfg.rooftop_name || teamId;
+  const name = cfg.rooftop_name || cfg.team_name || teamId;
   const tz = await resolveTz(sb, teamId, cfg.timezone, name);
   const enterpriseId = cfg.enterprise_id || ""; // enterprise_id is on roi_rooftop_config, not roi_live_departments
   const w = onDemandWindow(tz, cadence);
@@ -1364,7 +1364,7 @@ async function runCadence(cadence) {
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,${enabledCol}`),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,${enabledCol}`),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1381,7 +1381,7 @@ async function runCadence(cadence) {
   const smsFailures = []; // genuine weekly/monthly digest-SMS failures this pass → Slack breakage alert (SMS)
 
   const process1 = async (L) => {
-    const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || L.team_id;
+    const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || c?.team_name || L.team_id;
     if (!c || c[enabledCol] !== true) return;
     const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
     const w = cadenceWindow(tz, cadence, c);

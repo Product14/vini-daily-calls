@@ -323,7 +323,7 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -342,7 +342,7 @@ async function runOnce() {
 
   for (const L of targets) {
     const c = cfgOf.get(L.team_id) || {};
-    const name = c.rooftop_name || L.team_id;
+    const name = c.rooftop_name || c.team_name || L.team_id;
     // dealer-local zone for windows + displayed times — configured value, else a live self-heal
     // lookup (never a silent America/New_York default for a rooftop nobody's set up yet).
     const tz = await resolveTz(sb, L.team_id, c.timezone, name);
