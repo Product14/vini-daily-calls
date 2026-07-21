@@ -342,7 +342,7 @@ async function runOnce() {
 
   for (const L of targets) {
     const c = cfgOf.get(L.team_id) || {};
-    const name = c.rooftop_name || c.team_name || L.team_id;
+    const name = c.rooftop_name || c.team_name || "";
     // dealer-local zone for windows + displayed times — configured value, else a live self-heal
     // lookup (never a silent America/New_York default for a rooftop nobody's set up yet).
     const tz = await resolveTz(sb, L.team_id, c.timezone, name);
@@ -856,7 +856,7 @@ async function runOnce() {
 async function previewEvent(opts) {
   opts = opts || {};
   const dept = opts.department === "service" ? "service" : "sales";
-  const name = opts.rooftopName || opts.teamId;
+  const name = opts.rooftopName || "";
   const teamId = opts.teamId, ent = opts.enterpriseId || "";
   const tz = await resolveTz(sb, teamId, opts.tz, name);
   const emailType = opts.emailType, eventKey = String(opts.eventKey || "");

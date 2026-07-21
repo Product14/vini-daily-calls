@@ -189,7 +189,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
   if (!teamId) throw new Error("teamId required");
   const dept = department === "service" ? "service" : "sales";
   const useCase = dept === "service" ? "Service" : "Sales";
-  const name = rooftopName || teamId;
+  const name = rooftopName || "";
   const links = { console: "https://console.spyne.ai/converse-ai" };
 
   if (emailType === "post_conversation") {
