@@ -28,7 +28,7 @@ const emailValue = require("./emailValue.cjs");
 const T = require("../../src/email/transactionalTemplates.cjs");
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 // Per-recipient subscription matrix (who gets which type on which channel).
-const { isSubscribed } = require("./subscriptions.cjs");
+const { isSubscribed, isChurned } = require("./subscriptions.cjs");
 // Self-healing rooftop-timezone resolver (live Spyne API, persisted back) — already used by
 // eventRunner.cjs; the digest cron used to hardcode America/New_York for any rooftop with a
 // blank roi_rooftop_config.timezone.
@@ -792,7 +792,7 @@ async function runOnce() {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
@@ -807,7 +807,7 @@ async function runOnce() {
   for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || "";
   const recOf = new Map();
   for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0, stale_held: 0 };
+  const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0, stale_held: 0, churned: 0 };
   const failures = []; // genuine send failures this pass → the Slack breakage alert (postSlackAlert)
   const smsFailures = []; // genuine digest-SMS send failures this pass → shared Slack breakage alert (SMS)
   const staleHeld = []; // rooftops held this pass because the aggregate hadn't reached the report day
@@ -853,6 +853,17 @@ async function runOnce() {
       // already sent today?
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
       if (done && !FORCE_RESEND) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already sent for ${w.localDate}`); return; }
+      // ── CHURN GATE ───────────────────────────────────────────────────────────────────────────────
+      // Stage never gates a send (onboarding/contracting rooftops are often live for the dealer) —
+      // churn is the sole exception. Deliberately AFTER the already-sent check so it can never
+      // overwrite a genuine 'sent' audit row with a suppression on the day a rooftop churns.
+      // FORCE_RESEND does NOT bypass this: un-churn the rooftop if a send is really intended.
+      if (isChurned(c, w.localDate)) {
+        await upsert({ status: "not_sent", reason: "churned", reason_detail: `lifecycle=${c?.lifecycle_status ?? "?"} churn_date=${c?.churn_date ? String(c.churn_date).slice(0, 10) : "none"}` });
+        out.churned++;
+        console.log(`  · ${name} [${L.department}] not_sent → churned (lifecycle=${c?.lifecycle_status ?? "?"})`);
+        return;
+      }
       // recipients (step 1 finalized) for this dept — email filtered by the subscription matrix.
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); return; }
@@ -1028,7 +1039,7 @@ async function backfill(start, end) {
   console.log(`\n── BACKFILL ${start}…${end} (record-only, NO emails) ──`);
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_enabled,daily_template,digest_focus"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_enabled,daily_template,digest_focus,lifecycle_status,churn_date"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
@@ -1038,6 +1049,9 @@ async function backfill(start, end) {
   const days = dateRange(start, end);
   const out = { sent: 0, not_sent: 0, preserved: 0, errors: 0 };
   const POOL = 8;
+  // NO churn gate here on purpose: backfill is record-only (it synthesizes roi_digest_runs history
+  // and never calls sendMail), so gating it would only erase a churned rooftop's historical rows
+  // without preventing any email. The gate belongs on the paths that actually send.
   const tasks = (live ?? []).filter((L) => (cfgOf.get(L.team_id)?.daily_enabled) !== false);
 
   async function worker(L) {
@@ -1237,7 +1251,7 @@ async function generateAndSendNow(opts) {
 
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1250,7 +1264,7 @@ async function generateAndSendNow(opts) {
   if (onlyTeam) targets = targets.filter((L) => L.team_id === onlyTeam);
   if (onlyDept) targets = targets.filter((L) => L.department === onlyDept);
 
-  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, paused: 0, errors: 0, details: [] };
+  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, paused: 0, errors: 0, churned: 0, details: [] };
   const smsFailures = []; // on-demand digest-SMS failures this pass → shared Slack breakage alert (SMS)
 
   const process1 = async (L) => {
@@ -1270,6 +1284,13 @@ async function generateAndSendNow(opts) {
     };
     const note = (status, extra) => out.details.push({ team: L.team_id, dept: L.department, name, status, ...(extra || {}) });
     try {
+      // CHURN GATE — a manual "Generate & send now" must not bypass it either (same reasoning as
+      // the daily_enabled pause above). See subscriptions.cjs isChurned.
+      if (isChurned(c, w.localDate)) {
+        await upsert({ status: "not_sent", reason: "churned", reason_detail: `lifecycle=${c?.lifecycle_status ?? "?"}`, subject });
+        out.churned++; note("churned");
+        return;
+      }
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing", subject }); out.no_recipients++; note("no_recipients"); return; }
       const day = await getDayWithLiveness(L.team_id, L.department, w);
@@ -1364,7 +1385,7 @@ async function runCadence(cadence) {
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,${enabledCol}`),
+    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,churn_date,${enabledCol}`),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -1377,7 +1398,7 @@ async function runCadence(cadence) {
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   // FORCE_RESEND=true → re-send even if a 'sent' row already exists for that date (manual backfill send) — see runOnce.
   const FORCE_RESEND = process.env.FORCE_RESEND === "true";
-  const out = { sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, no_data: 0, before_hour: 0, errors: 0 };
+  const out = { sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, no_data: 0, before_hour: 0, errors: 0, churned: 0 };
   const smsFailures = []; // genuine weekly/monthly digest-SMS failures this pass → Slack breakage alert (SMS)
 
   const process1 = async (L) => {
@@ -1394,6 +1415,13 @@ async function runCadence(cadence) {
     try {
       const { data: done } = await sb.from("roi_digest_runs").select("id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).eq("status", "sent").maybeSingle();
       if (done && !FORCE_RESEND) { out.already_sent++; return; }
+      // CHURN GATE — see runOnce / subscriptions.cjs isChurned. After the already-sent check.
+      if (isChurned(c, w.localDate)) {
+        await upsert({ status: "not_sent", reason: "churned", reason_detail: `lifecycle=${c?.lifecycle_status ?? "?"} churn_date=${c?.churn_date ? String(c.churn_date).slice(0, 10) : "none"}` });
+        out.churned++;
+        console.log(`  · ${name} [${L.department}] ${cadence} not_sent → churned`);
+        return;
+      }
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
       if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; return; }
       const day = await getDayWithLiveness(L.team_id, L.department, w);
@@ -1477,6 +1505,39 @@ WHERE tam.isOnboarded = 1
   AND ifNull(at.__deleted,0) = 0
   AND at.agentType IN ('Sales','Service')`;
 
+// SECOND candidate source — (team, dept) pairs derived from REAL CALL ACTIVITY.
+//
+// Why this exists: CANDIDATES_SQL gates on teamAgentMappings.isOnboarded = 1, a provisioning flag
+// that lags the AI actually going live. A rooftop taking real dealer calls with isOnboarded = 0 gets
+// no roi_live_departments row — and because the digest cron drives off `is_live = true`, it then
+// writes NO roi_digest_runs row at all, not even not_sent. The rooftop is invisible in the tracker
+// and silently unable to send, with no UI path to fix it (both browser writes are .update(), which
+// no-ops when the row is absent). Five rooftops hit this in four days (2026-07-28…31): Lumos Honda
+// (42 calls, 8 verified recipients, all 6 mappings isOnboarded=0, zero digest_runs ever), Pinegar
+// service, Roanoke Ford sales, and World Car Hyundai South's SERVICE row — whose Sales mappings were
+// isOnboarded=1 (row existed) while its Service ones were 0, so 135 of its 145 calls went unreported.
+//
+// Activity is the signal that can't lag: if the dealer's customers are talking to the AI, the rooftop
+// is live regardless of what any stage or provisioning field claims. Rows still land HELD
+// (dry_run = true) exactly like teamAgentMappings-derived ones, so discovery never sends an email —
+// it only makes the rooftop visible and configurable.
+//
+// Threshold is deliberately 1 call: a held row costs nothing and invisibility is the expensive
+// failure (Roanoke Ford had just 2 calls in 30d and genuinely needed its row). report_useCase is the
+// same field the digest itself splits departments on; rows that don't classify as sales/service are
+// dropped rather than guessed at.
+const ACTIVITY_DEPT_MIN_CALLS = 1;
+const ACTIVITY_DEPT_SQL = `SELECT
+  teamId AS t,
+  multiIf(lower(report_useCase) LIKE '%service%', 'service',
+          lower(report_useCase) LIKE '%sales%',   'sales',
+          '')                                   AS d,
+  uniqExact(callId)                             AS calls
+FROM dealer_leads.endcallreports
+WHERE isTestCall = 0 AND createdAt >= today() - 30 AND teamId != ''
+GROUP BY t, d
+HAVING d != '' AND calls >= ${ACTIVITY_DEPT_MIN_CALLS}`;
+
 async function syncLive() {
   const ts = new Date().toISOString();
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
@@ -1496,10 +1557,11 @@ async function syncLive() {
   // Sales/Service dept split — keep it for enumeration, then intersect its teams with the eligible set.
   // LIFECYCLE_SQL/ACTIVITY_SQL are the same proven queries syncLifecycle runs.
   const { runClickhouse } = await import("../agentMetrics.js");
-  const [rows, lifeRows, actRows] = await Promise.all([
+  const [rows, lifeRows, actRows, actDeptRows] = await Promise.all([
     runClickhouse(CANDIDATES_SQL),
     runClickhouse(LIFECYCLE_SQL),
     runClickhouse(ACTIVITY_SQL),
+    runClickhouse(ACTIVITY_DEPT_SQL),
   ]);
 
   // eligible-team gate — (Live ∪ 30d-active) \ Churned
@@ -1514,6 +1576,16 @@ async function syncLive() {
     const t = String(r.t ?? r.teamId ?? "").trim(); if (!t) continue;
     if ((Number(r.calls_30d) || 0) + (Number(r.sms_30d) || 0) > 0) activeT.add(t);
   }
+  // Also honour STICKY MANUAL churn, which lives only in Postgres: syncLifecycle preserves a
+  // human-confirmed churn that the ARR ledger has no signal for (the Edwards group), so the
+  // ledger-derived `churned` set above misses it. Without this, discovery re-adds a manually
+  // churned rooftop's departments from its own wind-down traffic. Best-effort: a read failure
+  // must not break discovery, it just falls back to the ledger-only set.
+  try {
+    const { data: cfgChurn } = await sb.from("roi_rooftop_config").select("team_id,lifecycle_status,churn_date");
+    const today = ts.slice(0, 10);
+    for (const c of (cfgChurn ?? [])) if (isChurned(c, today)) churned.add(c.team_id);
+  } catch (e) { console.warn("[sync-live] sticky-churn read skipped:", String(e).slice(0, 120)); }
   const eligible = (t) => (liveT.has(t) || activeT.has(t)) && !churned.has(t);
 
   // normalize → {team_id, department}; held as is_live=true + dry_run=true — eligible teams only
@@ -1533,6 +1605,23 @@ async function syncLive() {
     cand.push({ team_id, department, is_live: true, dry_run: true });
   }
 
+  // Second pass — the activity-derived pairs (see ACTIVITY_DEPT_SQL). Same `seen` dedupe and the same
+  // eligible() gate, so a churned rooftop is never resurrected by its own wind-down traffic. These are
+  // by construction in activeT, so the gate only ever removes churn here. Held (dry_run: true) like
+  // every other discovered row — a human still flips it on.
+  let fromActivity = 0;
+  for (const r of (actDeptRows || [])) {
+    const team_id = String(r.t ?? r.team_id ?? "").trim();
+    const department = String(r.d ?? r.department ?? "").trim().toLowerCase();
+    if (!team_id || (department !== "sales" && department !== "service")) continue;
+    if (!eligible(team_id)) { skipped++; continue; }
+    const k = `${team_id}|${department}`;
+    if (seen.has(k)) continue;              // teamAgentMappings already covered this pair
+    seen.add(k);
+    cand.push({ team_id, department, is_live: true, dry_run: true });
+    fromActivity++;
+  }
+
   // figure out which (team,dept) are genuinely new (for reporting)
   const { data: existing, error: exErr } = await sb.from("roi_live_departments").select("team_id,department");
   if (exErr) throw new Error(`read roi_live_departments failed: ${exErr.message}`);
@@ -1546,9 +1635,9 @@ async function syncLive() {
     if (error) throw new Error(`upsert roi_live_departments failed: ${error.message}`);
   }
 
-  const summary = { candidates: cand.length, skipped_ineligible: skipped, new_rooftops: fresh.length, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
+  const summary = { candidates: cand.length, skipped_ineligible: skipped, from_activity: fromActivity, new_rooftops: fresh.length, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
   await sb.from("roi_cron_runs").insert({ source: "sync-live", ok: true, summary }).then(() => {}, () => {});
-  console.log(`[sync-live] eligible candidates=${cand.length} (skipped ${skipped} outside Live/active-minus-churn) new=${fresh.length}`);
+  console.log(`[sync-live] eligible candidates=${cand.length} (${fromActivity} from call activity, skipped ${skipped} outside Live/active-minus-churn) new=${fresh.length}`);
   return { ranAt: ts, ...summary };
 }
 

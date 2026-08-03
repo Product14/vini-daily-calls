@@ -43,6 +43,31 @@ function isSubscribed(recip, type, channel) {
   return typeof v === "boolean" ? v : defaultSub(type, channel);
 }
 
+/** CHURN SEND-GATE — a churned rooftop must never be emailed or texted, on any cadence or path.
+ *
+ * This is the ONE place the send path consults the lifecycle stage, and that asymmetry is
+ * deliberate: onboarding/contracting rooftops SHOULD send (their AI is often already working
+ * for the dealer, and the stage labels lag reality badly — 35 'PWS' rooftops are stamped Live
+ * by the platform, 6 'OB-Live' ones are mid-onboarding). Gating on those would silence real
+ * customers. Churn is the only stage where sending costs more than not sending, so it's the
+ * only carve-out.
+ *
+ * Honours a past churn_date directly as well as the derived status: the ARR ledger's bucket
+ * lags the date (the same reason syncLifecycle applies its own past-churn_date override), so a
+ * rooftop can sit at lifecycle_status='live' with a churn_date two weeks gone.
+ *
+ * @param cfg    roi_rooftop_config row (needs lifecycle_status + churn_date selected)
+ * @param onDate dealer-local YYYY-MM-DD being reported/sent
+ * Fail-open: a missing config row or unparseable date is NOT churned, matching how the rest of
+ * the send path treats missing config. */
+function isChurned(cfg, onDate) {
+  if (!cfg) return false;
+  if (String(cfg.lifecycle_status || "").toLowerCase() === "churn") return true;
+  const churn = cfg.churn_date ? String(cfg.churn_date).slice(0, 10) : "";
+  const on = String(onDate || "").slice(0, 10);
+  return Boolean(churn) && Boolean(on) && churn <= on;
+}
+
 const normRole = (r) => String(r || "").trim().toLowerCase();
 
 /** Role-tiered fallback for TRANSACTIONAL routing. Given an already channel+dept+subscription
@@ -62,5 +87,5 @@ function pickTieredRecipients(recips) {
 
 module.exports = {
   DIGEST_TYPES, TRANSACTIONAL_TYPES, ALL_TYPES, CHANNELS, ROLE_TIERS,
-  isDigest, defaultSub, isSubscribed, pickTieredRecipients,
+  isDigest, defaultSub, isSubscribed, pickTieredRecipients, isChurned,
 };
