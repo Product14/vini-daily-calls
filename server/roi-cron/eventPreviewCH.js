@@ -50,7 +50,10 @@ function fmtWhen(dt, tz) {
 // populated value across the duplicate versions.
 const IDENTITY_JOINS =
   " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
-  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+  // `emails` rides along for the lead-capture email (unused by the other event types) so the
+  // preview resolves identity from the SAME row shape the cron send path does.
+  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number," +
+  " anyIf(emails, notEmpty(emails)) emails FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
 
 // Placeholder names the source data stores for unidentified callers (~12k literal "unknown",
 // plus "n/a"/"na"/"test"/etc.) — these are NOT real customer names, so treat them as no-name.
@@ -184,7 +187,7 @@ function convOpts(row, transfer) {
  * fine for a PREVIEW, but on the real send path it would email a dealer another customer's PII — so the
  * send endpoint passes strict:true and refuses (404) rather than send the wrong person's data.
  */
-export async function previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict = false }) {
+export async function previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict = false, template = "" }) {
   if (!hasClickhouseCreds()) throw new Error("ClickHouse not configured on this server (set CLICKHOUSE_HOST/PASSWORD)");
   if (!teamId) throw new Error("teamId required");
   const dept = department === "service" ? "service" : "sales";
@@ -192,12 +195,18 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
   const name = rooftopName || "";
   const links = { console: "https://console.spyne.ai/converse-ai" };
 
+  // Rooftops on the lead-capture format get the SAME email here that the cron sends them —
+  // the tracker's preview and its "send now" both go through this function, so rendering the
+  // standard conversation summary would show the dealer a design they'll never receive.
+  const leadCapture = String(template || "") === "lead_capture";
+
   if (emailType === "post_conversation") {
     const base =
       "SELECT e.callId callId, e.leadId leadId, e.report_inOutType direction, e.report_title title," +
       " e.report_summary summary, e.report_overview overview, e.report_actionItems actionItems," +
       " e.callDetails_recordingUrl recordingUrl, e.callDetails_startedAt startedAt, e.callDetails_endedAt endedAt," +
       " e.callDetails_endedReason endedReason, e.report_queryResolved queryResolved, toString(e.createdAt) at," +
+      (leadCapture ? " ifNull(e.report_sales,'') sales, ifNull(e.callDetails_transcript,'') transcript, c.emails emails," : "") +
       " c.name customer, c.mobile_number phone," +
       " q.scorePercentage score, q.overallGrade grade, q.customerFrustrated frustrated" +
       " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
@@ -205,6 +214,14 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)";
     const renderSms = async (cv) => {
       const th = await smsThread(cv.conversationId);
+      if (leadCapture) {
+        // same builder the cron's SMS path uses: fields from the lead's own call, thread attached,
+        // anything the customer typed (newer ZIP / moved time) overriding the carried-over value.
+        const { fetchLeadFieldsByLead, buildSmsLead } = require("./leadCaptureCH.cjs");
+        const byLead = cv.leadId ? await fetchLeadFieldsByLead(teamId, [cv.leadId]) : new Map();
+        const lead = buildSmsLead(byLead.get(String(cv.leadId)) || null, { customer: cv.customer, phone: cv.phone, at: cv.at }, th.messages);
+        return T.renderLeadCapture({ rooftopName: name, dept, tz, links, lead });
+      }
       return T.renderPostConversation({ rooftopName: name, dept, tz, conversation: smsConvOpts(cv, th), links });
     };
     // explicit SMS event → render that text conversation's thread
@@ -227,6 +244,11 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       const cv = await smsConvLatest(teamId);
       if (cv) return renderSms(cv);
       return null;
+    }
+    if (leadCapture) {
+      // same mapper the cron send path uses (server/roi-cron/leadCaptureCH.cjs) → identical output
+      const { leadFromRow } = require("./leadCaptureCH.cjs");
+      return T.renderLeadCapture({ rooftopName: name, dept, tz, links, lead: leadFromRow(row) });
     }
     const transfer = row.callId ? await one("SELECT requestedDepartment, reason, requestedName FROM dealer_leads.callTransferEvents WHERE callId=" + lit(row.callId) + " ORDER BY createdAt DESC LIMIT 1") : null;
     return T.renderPostConversation({ rooftopName: name, dept, tz, conversation: convOpts(row, transfer), links });

@@ -61,13 +61,19 @@ type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: 
   post_appointment_enabled: boolean | null; post_conversation_enabled: boolean | null; action_item_enabled: boolean | null; action_item_overdue_enabled: boolean | null;
   daily_template: string | null; digest_focus: string | null; sms_enabled: boolean | null;
   weekly_send_dow: number | null; monthly_send_day: number | null;
-  lifecycle_status: string | null; arr_bucket: string | null; enterprise_name: string | null; team_name: string | null;
+  lifecycle_status: string | null; lifecycle_status_override: string | null; lifecycle_effective: string | null;
+  lifecycle_override_at: string | null; lifecycle_override_by: string | null;
+  arr_bucket: string | null; enterprise_name: string | null; team_name: string | null;
   contracted_date: string | null; onboarding_date: string | null; ob_live_date: string | null; live_date: string | null; churn_date: string | null;
   calls_30d: number | null; sms_30d: number | null; last_activity_at: string | null;
   ae_poc: string | null; ob_poc: string | null };
 
-/** roi_rooftop_config.lifecycle_status → the tracker's LifecycleStatus, defaulting to "live" for
- * rooftops the lifecycle sync hasn't classified yet — never hides an already-visible rooftop. */
+/** roi_rooftop_config → the tracker's LifecycleStatus, defaulting to "live" for rooftops the
+ * lifecycle sync hasn't classified yet — never hides an already-visible rooftop.
+ *
+ * Prefer lifecycle_effective (generated: a human's lifecycle_status_override applied over the
+ * ledger's lifecycle_status, with churn always winning). Falls back to lifecycle_status so the
+ * tracker still renders against a database where the override migration hasn't been applied. */
 function toLifecycleStatus(v: string | null | undefined): LifecycleStatus {
   return v === "onboarding" || v === "contracting" || v === "churn" ? v : "live";
 }
@@ -275,7 +281,9 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
       department: dept,
       dryRun: live.dry_run !== false, // default true (dry-run on) when unset
       liveStatus,
-      lifecycleStatus: toLifecycleStatus(cfg?.lifecycle_status),
+      lifecycleStatus: toLifecycleStatus(cfg?.lifecycle_effective ?? cfg?.lifecycle_status),
+      lifecycleOverride: (cfg?.lifecycle_status_override ?? null) as RooftopRow["lifecycleOverride"],
+      lifecycleLedger: cfg?.lifecycle_status ?? null,
       arrBucket: cfg?.arr_bucket ?? undefined,
       lifecycleDates: {
         contracted: cfg?.contracted_date ?? null,
@@ -352,7 +360,9 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
       name: c.rooftop_name || c.team_name || c.team_id,
       enterprise_id: c.enterprise_id ?? undefined,
       team_id: c.team_id,
-      lifecycleStatus: toLifecycleStatus(c.lifecycle_status),
+      lifecycleStatus: toLifecycleStatus(c.lifecycle_effective ?? c.lifecycle_status),
+      lifecycleOverride: (c.lifecycle_status_override ?? null) as RooftopRow["lifecycleOverride"],
+      lifecycleLedger: c.lifecycle_status ?? null,
       arrBucket: c.arr_bucket ?? undefined,
       lifecycleDates: { contracted: c.contracted_date, onboarding: c.onboarding_date, obLive: c.ob_live_date, live: c.live_date, churn: c.churn_date },
       activity: { calls30d: c.calls_30d ?? 0, sms30d: c.sms_30d ?? 0, lastActivityAt: c.last_activity_at ?? null },
@@ -694,6 +704,32 @@ export async function updateRooftopLiveStatus(teamId: string, isLive: boolean): 
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
     return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/** Set (or clear, with stage=null) a rooftop's MANUAL lifecycle-stage override.
+ *
+ * roi_rooftop_config.lifecycle_status is rewritten every morning by the sync-lifecycle cron from the
+ * billing ledger, so setting a stage by hand never stuck — rooftops flipped back to "onboarding" at
+ * 05:10 the next day. This writes the separate override column the cron doesn't touch. "churn" is
+ * not settable: churn is a billing fact, and an override can never mask a churned rooftop (the
+ * generated lifecycle_effective column and the send-side churn gate both refuse). */
+export async function updateLifecycleOverride(
+  teamId: string,
+  stage: "live" | "onboarding" | "contracting" | null,
+): Promise<{ ok: boolean; error?: string; effective?: string }> {
+  if (!teamId) return { ok: false, error: "teamId required" };
+  try {
+    const res = await fetch("/api/tracker/lifecycle-override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamId, stage, actor: getActorName() }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
+    return { ok: true, effective: (body as { effective?: string }).effective };
   } catch (e) {
     return { ok: false, error: String(e) };
   }

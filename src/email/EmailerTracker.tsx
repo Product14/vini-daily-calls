@@ -873,7 +873,7 @@ export function EmailerTracker() {
       </div>
 
       {lifecycleTab !== "live" ? (
-        <LifecycleList rooftops={filtered} onConfigure={setConfigRooftop} onStopEmails={stopEmailerNow} />
+        <LifecycleList rooftops={filtered} onConfigure={setConfigRooftop} onStopEmails={stopEmailerNow} onChanged={() => void reload()} />
       ) : (
         <>
       {/* KPI strip — sits below the filters; reacts to the active filters (CSM / product / search) */}

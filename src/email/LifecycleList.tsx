@@ -15,6 +15,7 @@
  * cron (it only gates the tracker's own display + KPIs); this is the actual kill switch.
  */
 import { useState } from "react";
+import { updateLifecycleOverride } from "./dataSource";
 import type { LifecycleStatus, RooftopRow } from "./mockData";
 
 const STAGE_COLORS: Record<LifecycleStatus, { bg: string; fg: string }> = {
@@ -97,10 +98,49 @@ function StopEmailerButton({ rooftop, onStopEmails }: { rooftop: RooftopRow; onS
   );
 }
 
-export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
+/** "Move to Live" / "Clear override" — writes roi_rooftop_config.lifecycle_status_override, the one
+ * stage field the sync-lifecycle cron doesn't overwrite each morning.
+ *
+ * DELIBERATELY says "stage only": this changes which tab the rooftop appears in and nothing else.
+ * Sending is governed entirely by roi_live_departments.dry_run + the cadence toggles + verified
+ * recipients — the stage label has never gated a send. Conflating the two is what made "it's in
+ * onboarding, will emails go out?" a recurring question. */
+function StageOverrideButton({ rooftop, onChanged }: { rooftop: RooftopRow; onChanged?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  // churn is a billing fact — not overridable in either direction (the server rejects it too).
+  if (rooftop.lifecycleStatus === "churn" || !rooftop.team_id) return null;
+  const overridden = Boolean(rooftop.lifecycleOverride);
+  const run = async (stage: "live" | null) => {
+    setBusy(true); setMsg("");
+    const res = await updateLifecycleOverride(rooftop.team_id as string, stage);
+    setBusy(false);
+    if (!res.ok) { setMsg(res.error || "Failed"); return; }
+    onChanged?.();
+  };
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void run(overridden ? null : "live")}
+        title={overridden
+          ? `Clear the manual stage and follow the billing ledger again (it says "${rooftop.lifecycleLedger ?? "?"}").`
+          : "Mark this rooftop Live in the tracker and keep it that way — the daily sync won't revert it. Stage only: this does NOT turn emails on or off."}
+        className="rounded-md border border-border-subtle bg-surface-card px-2.5 py-1 text-[11px] font-semibold text-text-primary hover:bg-surface-subtle disabled:opacity-60"
+      >
+        {busy ? "Saving…" : overridden ? "Clear override" : "Move to Live"}
+      </button>
+      {msg ? <span className="text-[10px] text-negative">{msg}</span> : null}
+    </div>
+  );
+}
+
+export function LifecycleList({ rooftops, onConfigure, onStopEmails, onChanged }: {
   rooftops: RooftopRow[];
   onConfigure: (r: RooftopRow) => void;
   onStopEmails?: (r: RooftopRow) => Promise<{ ok: boolean; error?: string }>;
+  onChanged?: () => void;
 }) {
   if (!rooftops.length) {
     return (
@@ -136,7 +176,17 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
                   </div>
                 </td>
                 <td className="border-b border-border-subtle px-4 py-2.5">
-                  <LifecycleBadge status={r.lifecycleStatus ?? "live"} sub={r.arrBucket} />
+                  <div className="flex flex-col items-start gap-0.5">
+                    <LifecycleBadge status={r.lifecycleStatus ?? "live"} sub={r.arrBucket} />
+                    {r.lifecycleOverride ? (
+                      <span
+                        className="text-[9px] font-semibold uppercase tracking-wide text-text-muted"
+                        title={`Set manually. Billing ledger says "${r.lifecycleLedger ?? "?"}" — the daily sync no longer overrides this.`}
+                      >
+                        ✎ set manually
+                      </span>
+                    ) : null}
+                  </div>
                 </td>
                 <td className="border-b border-border-subtle px-4 py-2.5 text-[12px] tabular text-text-secondary">
                   {days == null ? "—" : `${days}d`}
@@ -166,6 +216,7 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails }: {
                     {r.lifecycleStatus === "churn" && onStopEmails ? (
                       <StopEmailerButton rooftop={r} onStopEmails={onStopEmails} />
                     ) : null}
+                    <StageOverrideButton rooftop={r} onChanged={onChanged} />
                     <button
                       type="button"
                       onClick={() => onConfigure(r)}

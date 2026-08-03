@@ -110,6 +110,14 @@ export type RooftopRow = {
   /** Account-level business stage — see LifecycleStatus. Defaults to "live" for rooftops the
    * lifecycle sync hasn't classified yet (back-compat: never hides an already-visible rooftop). */
   lifecycleStatus?: LifecycleStatus;
+  /** A human's manual stage override (roi_rooftop_config.lifecycle_status_override), or null to
+   * follow the billing ledger. When set it IS lifecycleStatus above — kept separately so the UI can
+   * mark the stage as manually set and offer to clear it. Never "churn": churn is a billing fact and
+   * an override can't mask it. */
+  lifecycleOverride?: "live" | "onboarding" | "contracting" | null;
+  /** The ledger's own lifecycle_status, underneath any override — lets the UI show what billing
+   * thinks when a human has disagreed with it. */
+  lifecycleLedger?: string | null;
   /** Raw ClickHouse bucket behind lifecycleStatus (e.g. "PWS", "OB-Live") — display-only detail. */
   arrBucket?: string;
   /** Lifecycle milestone dates (roi_rooftop_config), all optional/nullable. */

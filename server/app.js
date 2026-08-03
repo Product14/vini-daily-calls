@@ -2553,6 +2553,20 @@ app.post("/api/email/roi-generate-preview", requireTrackerAuth, async (req, res)
 // feeds, so the tracker's "Latest design" toggle shows the up-to-date email per customer
 // even when the stored copy is older or no event was sent yet.
 // Body: { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz }
+// A rooftop's post-conversation email FORMAT ('lead_capture' | null). Best-effort: a read failure
+// (or a deployment whose DB predates the column) degrades to the default format rather than 500ing
+// the preview/send.
+async function roiConfigTemplate(teamId) {
+  try {
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey || !teamId) return "";
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data } = await sb.from("roi_rooftop_config").select("post_conversation_template").eq("team_id", teamId).maybeSingle();
+    return String(data?.post_conversation_template || "");
+  } catch { return ""; }
+}
+
 app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
@@ -2566,6 +2580,11 @@ app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) =>
     // list's source + key. The reporting-API path stays first only for the synthetic, key-less
     // "latest design" preview, where a representative recent customer is the intended behaviour.
     const wantKey = !!(eventKey && String(eventKey).trim());
+    // Per-rooftop email FORMAT (roi_rooftop_config.post_conversation_template). Only the ClickHouse
+    // path can render 'lead_capture' (it needs the sales sub-report + transcript the reporting feed
+    // omits), so a lead-capture rooftop must not fall through to the API path first — it would preview
+    // a design the dealer never receives.
+    const template = await roiConfigTemplate(teamId);
     let html = "";
     const tryApi = async () => {
       try {
@@ -2580,9 +2599,9 @@ app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) =>
       const { hasClickhouseCreds } = await import("./agentMetrics.js");
       if (!hasClickhouseCreds()) return "";
       const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
-      return await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict });
+      return await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict, template });
     };
-    if (wantKey) {
+    if (wantKey || template === "lead_capture") {
       try { html = await tryCH(true); } catch (e) { console.warn("[roi-event-preview] CH strict path failed:", String(e?.message || e).slice(0, 140)); }
       if (!html) html = await tryApi(); // CH unavailable → API still won't substitute (keyed)
     } else {
@@ -2798,7 +2817,8 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
     // strict:true — on the SEND path, if eventKey doesn't resolve to that exact item, refuse rather than
     // substitute the rooftop's most-recent customer (which would email a dealer another customer's PII).
-    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz, strict: !!eventKey });
+    const cfgTemplate = await roiConfigTemplate(teamId); // NB: `template` below is the mail-proxy template
+    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz, strict: !!eventKey, template: cfgTemplate });
     if (!html) return res.status(404).json({ error: "No live data found to render this email for the rooftop." });
 
     // 2) recipients — the dept's enabled, human-verified addresses
@@ -2809,7 +2829,10 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
 
     // 3) idempotency: a deterministic event_key + a recent-duplicate guard so a double-click or client
     // retry doesn't email the dealer twice (the old `manual-${type}-${Date.now()}` key never deduped).
-    const subject = `${EVENT_SUBJECTS[emailType] || "Vini"} — ${rooftopName || teamId}`;
+    // lead-capture rooftops get their own subject line — "Conversation summary" would misdescribe
+    // the lead sheet the email actually is (and is what the cron sends them too).
+    const subjectLabel = emailType === "post_conversation" && cfgTemplate === "lead_capture" ? "New lead" : (EVENT_SUBJECTS[emailType] || "Vini");
+    const subject = `${subjectLabel} — ${rooftopName || teamId}`;
     const evKey = `manual-${emailType}-${eventKey || "latest"}`;
     const dupSince = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { data: dup } = await sb.from("roi_event_emails")
@@ -3203,8 +3226,16 @@ app.post("/api/rooftop-config", requireTrackerAuth, async (req, res) => {
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
     const { data: before } = await sb.from("roi_rooftop_config").select(Object.keys(patch).join(",")).eq("team_id", teamId).maybeSingle();
-    const { error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId);
+    // FAIL LOUD when the rooftop has no config row: `.update().eq()` matches 0 rows, so every
+    // toggle used to no-op while still returning ok:true and writing an audit entry — the UI
+    // reverted and the change was silently lost (Superior Auto `27ec3720db`, Aug 2026: four
+    // event-email toggles "saved" three times, none persisted). `.select()` makes the 0-row
+    // case visible; same 404 contract as the lifecycle-override endpoint below.
+    const { data: written, error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId).select("team_id");
     if (error) return res.status(500).json({ error: error.message });
+    if (!written || written.length === 0) {
+      return res.status(404).json({ error: `no roi_rooftop_config row for team ${teamId} — create the rooftop's config row before configuring it` });
+    }
     await logConfigAudit(sb, teamId, actor, patch, before);
     return res.json({ ok: true, teamId, ...patch });
   } catch (err) {
@@ -3343,8 +3374,34 @@ function _trackerRoiSb() {
   return createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
 }
 // Column lists copied VERBATIM from src/email/dataSource.ts so shapes match exactly.
-const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
-const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
+// The lifecycle-override columns (see src/programs/schema-lifecycle-override.sql) are read by both
+// config selects below. PostgREST answers a select naming a column that doesn't exist with 42703 —
+// a hard 400 that would blank the whole tracker if this code deployed before the migration ran. So
+// read them optimistically and fall back to the pre-migration column set once, rather than depending
+// on deploy ordering. Delete this shim (and _ROI_CFG_LIFECYCLE_OVERRIDE_COLS) once the migration is
+// applied everywhere.
+const _ROI_CFG_LIFECYCLE_OVERRIDE_COLS = ["lifecycle_status_override", "lifecycle_effective", "lifecycle_override_at", "lifecycle_override_by"];
+const _stripOverrideCols = (cols) =>
+  cols.split(",").filter((c) => !_ROI_CFG_LIFECYCLE_OVERRIDE_COLS.includes(c.trim())).join(",");
+/** Select roi_rooftop_config with the override columns, retrying without them on 42703 (undefined
+ * column). `effectiveFilter`, when given, restricts to the lifecycle-list stages — using the
+ * generated lifecycle_effective post-migration and plain lifecycle_status before it. */
+async function _roiCfgSelect(sb, cols, effectiveFilter) {
+  const STAGES = ["onboarding", "contracting", "churn"];
+  const withNew = effectiveFilter
+    ? sb.from("roi_rooftop_config").select(cols).in(effectiveFilter, STAGES)
+    : sb.from("roi_rooftop_config").select(cols);
+  const res = await withNew;
+  if (!res.error || res.error.code !== "42703") return res;
+  console.warn("[tracker] lifecycle-override columns absent — falling back (run src/programs/schema-lifecycle-override.sql)");
+  const legacy = _stripOverrideCols(cols);
+  return effectiveFilter
+    ? sb.from("roi_rooftop_config").select(legacy).in("lifecycle_status", STAGES)
+    : sb.from("roi_rooftop_config").select(legacy);
+}
+
+const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
+const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
 const _ROI_RUN_COLS = "team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count";
 
 /** Shift an ISO "YYYY-MM-DD" by n days (UTC). */
@@ -3398,7 +3455,7 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
     // Config/recipients/live depts first — live depts give us the team set to scope the runs read
     // to, so discovery/phantom rows for non-live teams never consume the read budget.
     const [cfgRes, recRes, liveRes] = await Promise.all([
-      sb.from("roi_rooftop_config").select(_ROI_CFG_COLS),
+      _roiCfgSelect(sb, _ROI_CFG_COLS),
       sb.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
       sb.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
     ]);
@@ -3444,7 +3501,9 @@ app.get("/api/tracker/lifecycle-rooftops", requireTrackerAuth, async (req, res) 
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const [cfgRes, liveRes] = await Promise.all([
-      sb.from("roi_rooftop_config").select(_ROI_CFG_COLS_LIFECYCLE).in("lifecycle_status", ["onboarding", "contracting", "churn"]),
+      // filter on lifecycle_effective (generated: override applied, churn always wins) so a rooftop a
+      // human moved to Live drops out of this list and one they moved back to Onboarding appears.
+      _roiCfgSelect(sb, _ROI_CFG_COLS_LIFECYCLE, "lifecycle_effective"),
       sb.from("roi_live_departments").select("team_id"),
     ]);
     if (cfgRes.error) return res.status(500).json({ error: cfgRes.error.message });
@@ -3570,6 +3629,44 @@ app.post("/api/tracker/count-event", requireTrackerAuth, async (req, res) => {
   } catch (err) {
     console.error("POST /api/tracker/count-event error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "count failed" });
+  }
+});
+
+// 8b) Set / clear a rooftop's MANUAL lifecycle-stage override (roi_rooftop_config).
+//     lifecycle_status itself is rewritten every morning by sync-lifecycle from the billing ledger,
+//     so a hand-set stage never survived — see src/programs/schema-lifecycle-override.sql. Writing
+//     the override column instead makes a human's answer durable. Pass stage:null to clear and fall
+//     back to the ledger. 'churn' is rejected: churn is a billing fact, and lifecycle_effective
+//     refuses to let an override mask it either way.
+app.post("/api/tracker/lifecycle-override", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamId, stage, actor } = req.body ?? {};
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    const ALLOWED = ["live", "onboarding", "contracting"];
+    if (stage !== null && !ALLOWED.includes(stage)) {
+      return res.status(400).json({ error: `stage must be null (clear) or one of ${ALLOWED.join(", ")} — churn cannot be set manually` });
+    }
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: before } = await sb.from("roi_rooftop_config").select("lifecycle_status,lifecycle_status_override").eq("team_id", teamId).maybeSingle();
+    if (!before) return res.status(404).json({ error: `no roi_rooftop_config row for team ${teamId}` });
+    const patch = stage === null
+      ? { lifecycle_status_override: null, lifecycle_override_at: null, lifecycle_override_by: null }
+      : { lifecycle_status_override: stage, lifecycle_override_at: new Date().toISOString(), lifecycle_override_by: actor || null };
+    const { error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId);
+    if (error) return res.status(500).json({ error: error.message });
+    try {
+      if (before.lifecycle_status_override !== stage) {
+        const { error: auditErr } = await sb.from("roi_config_audit_log").insert([{ team_id: teamId, actor: actor || null, field: "lifecycle_status_override", old_value: before.lifecycle_status_override ?? null, new_value: stage, source: "tracker" }]);
+        if (auditErr) console.warn("[audit] roi_config_audit_log insert failed:", auditErr.message);
+      }
+    } catch (e) { console.warn("[audit] lifecycle-override audit insert failed:", e?.message ?? e); }
+    // effective mirrors the generated column: churn always wins, else override ?? ledger
+    const effective = before.lifecycle_status === "churn" ? "churn" : (stage ?? before.lifecycle_status);
+    return res.json({ ok: true, teamId, override: stage, ledger: before.lifecycle_status, effective });
+  } catch (err) {
+    console.error("POST /api/tracker/lifecycle-override error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "update failed" });
   }
 });
 
