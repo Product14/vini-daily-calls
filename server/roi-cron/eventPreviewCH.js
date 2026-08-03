@@ -206,7 +206,13 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       " e.report_summary summary, e.report_overview overview, e.report_actionItems actionItems," +
       " e.callDetails_recordingUrl recordingUrl, e.callDetails_startedAt startedAt, e.callDetails_endedAt endedAt," +
       " e.callDetails_endedReason endedReason, e.report_queryResolved queryResolved, toString(e.createdAt) at," +
-      (leadCapture ? " ifNull(e.report_sales,'') sales, ifNull(e.callDetails_transcript,'') transcript, c.emails emails," : "") +
+      // PARITY: these are exactly the extra columns leadFromRow() reads beyond what the standard
+      // preview already selects. Add one here whenever leadCaptureCH.LEAD_FIELD_COLS grows, or the
+      // preview silently renders a field the real email fills in (scratch-preview asserts equality).
+      (leadCapture
+        ? " ifNull(e.report_sales,'') sales, ifNull(e.callDetails_transcript,'') transcript," +
+          " ifNull(e.callDetails_agentInfo_agentName,'') agentName, c.emails emails,"
+        : "") +
       " c.name customer, c.mobile_number phone," +
       " q.scorePercentage score, q.overallGrade grade, q.customerFrustrated frustrated" +
       " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +

@@ -229,9 +229,15 @@ function bulletBlock(title, items, dotColor) {
     }).join("") + "</div>";
 }
 
-// SMS thread preview — last few bubbles + delivery health
-function smsThread(messages, failedCount) {
-  var msgs = Array.isArray(messages) ? messages.slice(-4) : [];
+// SMS thread preview — last few bubbles + delivery health. `cap` defaults to a 4-bubble PREVIEW
+// (conversation-summary email, where the console link is the full record); the lead-capture sheet
+// passes a real cap because the dealer works the lead from the email itself — a last-4 window can
+// hide the message where the customer gave their ZIP or moved the time.
+function smsThread(messages, failedCount, cap) {
+  var n = Number(cap) > 0 ? Number(cap) : 4;
+  var all = Array.isArray(messages) ? messages : [];
+  var msgs = all.slice(-n);
+  var hidden = all.length - msgs.length;
   if (!msgs.length && !failedCount) return "";
   var bubbles = msgs.map(function (m) {
     var inbound = m.direction === "in" || m.direction === "inbound";
@@ -243,6 +249,7 @@ function smsThread(messages, failedCount) {
     : "";
   return '<div style="margin-top:16px;">' +
     '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin-bottom:6px;">Text thread</div>' +
+    (hidden > 0 ? '<div style="font-size:11px;color:' + FAINT + ';margin-bottom:6px;">Showing the last ' + msgs.length + " of " + all.length + " messages — open the thread for the rest.</div>" : "") +
     '<table width="100%" cellpadding="0" cellspacing="0">' + bubbles + "</table>" + health + "</div>";
 }
 
@@ -406,18 +413,18 @@ function leadField(label, value, hint, note) {
     (has ? esc(value) : "not captured" + (hint ? ' <span style="font-weight:600;color:' + FAINT + ';">— ' + esc(hint) + "</span>" : "")) +
     (has && note ? '<div style="font-size:11px;font-weight:600;color:' + MUTE + ';margin-top:2px;">' + esc(note) + "</div>" : "") + "</td></tr>";
 }
-// Plain-text CRM block. Neil (Superior Auto) enters these leads into the CRM BY HAND — no API — so
-// the email has to carry one contiguous, label:value region they can select once and paste. Rendered
-// in a <pre> because Outlook/Gmail preserve its line breaks on copy; an HTML table collapses to a
+// Plain-text CRM block. This dealer's BDC enters every lead into their CRM BY HAND (no API), so the
+// email has to carry one contiguous, label:value region they can select once and paste. Rendered in
+// a <pre> because Outlook/Gmail preserve its line breaks on copy; an HTML table collapses to a
 // single line in some clients.
 function crmBlock(lines) {
   var txt = lines.map(function (p) { return p[0] + ": " + (p[1] == null || String(p[1]).trim() === "" ? "" : String(p[1])); }).join("\n");
   return '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:18px 0 6px;">Copy into CRM</div>' +
     '<pre style="margin:0;padding:14px 16px;background:' + WASH + ";border:1px dashed " + LINE + ";border-radius:12px;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:12px;line-height:1.7;color:" + INK + ';white-space:pre-wrap;">' + esc(txt) + "</pre>";
 }
-// Full call transcript, speaker-labelled. Neil asked for the transcript IN each lead email (not a
-// console link) so whoever calls back can read exactly what was promised. Capped so a long call
-// can't blow past provider size limits; the recording button stays the escape hatch.
+// Full call transcript, speaker-labelled. This dealer asked for the transcript IN each lead email
+// (not a console link) so whoever makes the callback can read exactly what was promised. Capped so a
+// long call can't blow past provider size limits; the recording button stays the escape hatch.
 function transcriptBlock(text, cap) {
   var t = String(text || "").trim();
   if (!t) return "";
@@ -433,8 +440,8 @@ function transcriptBlock(text, cap) {
  * the AI's after-hours calls as a LEAD SHEET rather than a conversation summary. Selected via
  * roi_rooftop_config.post_conversation_template='lead_capture'.
  *
- * Built for Superior Auto (team 27ec3720db, Jul-2026 call with Neil Waters): Eva never books —
- * she captures interest + preferred time and promises a morning callback — so the email's job is
+ * Built for the first rooftop on this format (Jul-2026 requirements call): their agent never books —
+ * it captures interest + preferred time and promises a morning callback — so the email's job is
  * to hand the BDC everything needed to (a) create the lead by hand and (b) make that callback.
  * Field order and labels are the dealer's own, verbatim.
  *
@@ -457,6 +464,14 @@ function renderLeadCapture(opts) {
   var when = "";
   try { if (d.at) when = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(d.at)); } catch (e) { when = ""; }
 
+  var isSms = d.channel === "sms";
+  // The assistant's own name, from the call record — never a literal. It's per-rooftop and can even
+  // differ between calls on one rooftop, so a hardcoded name eventually tells a dealer their AI is
+  // called something it isn't.
+  var agent = String(d.agentName || "").trim() || "The AI";
+  // Deliberately NOT "the AI didn't ask" — it may have asked and been refused. State the gap, not a
+  // cause. leadField already prints "not captured", so the hint is only the instruction.
+  var notAsked = "ask on the callback";
   var vehicle = [d.vehicleType, d.vehicle].filter(function (x) { return x && String(x).trim(); }).join(" ").trim();
   var financing = String(d.financing || "").trim();
   // Financing / trade-in: blank means the model saw no mention on the call — a DEFINITE "not
@@ -480,10 +495,10 @@ function renderLeadCapture(opts) {
   // the lead (name/email) and route the vehicle (location).
   var fields =
     '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">' +
-      leadField("Name", d.customer, "Eva did not ask") +
+      leadField("Name", d.customer, notAsked) +
       leadField("Phone Number", phoneTxt) +
-      leadField("Email", d.email, "Eva did not ask") +
-      leadField("Zipcode", d.zip, "not stated on the call") +
+      leadField("Email", d.email, notAsked) +
+      leadField("Zipcode", d.zip, isSms ? "not stated" : "not stated on the call") +
       leadField("Vehicle of Interest", vehicle) +
       // apptWhenNote carries "customer moved this by text — the call said X", so the BDC can't
       // confirm the superseded slot (set by leadCaptureCH.buildSmsLead).
@@ -493,14 +508,13 @@ function renderLeadCapture(opts) {
       leadField("Trade-in mentioned", tradeTxt) +
     "</table>";
 
-  var isSms = d.channel === "sms";
   var banner =
     '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + AMBER_BG + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
       '<div style="font-size:14px;font-weight:800;color:' + AMBER + ';">&#9873; ' + (isSms ? "This lead texted back" : "Call this lead back to confirm") + "</div>" +
       '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' +
         (isSms
           ? "The customer replied by text — the thread is below. Details carried over from their call; nothing is booked."
-          : "Eva captured the interest and told the customer someone would call in the morning to confirm the time and location. Nothing is booked.") +
+          : esc(agent) + " captured the interest and told the customer someone would call in the morning to confirm the time and location. Nothing is booked.") +
       "</div>" +
     "</td></tr></table>";
 
@@ -509,15 +523,23 @@ function renderLeadCapture(opts) {
       headRow +
       (d.intent ? '<div style="margin-top:12px;">' + pill(esc(humanizeIntent(d.intent)), BRAND, "#EDE9FE") + "</div>" : "") +
       fields +
-      bulletBlock("What the customer said", d.summary, BRAND) +
-      (d.actionItems && d.actionItems.length ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Follow-ups Eva logged</div>' + actionList(d.actionItems, tz, WARM) : "") +
+      bulletBlock(isSms ? "What the customer said on the call" : "What the customer said", d.summary, BRAND) +
+      (d.actionItems && d.actionItems.length
+        ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Follow-ups ' + esc(agent) + " logged</div>" +
+          actionList(d.actionItems, tz, WARM) +
+          // actionList caps at 8 — say so rather than silently dropping the 9th follow-up.
+          (d.actionItems.length > 8 ? '<div style="font-size:11px;color:' + FAINT + ';margin-top:4px;">+' + (d.actionItems.length - 8) + " more follow-up" + (d.actionItems.length - 8 === 1 ? "" : "s") + " — open the lead in the dashboard.</div>" : "")
+        : "") +
+      // On a text email the recording belongs to the lead's earlier CALL — label it, so "customer
+      // hangup · 2m 22s" isn't read as something that happened in the text thread.
+      (isSms && d.recordingUrl ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 -4px;">From their call</div>' : "") +
       recordingRow(d.recordingUrl, d.durationSec, d.endedReason) +
-      smsThread(d.sms, d.smsFailed) +
+      smsThread(d.sms, d.smsFailed, 14) +
       crmBlock([
         ["Name", d.customer], ["Phone Number", phoneTxt], ["Email", d.email], ["Zipcode", d.zip],
         ["Vehicle of Interest", vehicle], ["Appointment time", d.apptWhen], ["Preferred location", d.location],
         ["Financing Option Required", financingTxt], ["Trade-in mentioned", tradeTxt],
-        ["Called", when],
+        [isSms ? "Texted" : "Called", when],
       ]) +
       transcriptBlock(d.transcript, opts.transcriptCap) +
     "</td></tr></table>" +

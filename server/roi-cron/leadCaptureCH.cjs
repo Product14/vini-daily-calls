@@ -49,31 +49,52 @@ function parseObj(s) { try { return s ? JSON.parse(s) : {}; } catch { return {};
 
 // ── ZIP extraction ────────────────────────────────────────────────────────────────────────────
 // There is NO zip column: not on endcallreports, not on leads, not on customer (checked). The
-// caller speaks it and it survives only in callDetails_transcript — and usually as WORDS
-// ("That's four six eight zero two"), so a \d{5} regex alone finds nothing.
+// caller speaks it and it survives only in callDetails_transcript, in any of these shapes:
+// "46802" · "4 6 8 0 2" · "4-6-8-0-2" · "four six eight zero two" · mixed — the transcriber is
+// inconsistent (the agent's own lines render ZIPs spaced out), so all four must parse.
 //
-// Two guards against capturing the wrong number:
-//   1. Customer lines only. The AI reads the STORE's address back ("Fort Wayne, Indiana 46815") —
-//      matching AI lines would return the dealership's ZIP as the customer's.
-//   2. Prefer the lines after the AI asks for a ZIP. Falls back to any customer line that itself
-//      mentions "zip", so a volunteered ZIP ("my zip is 46802") is still caught.
+// Three guards, because a WRONG zip is worse than a missing one — it routes the callback and the
+// vehicle transfer to a store the customer never picked:
+//   1. Customer lines only. The agent reads the STORE's address back mid-call, so matching agent
+//      lines would file the dealership's own zip as the caller's.
+//   2. Money/mileage context rejected. A five-digit number is just as likely to be a price, a
+//      budget, a down payment or an odometer reading ("I paid 15000", "46000 miles") — those are
+//      checked in a window around each candidate, so a real zip in the same sentence still parses.
+//   3. Proximity to the ask. Only the first few customer lines after the agent asks (counter resets
+//      if it asks again) — an unrelated number later in the call is not the answer to the question.
+// Falls back to any customer line that itself says "zip", so a volunteered zip is still caught.
 const DIGIT_WORDS = {
   zero: "0", oh: "0", o: "0", nought: "0",
   one: "1", two: "2", three: "3", four: "4", for: "4", five: "5",
   six: "6", seven: "7", eight: "8", ate: "8", nine: "9",
 };
 const isZip = (z) => /^\d{5}$/.test(z) && z !== "00000";
+// Terms that mean "this number is money or mileage, not a location".
+const NOT_ZIP_CONTEXT = /\$|\b(paid|pay|price|priced|cost|costs|budget|down|deposit|payment|payments|monthly|finance|financed|worth|asking|msrp|sticker|offer|offered|trade|mile|miles|mileage|odometer|thousand|dollars?|bucks)\b/i;
+const ZIP_ASK_RE = /zip|postal/i;
+const ZIP_ASK_WINDOW = 4; // customer lines after the ask that can still be the answer
 
 function zipFromLine(line) {
-  const m = String(line).match(/\b(\d{5})\b/);
-  if (m && isZip(m[1])) return m[1];
-  // five consecutive spoken digits, e.g. "four six eight zero two" / "four-six-eight-zero-two"
-  const words = String(line).toLowerCase().replace(/[^a-z\s-]/g, " ").split(/[\s-]+/).filter(Boolean);
+  const s = String(line);
+  // literal 5-digit run, rejected when its surroundings read as money/mileage
+  const re = /\b(\d{5})\b/g;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (!isZip(m[1])) continue;
+    const ctx = s.slice(Math.max(0, m.index - 28), m.index + m[1].length + 18);
+    if (NOT_ZIP_CONTEXT.test(ctx)) continue;
+    return m[1];
+  }
+  // five consecutive spoken digits — words ("four six eight zero two"), bare digits ("4 6 8 0 2"),
+  // hyphenated, or any mix. Multi-digit tokens break the run (they aren't digit-by-digit dictation).
+  const tokens = s.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/[\s-]+/).filter(Boolean);
   let run = [];
-  for (const w of words) {
-    const d = DIGIT_WORDS[w];
-    if (d) { run.push(d); if (run.length === 5) { const z = run.join(""); if (isZip(z)) return z; run.shift(); } }
-    else run = [];
+  for (const tok of tokens) {
+    const d = DIGIT_WORDS[tok] || (/^\d$/.test(tok) ? tok : null);
+    if (d) {
+      run.push(d);
+      if (run.length === 5) { const z = run.join(""); if (isZip(z)) return z; run.shift(); }
+    } else run = [];
   }
   return "";
 }
@@ -82,17 +103,18 @@ function extractZip(transcript) {
   const lines = String(transcript || "").split("\n").map((l) => l.trim()).filter(Boolean);
   const isCust = (l) => /^customer\s*:/i.test(l);
   const body = (l) => l.replace(/^[a-z]+\s*:\s*/i, "");
-  // pass 1 — customer lines that follow an AI "what's your ZIP" prompt
-  let asked = false;
+  // pass 1 — the customer lines that answer an agent "what's your ZIP" prompt
+  let asked = false, since = 0;
   for (const l of lines) {
-    if (!isCust(l)) { if (/zip/i.test(l)) asked = true; continue; }
+    if (!isCust(l)) { if (ZIP_ASK_RE.test(l)) { asked = true; since = 0; } continue; }
     if (!asked) continue;
+    if (++since > ZIP_ASK_WINDOW) { asked = false; continue; }
     const z = zipFromLine(body(l));
     if (z) return z;
   }
-  // pass 2 — a customer line that names the ZIP itself
+  // pass 2 — a customer line that names the ZIP itself ("my zip is …"), asked or not
   for (const l of lines) {
-    if (!isCust(l) || !/zip|postal/i.test(l)) continue;
+    if (!isCust(l) || !ZIP_ASK_RE.test(l)) continue;
     const z = zipFromLine(body(l));
     if (z) return z;
   }
@@ -118,12 +140,19 @@ function cleanTimePhrase(s) {
 function pickApptWhen(apptDetails, summaryLines) {
   for (const d of apptDetails) if (DAY_TIME_RE.test(d) && !/open|hours|closed/i.test(d)) return cleanTimePhrase(d);
   // Fall back to free prose — either the narrative summary ("…interest in visiting on Tuesday at
-  // 3 PM") or, on the SMS path, what the customer typed ("can we move it to Thursday at 5?").
+  // 3 PM") or, on the SMS path, what the customer typed ("make it Thursday at 5").
   // Matched STRUCTURALLY (day + optional clock time) rather than "everything up to punctuation":
   // a text often has no trailing period, so the loose form swallowed the rest of the message.
+  // The preposition is OPTIONAL — "Thursday at 5 works for me" is how people actually reply, and
+  // requiring "on/at/to" silently dropped those, which on the SMS path meant the sheet kept showing
+  // the SUPERSEDED time from the call.
+  const DAY = "(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|today)";
+  const CLOCK = "(?:\\s+(?:at|@)\\s*\\d{1,2}(?::\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.)?)?";
+  const PHRASE = new RegExp("\\b(?:on|for|at|to\\s)?\\s*(" + DAY + CLOCK + ")", "i");
   for (const s of summaryLines) {
     if (!DAY_TIME_RE.test(s)) continue;
-    const m = String(s).match(/\b(?:on|for|at|to)\s+((?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|today)(?:\s+(?:at|@)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)?)/i);
+    if (/\b(open|hours|closed|closes)\b/i.test(s)) continue; // store hours are not an appointment
+    const m = String(s).match(PHRASE);
     if (m) return cleanTimePhrase(m[1]);
   }
   return "";
@@ -139,7 +168,7 @@ function pickLocation(apptDetails, summaryLines) {
   }
   return "";
 }
-// "did Eva actually text the pre-qualification link?" — shown next to Financing so the BDC doesn't
+// "did the agent actually text the pre-qualification link?" — shown next to Financing so the BDC doesn't
 // re-send it. Phrasing check only; there is no structured flag for the link send.
 const PREQUAL_SENT_RE = /(texted|sent|sending).{0,60}pre-?qual|pre-?qual.{0,60}(link\s+(sent|texted)|sent\s+via\s+sms)/i;
 
@@ -175,7 +204,11 @@ const LEAD_FIELD_COLS =
   " ifNull(e.report_overview,'') overview, ifNull(e.report_sales,'') sales," +
   " ifNull(e.callDetails_transcript,'') transcript, ifNull(e.callDetails_recordingUrl,'') recordingUrl," +
   " toString(e.callDetails_startedAt) startedAt, toString(e.callDetails_endedAt) endedAt," +
-  " ifNull(e.callDetails_endedReason,'') endedReason";
+  " ifNull(e.callDetails_endedReason,'') endedReason," +
+  // The agent's own name, so the email never hardcodes one. It is per-rooftop (and can differ
+  // between calls on the SAME rooftop), so a literal in the template would eventually address the
+  // dealer about an assistant that doesn't exist.
+  " ifNull(e.callDetails_agentInfo_agentName,'') agentName";
 
 /** Map one joined endcallreports row → the `lead` object T.renderLeadCapture expects. Pure. */
 function leadFromRow(r) {
@@ -201,6 +234,7 @@ function leadFromRow(r) {
     prequalSent: PREQUAL_SENT_RE.test(transcript + "\n" + summary.join("\n")),
     tradeIn: (sales.tradeInMention && sales.tradeInMention.value) || "",
     intent: (ov.overall && ov.overall.customerIntent) || "",
+    agentName: cleanName(r.agentName),
     summary,
     actionItems: parseJsonArray(r.actionItems),
     transcript,
@@ -220,19 +254,34 @@ function leadFromRow(r) {
 async function fetchLeadFields(teamId, callIds) {
   const ids = [...new Set((callIds || []).filter(Boolean).map(String))];
   if (!hasCreds() || !teamId || !ids.length) return new Map();
+  const inList = "(" + ids.map(lit).join(",") + ")";
   const sql =
-    "SELECT e.callId callId, toString(e.createdAt) at," + LEAD_FIELD_COLS + "," +
+    "SELECT e.callId callId, e.id id, toString(e.createdAt) at," + LEAD_FIELD_COLS + "," +
     " ifNull(c.name,'') customer, ifNull(c.mobile_number,'') phone, c.emails emails" +
     " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
-    " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND e.callId IN (" + ids.map(lit).join(",") + ")" +
-    // endcallreports keeps CDC-duplicate rows per callId — keep the newest version of each.
-    " ORDER BY e.updatedAt DESC LIMIT 1 BY e.callId";
+    // TEAM-SCOPED: an id from another rooftop returns nothing rather than another dealer's lead
+    // (the caller then falls back to the standard email). Cross-rooftop isolation is a hard rule.
+    //
+    // Matched on callId OR id because the conversations feed's `cv.id` is one or the other depending
+    // on the row — endcallreports carries BOTH a vendor callId (uuid) and a Mongo _id (24-hex), and
+    // eventPreviewCH already has to accept either. Filtering on callId alone would silently resolve
+    // nothing for id-keyed rows: no error, just every lead quietly falling back to the generic email.
+    " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND (e.callId IN " + inList + " OR e.id IN " + inList + ")" +
+    // endcallreports keeps CDC-duplicate rows per callId — keep the newest version, preferring one
+    // that actually carries a report (belt-and-braces: a newest-but-empty version would render a
+    // blank sheet and trip the no-value gate on a real lead).
+    " ORDER BY notEmpty(ifNull(e.report_overview,'')) DESC, e.updatedAt DESC LIMIT 1 BY e.callId";
   let rows;
   try { rows = await chQuery(sql); }
   catch (e) { console.warn("[lead-capture] ClickHouse enrichment failed:", String(e).slice(0, 160)); return new Map(); }
 
   const out = new Map();
-  for (const r of rows) out.set(String(r.callId), leadFromRow(r));
+  for (const r of rows) {
+    const lead = leadFromRow(r);
+    // keyed under BOTH identifiers, so the caller can look up by whichever one the feed gave it
+    if (r.callId) out.set(String(r.callId), lead);
+    if (r.id) out.set(String(r.id), lead);
+  }
   return out;
 }
 
@@ -241,7 +290,7 @@ async function fetchLeadFields(teamId, callIds) {
  *
  * This is what the SMS path needs. A text thread carries no sales sub-report of its own (no
  * endcallreports row exists for it), but on this dealer's flow the text is always a follow-on to
- * the call Eva just had — she texts the pre-qualification / trade-in links at the end of it. So a
+ * the call the agent just had — it texts the pre-qualification / trade-in links at the end of it. So a
  * reply's lead sheet is built from that lead's own call, with the thread attached by the caller.
  * A lead with no call at all simply isn't in the Map; the caller then renders a thread-only sheet.
  */
@@ -252,6 +301,7 @@ async function fetchLeadFieldsByLead(teamId, leadIds) {
     "SELECT e.leadId leadId, toString(e.createdAt) at," + LEAD_FIELD_COLS + "," +
     " ifNull(c.name,'') customer, ifNull(c.mobile_number,'') phone, c.emails emails" +
     " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
+    // TEAM-SCOPED for the same reason as above: a leadId that isn't this rooftop's returns nothing.
     " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND e.leadId IN (" + ids.map(lit).join(",") + ")" +
     " AND notEmpty(e.report_overview)" +
     " ORDER BY e.createdAt DESC LIMIT 1 BY e.leadId";
@@ -283,8 +333,8 @@ function buildSmsLead(callLead, seed, msgs) {
   const typedWhen = pickApptWhen([], typedLines);
   const base = callLead || {
     customer: "", phone: "", email: "", zip: "", vehicle: "", vehicleType: "", apptWhen: "",
-    location: "", financing: "", prequalSent: false, tradeIn: "", intent: "", summary: [],
-    actionItems: [], transcript: "", recordingUrl: "", durationSec: 0, endedReason: "", at: null,
+    location: "", financing: "", prequalSent: false, tradeIn: "", intent: "", agentName: "",
+    summary: [], actionItems: [], transcript: "", recordingUrl: "", durationSec: 0, endedReason: "", at: null,
   };
   const moved = !!(typedWhen && base.apptWhen && typedWhen.toLowerCase() !== String(base.apptWhen).toLowerCase());
   return {
@@ -294,7 +344,7 @@ function buildSmsLead(callLead, seed, msgs) {
     smsFailed: sms.filter((m) => SMS_FAILED.has(String(m && m.status))).length,
     zip: typedZip || base.zip || "",
     apptWhen: typedWhen || base.apptWhen || "",
-    // the follow-ups Eva logged on the CALL still quote the old slot — say so on the field itself
+    // the follow-ups logged on the CALL still quote the old slot — say so on the field itself
     apptWhenNote: moved ? `Moved by text — the call said ${base.apptWhen}` : "",
     customer: base.customer || cleanName(seed && seed.customer),
     phone: base.phone || (seed && seed.phone) || "",
