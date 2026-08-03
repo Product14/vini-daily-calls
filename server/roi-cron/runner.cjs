@@ -1652,6 +1652,14 @@ async function syncLive() {
 // in the payload, so daily_enabled/recipients/template/etc. (human-set config) are
 // never touched — this is what lets a rooftop be pre-configured during onboarding
 // without the lifecycle sync clobbering it later.
+//
+// >>> DO NOT add lifecycle_status_override to the patch payload below. <<<
+// That column is a human's durable answer to "what stage is this really in", and it survives this
+// cron precisely BECAUSE the payload omits it (ON CONFLICT DO UPDATE only touches columns present).
+// Adding it here would silently reintroduce the flapping it exists to fix — four rooftops set to
+// 'live' on 2026-07-30 were back to 'onboarding' by the next 05:10 run. Read paths use the generated
+// lifecycle_effective column instead; see src/programs/schema-lifecycle-override.sql. lifecycle_status
+// itself SHOULD keep being overwritten here — it stays the ledger's own value, underneath.
 const ARR_BUCKET_TO_LIFECYCLE = {
   "Contract-Initiated": "contracting",
   "PWS": "contracting",
