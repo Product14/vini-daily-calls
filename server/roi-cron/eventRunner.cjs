@@ -37,6 +37,8 @@ const { isSubscribed, pickTieredRecipients, isChurned } = require("./subscriptio
 const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 // Self-healing dealer-timezone lookup (live Spyne working-hours API) — see resolveTz.cjs for why.
 const { resolveTz, resolveWorkingHours } = require("./resolveTz.cjs");
+// Lead-capture field enrichment (ClickHouse) for rooftops on post_conversation_template='lead_capture'.
+const leadCaptureCH = require("./leadCaptureCH.cjs");
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -323,7 +325,7 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,post_conversation_template,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -524,6 +526,7 @@ async function runOnce() {
         const callRollup = process.env.EVENT_CALL_ROLLUP !== "false";
         const callDay = localDateISO(tz);
         const bestByLead = new Map();
+        const chosen = []; // [{ key, cv, subject }] — one entry per email this pass, in either mode
         for (const cv of j.conversations || []) {
           // outbound: only when the customer responded (config) — proxy: actionable signal present.
           if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
@@ -531,12 +534,7 @@ async function runOnce() {
           // the conversations feed surfaces `spam`; harmless when absent.
           if (cv.spam === true || cv.spam === "Yes") continue;
           if (isCovered(cv)) { out.post_conversation_suppressed++; continue; }
-          if (!callRollup) {
-            jobs.push({ type: "post_conversation", key: cv.id,
-              subject: `Conversation summary — ${name}`,
-              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
-            continue;
-          }
+          if (!callRollup) { chosen.push({ key: cv.id, cv, subject: `Conversation summary — ${name}` }); continue; }
           const k = cv.leadId || cv.id;
           const rank = cv.appointmentScheduled ? 2 : cv.hasActionItem ? 1 : 0;
           const prev = bestByLead.get(k);
@@ -544,8 +542,32 @@ async function runOnce() {
           if (!prev || rank > prev.rank || (rank === prev.rank && String(cv.at || "") > String(prev.cv.at || ""))) bestByLead.set(k, { cv, rank });
         }
         for (const [k, { cv, rank }] of bestByLead) {
-          jobs.push({ type: "post_conversation", key: `call:lead:${k}:${callDay}:t${rank}`,
-            subject: `Conversation summary — ${cv.customer || name}`,
+          chosen.push({ key: `call:lead:${k}:${callDay}:t${rank}`, cv, subject: `Conversation summary — ${cv.customer || name}` });
+        }
+        // FORMAT selection (roi_rooftop_config.post_conversation_template). 'lead_capture' rooftops
+        // want a lead sheet, not a conversation summary — the extra fields (requested vehicle,
+        // financing/trade-in flags, preferred time + store, the ZIP the caller gave, the transcript)
+        // are NOT on the funnel feed, so they're enriched from ClickHouse in ONE batched query for
+        // this pass's calls. WHICH calls email is untouched — every gate above already decided that.
+        // A call the enrichment can't resolve falls back to the standard email: never a dropped alert.
+        const leadCapture = String(c.post_conversation_template || "") === "lead_capture";
+        let extras = new Map();
+        if (leadCapture && chosen.length) {
+          if (!leadCaptureCH.hasCreds()) console.warn(`[events] ${name}: post_conversation_template=lead_capture but CLICKHOUSE_HOST/PASSWORD are unset — falling back to the standard conversation email`);
+          extras = await leadCaptureCH.fetchLeadFields(L.team_id, chosen.map((x) => x.cv.id));
+        }
+        for (const { key, cv, subject } of chosen) {
+          const lx = extras.get(String(cv.id));
+          if (lx) {
+            // feed values are the fallback for identity only — the rest is the sales sub-report.
+            const lead = { ...lx, customer: lx.customer || cv.customer || "", phone: lx.phone || cv.phone || "", at: lx.at || cv.at };
+            const vehLabel = [lead.vehicleType, lead.vehicle].filter(Boolean).join(" ").trim();
+            jobs.push({ type: "post_conversation", key,
+              subject: `New lead — ${lead.customer || T.formatPhone(lead.phone) || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
+              html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }) });
+            continue;
+          }
+          jobs.push({ type: "post_conversation", key, subject,
             html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
         }
         // SMS post-conversation — CADENCE is per rooftop (roi_rooftop_config.sms_post_conversation_cadence):
@@ -576,10 +598,26 @@ async function runOnce() {
             const g = byLead.get(k) || []; g.push(cv); byLead.set(k, g);
           }
           const nowT = Date.now();
+          // LEAD-CAPTURE (same rooftop flag as the call path): a text reply is shown as the dealer's
+          // lead sheet too, not a second email format. The thread itself carries no sales sub-report,
+          // so the fields come from that LEAD's own call (Eva texts the pre-qual/trade-in links at the
+          // end of the call she just had); a lead with no call falls back to a thread-only sheet.
+          const smsLeadFields = leadCapture
+            ? await leadCaptureCH.fetchLeadFieldsByLead(L.team_id, [...byLead.keys()])
+            : new Map();
           // Build one SMS post_conversation job from a slice of a lead's messages.
-          const pushSms = (seed, msgs, key, label) => {
+          const pushSms = (seed, msgs, key, label, leadKey) => {
             const sms = msgs.slice(-12);
             const cv = { ...seed, channel: "sms", sms, smsFailed: sms.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length };
+            if (leadCapture) {
+              const lead = leadCaptureCH.buildSmsLead(smsLeadFields.get(String(leadKey)) || null, seed, cv.sms);
+              const vehLabel = [lead.vehicleType, lead.vehicle].filter(Boolean).join(" ").trim();
+              jobs.push({ type: "post_conversation", key,
+                subject: `Text reply — ${lead.customer || T.formatPhone(lead.phone) || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
+                html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }),
+                smsBody: T.renderPostConversationSms({ rooftopName: name, dept, conversation: cv, links: L_ }) });
+              return;
+            }
             jobs.push({ type: "post_conversation", key,
               subject: `SMS ${label} — ${seed.customer || name}`,
               html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }),
@@ -595,17 +633,17 @@ async function runOnce() {
               for (const s of smsSessions(allMsgs, gapMin)) {
                 if (!s.hasReply) continue;
                 if ((nowT - s._lastT) <= gapMin * 60000 && !isEod) continue; // still active → wait
-                pushSms(seed, s.msgs, `sms:${k}:${day}:s${s.startAt}`, "conversation");
+                pushSms(seed, s.msgs, `sms:${k}:${day}:s${s.startAt}`, "conversation", k);
               }
             } else if (smsCadence === "first_plus_digest") {
               // instant: the lead's FIRST customer reply of the day (fires the pass we first see it).
               const firstIdx = allMsgs.findIndex(isInboundSms);
-              if (firstIdx >= 0) pushSms(seed, allMsgs.slice(0, firstIdx + 1), `sms:${k}:${day}:first`, "reply");
+              if (firstIdx >= 0) pushSms(seed, allMsgs.slice(0, firstIdx + 1), `sms:${k}:${day}:first`, "reply", k);
               // digest: the full day's thread, at EOD only.
-              if (isEod) pushSms(seed, allMsgs, `sms:${k}:${day}:digest`, "summary");
+              if (isEod) pushSms(seed, allMsgs, `sms:${k}:${day}:digest`, "summary", k);
             } else {
               // 'daily' (default): one digest per lead/day.
-              pushSms(seed, allMsgs, `sms:${k}:${day}`, "summary");
+              pushSms(seed, allMsgs, `sms:${k}:${day}`, "summary", k);
             }
           }
         }

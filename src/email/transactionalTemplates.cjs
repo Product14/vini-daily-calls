@@ -395,6 +395,140 @@ function renderPostConversationBatch(opts) {
   return stampValue(shell(opts, isSmsBatch ? "SMS digest" : "Conversation digest", convos.length + " " + noun + " — " + (opts.rooftopName || "your rooftop"), body), true);
 }
 
+// ── LEAD-CAPTURE email (per-rooftop custom format) ───────────────────────────────────────────
+// A labelled lead field. Unlike detail(), a MISSING value renders as an explicit "not captured"
+// placeholder instead of vanishing — for a lead sheet the BDC has to know which field to ask for
+// on the confirmation call, and a silently-absent row reads as "nothing to chase".
+function leadField(label, value, hint, note) {
+  var has = value != null && String(value).trim() !== "";
+  return '<tr><td style="padding:8px 0;border-bottom:1px solid ' + LINE + ';font-size:12px;color:' + MUTE + ';width:170px;vertical-align:top;">' + esc(label) + "</td>" +
+    '<td style="padding:8px 0;border-bottom:1px solid ' + LINE + ';font-size:13px;font-weight:' + (has ? "700" : "600") + ";color:" + (has ? INK : FAINT) + ';">' +
+    (has ? esc(value) : "not captured" + (hint ? ' <span style="font-weight:600;color:' + FAINT + ';">— ' + esc(hint) + "</span>" : "")) +
+    (has && note ? '<div style="font-size:11px;font-weight:600;color:' + MUTE + ';margin-top:2px;">' + esc(note) + "</div>" : "") + "</td></tr>";
+}
+// Plain-text CRM block. Neil (Superior Auto) enters these leads into the CRM BY HAND — no API — so
+// the email has to carry one contiguous, label:value region they can select once and paste. Rendered
+// in a <pre> because Outlook/Gmail preserve its line breaks on copy; an HTML table collapses to a
+// single line in some clients.
+function crmBlock(lines) {
+  var txt = lines.map(function (p) { return p[0] + ": " + (p[1] == null || String(p[1]).trim() === "" ? "" : String(p[1])); }).join("\n");
+  return '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:18px 0 6px;">Copy into CRM</div>' +
+    '<pre style="margin:0;padding:14px 16px;background:' + WASH + ";border:1px dashed " + LINE + ";border-radius:12px;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:12px;line-height:1.7;color:" + INK + ';white-space:pre-wrap;">' + esc(txt) + "</pre>";
+}
+// Full call transcript, speaker-labelled. Neil asked for the transcript IN each lead email (not a
+// console link) so whoever calls back can read exactly what was promised. Capped so a long call
+// can't blow past provider size limits; the recording button stays the escape hatch.
+function transcriptBlock(text, cap) {
+  var t = String(text || "").trim();
+  if (!t) return "";
+  var lim = Number(cap) || 6000;
+  var clipped = t.length > lim;
+  if (clipped) t = t.slice(0, lim) + "\n…";
+  return '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:18px 0 6px;">Transcript</div>' +
+    '<div style="padding:14px 16px;background:' + CARD + ";border:1px solid " + LINE + ';border-radius:12px;font-size:12px;line-height:1.75;color:' + BODY + ';white-space:pre-wrap;">' + esc(t) + "</div>" +
+    (clipped ? '<div style="font-size:11px;color:' + FAINT + ';margin-top:6px;">Transcript truncated — play the recording for the full call.</div>' : "");
+}
+/**
+ * LEAD-CAPTURE email — a per-rooftop alternative to renderPostConversation for dealers who work
+ * the AI's after-hours calls as a LEAD SHEET rather than a conversation summary. Selected via
+ * roi_rooftop_config.post_conversation_template='lead_capture'.
+ *
+ * Built for Superior Auto (team 27ec3720db, Jul-2026 call with Neil Waters): Eva never books —
+ * she captures interest + preferred time and promises a morning callback — so the email's job is
+ * to hand the BDC everything needed to (a) create the lead by hand and (b) make that callback.
+ * Field order and labels are the dealer's own, verbatim.
+ *
+ * Works for BOTH channels: a call renders its transcript, a text renders its thread (channel:'sms',
+ * fields carried over from that lead's call — see leadCaptureCH.fetchLeadFieldsByLead). Same layout
+ * either way, so the BDC never has to learn a second format.
+ *
+ * opts: { rooftopName, dept, tz, links, pixelUrl, lead:{
+ *   customer, phone, email, zip, vehicle, vehicleType, apptWhen, location,
+ *   financing('Yes'|'No'|''), prequalSent(bool), tradeIn('Yes'|'No'|''),
+ *   at, intent, summary:[..], actionItems:[..], transcript, recordingUrl, durationSec, endedReason,
+ *   channel('call'|'sms'), sms:[{direction,body,status}], smsFailed } }
+ */
+function renderLeadCapture(opts) {
+  opts = opts || {};
+  var d = opts.lead || {};
+  var L = opts.links || {};
+  var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
+  var tz = opts.tz;
+  var when = "";
+  try { if (d.at) when = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(d.at)); } catch (e) { when = ""; }
+
+  var vehicle = [d.vehicleType, d.vehicle].filter(function (x) { return x && String(x).trim(); }).join(" ").trim();
+  var financing = String(d.financing || "").trim();
+  // Financing / trade-in: blank means the model saw no mention on the call — a DEFINITE "not
+  // discussed", not a missing field, so it reads as an answer rather than a gap to chase.
+  var financingTxt = /^y/i.test(financing) ? "Yes" + (d.prequalSent ? " — pre-qualification link texted" : "") : /^n/i.test(financing) ? "No" : "Not discussed";
+  var trade = String(d.tradeIn || "");
+  var tradeTxt = /^y/i.test(trade) ? "Yes" : /^n/i.test(trade) ? "No" : "Not mentioned";
+  var phoneTxt = d.phone ? formatPhone(d.phone) : "";
+
+  var headRow =
+    '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+      '<td valign="middle">' + avatar(d.customer, 40) +
+        '<span style="display:inline-block;vertical-align:middle;margin-left:10px;">' +
+          '<span style="display:block;font-size:15px;font-weight:800;color:' + INK + ';">' + esc(d.customer || "Caller — name not captured") + "</span>" +
+          (phoneTxt ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(phoneTxt) + "</span>" : "") +
+        "</span></td>" +
+      (when ? '<td align="right" valign="top" style="font-size:11px;color:' + MUTE + ';white-space:nowrap;">' + esc(when) + "</td>" : "") +
+    "</tr></table>";
+
+  // The five fields the dealer asked for, in their order, plus the three they also need to build
+  // the lead (name/email) and route the vehicle (location).
+  var fields =
+    '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">' +
+      leadField("Name", d.customer, "Eva did not ask") +
+      leadField("Phone Number", phoneTxt) +
+      leadField("Email", d.email, "Eva did not ask") +
+      leadField("Zipcode", d.zip, "not stated on the call") +
+      leadField("Vehicle of Interest", vehicle) +
+      // apptWhenNote carries "customer moved this by text — the call said X", so the BDC can't
+      // confirm the superseded slot (set by leadCaptureCH.buildSmsLead).
+      leadField("Appointment time", d.apptWhen, "no time given", d.apptWhenNote) +
+      leadField("Preferred location", d.location) +
+      leadField("Financing Option Required", financingTxt) +
+      leadField("Trade-in mentioned", tradeTxt) +
+    "</table>";
+
+  var isSms = d.channel === "sms";
+  var banner =
+    '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + AMBER_BG + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
+      '<div style="font-size:14px;font-weight:800;color:' + AMBER + ';">&#9873; ' + (isSms ? "This lead texted back" : "Call this lead back to confirm") + "</div>" +
+      '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' +
+        (isSms
+          ? "The customer replied by text — the thread is below. Details carried over from their call; nothing is booked."
+          : "Eva captured the interest and told the customer someone would call in the morning to confirm the time and location. Nothing is booked.") +
+      "</div>" +
+    "</td></tr></table>";
+
+  var card =
+    '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:18px 20px;">' +
+      headRow +
+      (d.intent ? '<div style="margin-top:12px;">' + pill(esc(humanizeIntent(d.intent)), BRAND, "#EDE9FE") + "</div>" : "") +
+      fields +
+      bulletBlock("What the customer said", d.summary, BRAND) +
+      (d.actionItems && d.actionItems.length ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Follow-ups Eva logged</div>' + actionList(d.actionItems, tz, WARM) : "") +
+      recordingRow(d.recordingUrl, d.durationSec, d.endedReason) +
+      smsThread(d.sms, d.smsFailed) +
+      crmBlock([
+        ["Name", d.customer], ["Phone Number", phoneTxt], ["Email", d.email], ["Zipcode", d.zip],
+        ["Vehicle of Interest", vehicle], ["Appointment time", d.apptWhen], ["Preferred location", d.location],
+        ["Financing Option Required", financingTxt], ["Trade-in mentioned", tradeTxt],
+        ["Called", when],
+      ]) +
+      transcriptBlock(d.transcript, opts.transcriptCap) +
+    "</td></tr></table>" +
+    '<div style="margin-top:18px;">' + btnPrimary("Listen & review", url) + "</div>";
+
+  // No-value = nothing a BDC could act on: no vehicle, no time, no zip, no summary, no transcript,
+  // no text thread. (A bare "someone texted, contents unknown" email is exactly what the gate is for.)
+  var hasValue = !!(vehicle || d.apptWhen || d.zip || (d.summary && d.summary.length) || String(d.transcript || "").trim() || (d.sms && d.sms.length));
+  return stampValue(shell(opts, isSms ? "Lead replied by text" : "New lead", esc(d.customer || phoneTxt || "New lead") + (vehicle ? ' <span style="font-weight:700;color:' + MUTE + ';">· ' + esc(vehicle) + "</span>" : ""), banner + card), hasValue);
+}
+
 // One stacked action-item row (used by both the new-item and overdue emails).
 // `tz` = the dealer's IANA timezone so the due time reads in THEIR local time, not the server's.
 function aiRow(it, accent, tz) {
@@ -944,6 +1078,7 @@ module.exports = {
   renderActionItemOverdueBatch: renderActionItemOverdueBatch,
   renderPostConversationBatch: renderPostConversationBatch,
   renderPostConversationBatchSms: renderPostConversationBatchSms,
+  renderLeadCapture: renderLeadCapture,
   formatPhone: formatPhone,
   _shell: shell,
 };

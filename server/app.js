@@ -2553,6 +2553,20 @@ app.post("/api/email/roi-generate-preview", requireTrackerAuth, async (req, res)
 // feeds, so the tracker's "Latest design" toggle shows the up-to-date email per customer
 // even when the stored copy is older or no event was sent yet.
 // Body: { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz }
+// A rooftop's post-conversation email FORMAT ('lead_capture' | null). Best-effort: a read failure
+// (or a deployment whose DB predates the column) degrades to the default format rather than 500ing
+// the preview/send.
+async function roiConfigTemplate(teamId) {
+  try {
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey || !teamId) return "";
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { data } = await sb.from("roi_rooftop_config").select("post_conversation_template").eq("team_id", teamId).maybeSingle();
+    return String(data?.post_conversation_template || "");
+  } catch { return ""; }
+}
+
 app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz } = req.body ?? {};
@@ -2566,6 +2580,11 @@ app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) =>
     // list's source + key. The reporting-API path stays first only for the synthetic, key-less
     // "latest design" preview, where a representative recent customer is the intended behaviour.
     const wantKey = !!(eventKey && String(eventKey).trim());
+    // Per-rooftop email FORMAT (roi_rooftop_config.post_conversation_template). Only the ClickHouse
+    // path can render 'lead_capture' (it needs the sales sub-report + transcript the reporting feed
+    // omits), so a lead-capture rooftop must not fall through to the API path first — it would preview
+    // a design the dealer never receives.
+    const template = await roiConfigTemplate(teamId);
     let html = "";
     const tryApi = async () => {
       try {
@@ -2580,9 +2599,9 @@ app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) =>
       const { hasClickhouseCreds } = await import("./agentMetrics.js");
       if (!hasClickhouseCreds()) return "";
       const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
-      return await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict });
+      return await previewEventCH({ teamId, department, emailType, eventKey, rooftopName, tz, strict, template });
     };
-    if (wantKey) {
+    if (wantKey || template === "lead_capture") {
       try { html = await tryCH(true); } catch (e) { console.warn("[roi-event-preview] CH strict path failed:", String(e?.message || e).slice(0, 140)); }
       if (!html) html = await tryApi(); // CH unavailable → API still won't substitute (keyed)
     } else {
@@ -2798,7 +2817,8 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
     // strict:true — on the SEND path, if eventKey doesn't resolve to that exact item, refuse rather than
     // substitute the rooftop's most-recent customer (which would email a dealer another customer's PII).
-    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz, strict: !!eventKey });
+    const cfgTemplate = await roiConfigTemplate(teamId); // NB: `template` below is the mail-proxy template
+    const html = await previewEventCH({ teamId, department: dept, emailType, eventKey, rooftopName, tz, strict: !!eventKey, template: cfgTemplate });
     if (!html) return res.status(404).json({ error: "No live data found to render this email for the rooftop." });
 
     // 2) recipients — the dept's enabled, human-verified addresses
@@ -2809,7 +2829,10 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
 
     // 3) idempotency: a deterministic event_key + a recent-duplicate guard so a double-click or client
     // retry doesn't email the dealer twice (the old `manual-${type}-${Date.now()}` key never deduped).
-    const subject = `${EVENT_SUBJECTS[emailType] || "Vini"} — ${rooftopName || teamId}`;
+    // lead-capture rooftops get their own subject line — "Conversation summary" would misdescribe
+    // the lead sheet the email actually is (and is what the cron sends them too).
+    const subjectLabel = emailType === "post_conversation" && cfgTemplate === "lead_capture" ? "New lead" : (EVENT_SUBJECTS[emailType] || "Vini");
+    const subject = `${subjectLabel} — ${rooftopName || teamId}`;
     const evKey = `manual-${emailType}-${eventKey || "latest"}`;
     const dupSince = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     const { data: dup } = await sb.from("roi_event_emails")
@@ -3203,8 +3226,16 @@ app.post("/api/rooftop-config", requireTrackerAuth, async (req, res) => {
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
     const { data: before } = await sb.from("roi_rooftop_config").select(Object.keys(patch).join(",")).eq("team_id", teamId).maybeSingle();
-    const { error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId);
+    // FAIL LOUD when the rooftop has no config row: `.update().eq()` matches 0 rows, so every
+    // toggle used to no-op while still returning ok:true and writing an audit entry — the UI
+    // reverted and the change was silently lost (Superior Auto `27ec3720db`, Aug 2026: four
+    // event-email toggles "saved" three times, none persisted). `.select()` makes the 0-row
+    // case visible; same 404 contract as the lifecycle-override endpoint below.
+    const { data: written, error } = await sb.from("roi_rooftop_config").update(patch).eq("team_id", teamId).select("team_id");
     if (error) return res.status(500).json({ error: error.message });
+    if (!written || written.length === 0) {
+      return res.status(404).json({ error: `no roi_rooftop_config row for team ${teamId} — create the rooftop's config row before configuring it` });
+    }
     await logConfigAudit(sb, teamId, actor, patch, before);
     return res.json({ ok: true, teamId, ...patch });
   } catch (err) {
