@@ -33,7 +33,7 @@ const emailValue = require("./emailValue.cjs");
 // and per recipient by roi_recipients.sms_enabled + phone. Its own dedupe ledger (roi_event_sms).
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 // Per-recipient subscription matrix + role-tiered ("assigned salesperson → parent") routing.
-const { isSubscribed, pickTieredRecipients } = require("./subscriptions.cjs");
+const { isSubscribed, pickTieredRecipients, isChurned } = require("./subscriptions.cjs");
 const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 // Self-healing dealer-timezone lookup (live Spyne working-hours API) — see resolveTz.cjs for why.
 const { resolveTz, resolveWorkingHours } = require("./resolveTz.cjs");
@@ -323,14 +323,14 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0 };
+  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0 };
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
   const feedFailures = []; // upstream FEED errors (per rooftop/dept) — the pass couldn't even fetch events.
@@ -342,10 +342,19 @@ async function runOnce() {
 
   for (const L of targets) {
     const c = cfgOf.get(L.team_id) || {};
-    const name = c.rooftop_name || L.team_id;
+    const name = c.rooftop_name || c.team_name || "";
     // dealer-local zone for windows + displayed times — configured value, else a live self-heal
     // lookup (never a silent America/New_York default for a rooftop nobody's set up yet).
     const tz = await resolveTz(sb, L.team_id, c.timezone, name);
+    // ── CHURN GATE ───────────────────────────────────────────────────────────────────────────────
+    // Transactional alerts are the fastest-firing surface (every few minutes), so a churned dealer
+    // would otherwise keep getting appointment/action-item alerts indefinitely. Stage otherwise
+    // never gates a send — churn is the sole carve-out. See subscriptions.cjs isChurned.
+    if (isChurned(c, localDateISO(tz))) {
+      out.churned_skipped++;
+      console.log(`  · ${name} [${L.department}] skipped → churned (lifecycle=${c.lifecycle_status ?? "?"})`);
+      continue;
+    }
     // Real per-dealer open/close hours (falls back to a fixed hour if unresolved) — gates the
     // overdue action-item report to twice a day instead of every pass. Not dept-specific (a
     // rooftop's hours are the same for sales/service), resolved once per (team,dept) target;
@@ -856,7 +865,7 @@ async function runOnce() {
 async function previewEvent(opts) {
   opts = opts || {};
   const dept = opts.department === "service" ? "service" : "sales";
-  const name = opts.rooftopName || opts.teamId;
+  const name = opts.rooftopName || "";
   const teamId = opts.teamId, ent = opts.enterpriseId || "";
   const tz = await resolveTz(sb, teamId, opts.tz, name);
   const emailType = opts.emailType, eventKey = String(opts.eventKey || "");
