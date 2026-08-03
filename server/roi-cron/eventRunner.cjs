@@ -563,7 +563,7 @@ async function runOnce() {
             const lead = { ...lx, customer: lx.customer || cv.customer || "", phone: lx.phone || cv.phone || "", at: lx.at || cv.at };
             const vehLabel = [lead.vehicleType, lead.vehicle].filter(Boolean).join(" ").trim();
             jobs.push({ type: "post_conversation", key,
-              subject: `New lead — ${lead.customer || T.formatPhone(lead.phone) || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
+              subject: `New lead — ${lead.customer || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
               html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }) });
             continue;
           }
@@ -600,7 +600,7 @@ async function runOnce() {
           const nowT = Date.now();
           // LEAD-CAPTURE (same rooftop flag as the call path): a text reply is shown as the dealer's
           // lead sheet too, not a second email format. The thread itself carries no sales sub-report,
-          // so the fields come from that LEAD's own call (Eva texts the pre-qual/trade-in links at the
+          // so the fields come from that LEAD's own call (the agent texts the pre-qual/trade-in links at the
           // end of the call she just had); a lead with no call falls back to a thread-only sheet.
           const smsLeadFields = leadCapture
             ? await leadCaptureCH.fetchLeadFieldsByLead(L.team_id, [...byLead.keys()])
@@ -613,7 +613,7 @@ async function runOnce() {
               const lead = leadCaptureCH.buildSmsLead(smsLeadFields.get(String(leadKey)) || null, seed, cv.sms);
               const vehLabel = [lead.vehicleType, lead.vehicle].filter(Boolean).join(" ").trim();
               jobs.push({ type: "post_conversation", key,
-                subject: `Text reply — ${lead.customer || T.formatPhone(lead.phone) || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
+                subject: `Text reply — ${lead.customer || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
                 html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }),
                 smsBody: T.renderPostConversationSms({ rooftopName: name, dept, conversation: cv, links: L_ }) });
               return;
