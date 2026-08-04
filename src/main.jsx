@@ -6,6 +6,7 @@ import AgentsDashboard from "./agents/AgentsDashboard.tsx";
 import DreamDashboard from "./dream/DreamDashboard.tsx";
 import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
 import { EmailerTracker } from "./email/EmailerTracker.tsx";
+import { RealtimeLog } from "./email/RealtimeLog.tsx";
 import { TrackerAuthGate } from "./email/TrackerAuthGate.tsx";
 import { Analytics } from "@vercel/analytics/react";
 
@@ -38,6 +39,13 @@ function Router() {
   }
   if (path === "/dream" || path.startsWith("/dream/")) {
     return <DreamDashboard />;
+  }
+  if (path === "/email-tracker/realtime") {
+    return (
+      <TrackerAuthGate>
+        <RealtimeLog />
+      </TrackerAuthGate>
+    );
   }
   if (path === "/email-tracker" || path.startsWith("/email-tracker/")) {
     return (
