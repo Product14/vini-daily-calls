@@ -5,6 +5,7 @@ interface SendLog {
   id: string;
   timestamp: Date;
   rooftop: string;
+  team_name: string;
   team_id: string;
   department: string;
   cadence: string;
@@ -70,6 +71,7 @@ export function RealtimeLog() {
           id: logId,
           timestamp: sentAt,
           rooftop: run.rooftop_name || run.team_id.slice(0, 8),
+          team_name: run.team_name || run.enterprise_name || "",
           team_id: run.team_id,
           department: run.department,
           cadence: run.cadence,
@@ -188,7 +190,7 @@ export function RealtimeLog() {
                   borderRadius: "6px",
                   border: "1px solid #334155",
                   display: "grid",
-                  gridTemplateColumns: "80px 120px 100px 100px 100px 1fr",
+                  gridTemplateColumns: "80px 120px 140px 100px 100px 100px 1fr",
                   gap: "12px",
                   alignItems: "center",
                   fontSize: "13px",
@@ -198,6 +200,9 @@ export function RealtimeLog() {
                 <div style={{ color: "#4ade80", fontWeight: "600" }}>{formatTime(log.timestamp)}</div>
                 <div style={{ color: "#cbd5e1", maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={log.rooftop}>
                   {log.rooftop}
+                </div>
+                <div style={{ color: "#a78bfa", maxWidth: "140px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={log.team_name}>
+                  {log.team_name || "—"}
                 </div>
                 <div style={{ color: "#94a3b8" }}>{formatDepartment(log.department)}</div>
                 <div style={{ color: "#94a3b8", textTransform: "capitalize" }}>{log.cadence}</div>
