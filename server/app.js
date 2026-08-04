@@ -3695,6 +3695,100 @@ app.post("/api/tracker/dry-run", requireTrackerAuth, async (req, res) => {
   }
 });
 
+// 10) Realtime send feed — the newest emails that actually LEFT, both streams merged.
+//     Powers /email-tracker/realtime. Deliberately NOT built on /api/tracker/rooftops-data:
+//     that route pages ~30 days of digest rows for every live team (thousands of rows, full
+//     rendered_html excluded but metrics included) — far too heavy to poll on a timer, and it
+//     carries only digests. The live volume is transactional: ~6.4k roi_event_emails/day vs ~60
+//     digests, so a digest-only feed reads as "nothing is sending" for most of the day.
+//     Both tables are queried newest-first with an explicit cap (PostgREST silently truncates at
+//     db-max-rows, so ordering server-side is what guarantees we get the NEWEST rows, not a
+//     random page — see the _fetchRoiRunsPaged note above).
+//     rooftop/team names live on roi_rooftop_config, NOT on either send table, so they're
+//     resolved here into one flat row shape the client renders as-is.
+app.get("/api/tracker/realtime-feed", requireTrackerAuth, async (req, res) => {
+  try {
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const minutes = Math.min(1440, Math.max(1, Number(req.query.minutes) || 240));
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+    const sinceIso = new Date(Date.now() - minutes * 60_000).toISOString();
+
+    // status='sent' only: this feed answers "what went out", so held/not_sent/suppressed rows
+    // (which have a null sent_at anyway) must never inflate it.
+    const [evRes, dgRes, cfgRes] = await Promise.all([
+      sb.from("roi_event_emails")
+        .select("id,team_id,department,email_type,subject,recipients,sent_at,open_count,message_id")
+        .eq("status", "sent").gte("sent_at", sinceIso)
+        .order("sent_at", { ascending: false }).limit(limit),
+      sb.from("roi_digest_runs")
+        .select("id,team_id,department,cadence,subject,recipients,sent_at,open_count,message_id")
+        .eq("status", "sent").gte("sent_at", sinceIso)
+        .order("sent_at", { ascending: false }).limit(limit),
+      sb.from("roi_rooftop_config").select("team_id,rooftop_name,team_name,csm_name"),
+    ]);
+    if (evRes.error) return res.status(500).json({ error: evRes.error.message });
+    if (dgRes.error) return res.status(500).json({ error: dgRes.error.message });
+    // Names only enrich — a config read failure must not blank the feed.
+    if (cfgRes.error) console.warn("[tracker] realtime-feed config read failed (names degrade to team_id):", cfgRes.error.message);
+
+    const byTeam = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+    // rooftop_name is null on many rows; team_name is the populated column (see the digest
+    // subject fix) — chain to "" and let the client show the id, never a raw id as a "name".
+    const nameOf = (teamId) => {
+      const c = byTeam.get(teamId);
+      return { rooftop: c?.rooftop_name || c?.team_name || "", csm: c?.csm_name || "" };
+    };
+    const countRecipients = (r) => (Array.isArray(r) ? r.length : 0);
+
+    const flat = [
+      ...(evRes.data ?? []).map((r) => ({
+        id: `ev:${r.id}`, kind: "transactional", type: r.email_type, messageId: r.message_id,
+        teamId: r.team_id, department: r.department, subject: r.subject ?? "",
+        sentAt: r.sent_at, recipients: countRecipients(r.recipients), opens: r.open_count ?? 0,
+        ...nameOf(r.team_id),
+      })),
+      ...(dgRes.data ?? []).map((r) => ({
+        id: `dg:${r.id}`, kind: "digest", type: r.cadence, messageId: r.message_id,
+        teamId: r.team_id, department: r.department, subject: r.subject ?? "",
+        sentAt: r.sent_at, recipients: countRecipients(r.recipients), opens: r.open_count ?? 0,
+        ...nameOf(r.team_id),
+      })),
+    ];
+
+    // ONE ROW PER EMAIL. A rollup email covering N leads is stored as N roi_event_emails rows
+    // (one per event_key) that all share a single message_id — e.g. "2 leads with new action
+    // items" is 2 rows but 1 delivery. Counting rows would overstate "emails sent", so collapse
+    // on message_id and surface the fan-in as `events`. Rows with no message_id (older records)
+    // key on their own id so they can never collide with each other.
+    const merged = new Map();
+    for (const r of flat) {
+      const key = r.messageId ? `${r.kind}:${r.messageId}` : r.id;
+      const prev = merged.get(key);
+      if (!prev) { merged.set(key, { ...r, events: 1 }); continue; }
+      prev.events += 1;
+      // Keep the earliest sent_at and the largest recipient count for the collapsed delivery.
+      if (String(r.sentAt) < String(prev.sentAt)) prev.sentAt = r.sentAt;
+      prev.recipients = Math.max(prev.recipients, r.recipients);
+      prev.opens = Math.max(prev.opens, r.opens);
+    }
+    const rows = [...merged.values()]
+      .sort((a, b) => String(b.sentAt).localeCompare(String(a.sentAt)))
+      .slice(0, limit);
+
+    return res.json({
+      ok: true, rows, serverNow: new Date().toISOString(), windowMinutes: minutes,
+      // Per-stream caps are reported so the UI can say "showing newest N" instead of implying
+      // the window was quiet when it was actually truncated. Measured on the RAW reads, since
+      // the cap applies before the message_id collapse.
+      truncated: { transactional: (evRes.data ?? []).length >= limit, digest: (dgRes.data ?? []).length >= limit },
+    });
+  } catch (err) {
+    console.error("GET /api/tracker/realtime-feed error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
 // ── Hourly ROI digest cron (Vercel Cron → this route) ───────────────────────
 // Runs the full daily-digest pass for EVERY live rooftop (roi_live_departments.is_live=true).
 // With DRY_RUN=false it really emails the rooftops where dry_run=false and suppresses the rest,
