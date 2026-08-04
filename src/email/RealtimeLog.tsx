@@ -48,9 +48,9 @@ export function RealtimeLog() {
         return;
       }
 
-      // Parse runs and filter for recent sends
+      // Parse runs and filter for recent sends (last 24 hours)
       const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const last24hAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
       const newLogs: SendLog[] = [];
       const seenIds = new Set<string>();
@@ -60,8 +60,8 @@ export function RealtimeLog() {
         const sentAt = run.sent_at ? new Date(run.sent_at) : null;
         if (!sentAt) return;
 
-        // Only include today's sends
-        if (sentAt < todayStart) return;
+        // Only include last 24 hours of sends
+        if (sentAt < last24hAgo) return;
 
         const logId = `${run.team_id}-${run.department}-${run.cadence}-${run.local_date}-${run.sent_at}`;
         if (seenIds.has(logId)) return;
@@ -160,7 +160,7 @@ export function RealtimeLog() {
         {/* Stats */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px" }}>
           <div style={{ padding: "12px", backgroundColor: "#1e293b", borderRadius: "8px", border: "1px solid #334155" }}>
-            <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "4px" }}>EMAILS SENT TODAY</div>
+            <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "4px" }}>EMAILS SENT (24H)</div>
             <div style={{ fontSize: "32px", fontWeight: "700", color: "#4ade80" }}>{stats.todaySent}</div>
           </div>
           <div style={{ padding: "12px", backgroundColor: "#1e293b", borderRadius: "8px", border: "1px solid #334155" }}>
@@ -175,8 +175,8 @@ export function RealtimeLog() {
         {logs.length === 0 ? (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#64748b" }}>
             <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: "18px", marginBottom: "8px" }}>No emails sent yet today</div>
-              <div style={{ fontSize: "14px" }}>Updates every 5 seconds...</div>
+              <div style={{ fontSize: "18px", marginBottom: "8px" }}>No emails sent in last 24 hours</div>
+              <div style={{ fontSize: "14px" }}>Check if digest cron is running • Updates every 5 seconds</div>
             </div>
           </div>
         ) : (
