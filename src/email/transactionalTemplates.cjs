@@ -492,10 +492,6 @@ function renderLeadCapture(opts) {
   try { if (d.at) when = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(asDate(d.at)); } catch (e) { when = ""; }
 
   var isSms = d.channel === "sms";
-  // Assigned BEFORE the fields table below reads it — `var` hoists the declaration but not the
-  // value, so defining this next to the banner made "Appointment status" render as "Requested"
-  // on an appointment the banner simultaneously called booked.
-  var booked = !!d.appointmentBooked;
   // The assistant's own name, from the call record — never a literal. It's per-rooftop and can even
   // differ between calls on one rooftop, so a hardcoded name eventually tells a dealer their AI is
   // called something it isn't.
@@ -541,33 +537,44 @@ function renderLeadCapture(opts) {
       // confirm the superseded slot (set by leadCaptureCH.buildSmsLead).
       leadField("Appointment time", d.apptWhen, "no time given", d.apptWhenNote) +
       // Booked vs merely requested changes what the BDC does with the time above.
-      leadField("Appointment status", booked ? "Booked by " + agent : "Requested — needs confirming") +
+      leadField("Appointment status", d.apptWhen ? "Time agreed with customer — enter in CRM" : "No time agreed") +
       leadField("Preferred location", d.location) +
       leadField("Financing Option Required", financingTxt) +
       leadField("Trade-in mentioned", tradeTxt) +
     "</table>";
 
-  // Three states, because telling a BDC "nothing is booked" about a BOOKED appointment invites a
-  // contradictory second callback to the customer.
-  var bTitle, bBody, bCol, bBg;
-  if (booked) {
-    bCol = GREEN_BIG; bBg = POS_BG;
-    bTitle = "&#128197; Appointment booked" + (d.apptWhen ? " — " + esc(d.apptWhen) : "");
-    bBody = esc(agent) + " booked this on the " + (isSms ? "text thread" : "call") + ". Nothing to chase — make sure it's staffed and the vehicle is at the right store.";
-  } else if (isSms) {
-    bCol = AMBER; bBg = AMBER_BG;
+  // The agent does NOT book into the dealer's CRM — their team enters every appointment by hand from
+  // this email. So the banner never claims an appointment is "booked", and it carries no
+  // "nothing to chase / make sure it's staffed" reassurance: both were untrue and the dealer asked for
+  // them gone. It states what was agreed and what the BDC has to do with it.
+  var agreed = !!d.appointmentBooked || !!d.apptWhen;
+  var bTitle, bBody, bCol = AMBER, bBg = AMBER_BG;
+  if (isSms) {
     bTitle = "&#9873; This lead texted back";
-    bBody = "The customer replied by text — the thread is below. Details carried over from their call; nothing is booked.";
+    bBody = "The customer replied by text — the thread is below. Details carried over from their call.";
+  } else if (agreed) {
+    bTitle = "&#9873; Enter this appointment in your CRM" + (d.apptWhen ? " &mdash; " + esc(d.apptWhen) : "");
+    bBody = esc(agent) + " agreed this time with the customer and said someone would call to confirm.";
   } else {
-    bCol = AMBER; bBg = AMBER_BG;
-    bTitle = "&#9873; Call this lead back to confirm";
-    bBody = esc(agent) + " captured the interest and told the customer someone would call in the morning to confirm the time and location. Nothing is booked.";
+    bTitle = "&#9873; Call this lead back";
+    bBody = esc(agent) + " captured the interest but no time was agreed. Details below.";
   }
   var banner =
     '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + bBg + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
       '<div style="font-size:14px;font-weight:800;color:' + bCol + ';">' + bTitle + "</div>" +
       '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' + bBody + "</div>" +
     "</td></tr></table>";
+
+  // The dealer's four required fields for CRM entry. Called out ABOVE the detail table so the BDC sees
+  // in one glance what to ask on the callback instead of scanning rows for blanks.
+  var REQUIRED = [["Name", d.customer], ["Phone number", phoneTxt], ["Email", d.email], ["Zip code", d.zip]];
+  var missing = REQUIRED.filter(function (f) { return !f[1] || !String(f[1]).trim(); }).map(function (f) { return f[0]; });
+  var missingBlock = missing.length
+    ? '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:14px;"><tr><td style="padding:10px 16px;">' +
+        '<div style="font-size:12px;font-weight:800;color:' + NEG + ';">Still needed for CRM entry: ' + esc(missing.join(" \u00b7 ")) + "</div>" +
+        '<div style="font-size:11px;color:' + BODY + ';margin-top:2px;">Ask for ' + (missing.length === 1 ? "this" : "these") + ' on the callback.</div>' +
+      "</td></tr></table>"
+    : "";
 
   var card =
     '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:18px 20px;">' +
@@ -589,7 +596,7 @@ function renderLeadCapture(opts) {
       crmBlock([
         ["Name", d.customer], ["Phone Number", phoneTxt], ["Email", d.email], ["Zipcode", d.zip],
         ["Vehicle of Interest", vehicle], ["Appointment time", d.apptWhen],
-        ["Appointment status", booked ? "Booked" : "Requested — needs confirming"],
+        ["Appointment status", d.apptWhen ? "Time agreed — enter in CRM" : "No time agreed"],
         ["Preferred location", d.location],
         ["Financing Option Required", financingTxt], ["Trade-in mentioned", tradeTxt],
         [isSms ? "Texted" : "Called", when],
@@ -601,7 +608,7 @@ function renderLeadCapture(opts) {
   // No-value = nothing a BDC could act on: no vehicle, no time, no zip, no summary, no transcript,
   // no text thread. (A bare "someone texted, contents unknown" email is exactly what the gate is for.)
   var hasValue = !!(vehicle || d.apptWhen || d.zip || (d.summary && d.summary.length) || String(d.transcript || "").trim() || (d.sms && d.sms.length));
-  return stampValue(shell(opts, isSms ? "Lead replied by text" : "New lead", esc(d.customer || phoneTxt || "New lead") + (vehicle ? ' <span style="font-weight:700;color:' + MUTE + ';">· ' + esc(vehicle) + "</span>" : ""), banner + card), hasValue);
+  return stampValue(shell(opts, isSms ? "Lead replied by text" : "New lead", esc(d.customer || phoneTxt || "New lead") + (vehicle ? ' <span style="font-weight:700;color:' + MUTE + ';">· ' + esc(vehicle) + "</span>" : ""), banner + missingBlock + card), hasValue);
 }
 
 // One stacked action-item row (used by both the new-item and overdue emails).

@@ -88,13 +88,20 @@ function zipFromLine(line) {
   // five consecutive spoken digits — words ("four six eight zero two"), bare digits ("4 6 8 0 2"),
   // hyphenated, or any mix. Multi-digit tokens break the run (they aren't digit-by-digit dictation).
   const tokens = s.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/[\s-]+/).filter(Boolean);
-  let run = [];
+  let run = [], mult = 1;
   for (const tok of tokens) {
+    // "four six DOUBLE seven four" = 46774. People dictate repeated digits this way constantly and
+    // it silently produced NO zip at all (46774 was reported as "not captured").
+    if (tok === "double") { mult = 2; continue; }
+    if (tok === "triple") { mult = 3; continue; }
     const d = DIGIT_WORDS[tok] || (/^\d$/.test(tok) ? tok : null);
     if (d) {
-      run.push(d);
-      if (run.length === 5) { const z = run.join(""); if (isZip(z)) return z; run.shift(); }
-    } else run = [];
+      for (let i = 0; i < mult; i++) {
+        run.push(d);
+        if (run.length === 5) { const z = run.join(""); if (isZip(z)) return z; run.shift(); }
+      }
+      mult = 1;
+    } else { run = []; mult = 1; }
   }
   return "";
 }
@@ -159,7 +166,10 @@ function pickApptWhen(apptDetails, summaryLines) {
 }
 function pickLocation(apptDetails, summaryLines) {
   for (const d of apptDetails) {
-    const m = String(d).match(/(?:chosen|preferred|selected|nearest)\s+location\s*[:\-]?\s*(.+)$/i);
+    // A bare "Location: <store>" is what the model actually writes most of the time; requiring
+    // chosen/preferred/selected/nearest meant the store the customer agreed to never appeared.
+    const m = String(d).match(/^(?:(?:chosen|preferred|selected|nearest)\s+)?location\s*[:\-]\s*(.+)$/i)
+      || String(d).match(/(?:chosen|preferred|selected|nearest)\s+location\s*[:\-]?\s*(.+)$/i);
     if (m) return m[1].trim().replace(/[.]$/, "");
   }
   for (const s of summaryLines) {
@@ -214,7 +224,11 @@ const LEAD_FIELD_COLS =
   // The agent's own name, so the email never hardcodes one. It is per-rooftop (and can differ
   // between calls on the SAME rooftop), so a literal in the template would eventually address the
   // dealer about an assistant that doesn't exist.
-  " ifNull(e.callDetails_agentInfo_agentName,'') agentName";
+  " ifNull(e.callDetails_agentInfo_agentName,'') agentName," +
+  // What the agent captured ON THIS CALL: {"name","mobile","email"}. The lead/customer record is
+  // often created without a name (the caller is brand new), so reading identity only from there
+  // reported "not captured" for callers who plainly gave their name — the dealer's first complaint.
+  " JSONExtractRaw(ifNull(e.report,'{}'),'customerDetails') customerDetails";
 
 /** Map one joined endcallreports row → the `lead` object T.renderLeadCapture expects. Pure. */
 function leadFromRow(r) {
@@ -227,10 +241,13 @@ function leadFromRow(r) {
     : [];
   const emails = Array.isArray(r.emails) ? r.emails.filter(Boolean) : [];
   const transcript = String(r.transcript || "");
+  // CRM record first (it's the system of record), then what the agent heard on the call — so a good
+  // stored value is never overwritten by a mis-hearing, but a blank one still gets filled.
+  const cd = parseObj(r.customerDetails);
   return {
-    customer: cleanName(r.customer),
-    phone: r.phone || "",
-    email: emails[0] || "",
+    customer: cleanName(r.customer) || cleanName(cd.name),
+    phone: r.phone || String(cd.mobile || "").trim(),
+    email: emails[0] || String(cd.email || "").trim(),
     zip: extractZip(transcript),
     vehicle: vehicles.join(", "),
     vehicleType: sales.vehicleType || "",
