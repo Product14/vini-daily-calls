@@ -206,6 +206,21 @@ function statColumns(cells) {
     }).join("") + "</tr></table>";
 }
 
+// vehicle interest section (clean display without health chips)
+function vehicleSection(vehicle, vin, stockNumber) {
+  if (!vehicle) return "";
+  var vins = String(vin || "").trim(), stocks = String(stockNumber || "").trim();
+  var details = [];
+  if (vins) details.push(vins);
+  if (stocks) details.push("Stock #" + stocks);
+  var detailStr = details.length > 0 ? details.join(" · ") : "";
+  return '<div style="margin-top:14px;padding-top:14px;border-top:1px solid #E2E8F0;">' +
+    '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin-bottom:6px;">Vehicle interested in</div>' +
+    '<div style="font-size:13px;color:' + INK + ';font-weight:700;margin-bottom:2px;">' + esc(vehicle) + "</div>" +
+    (detailStr ? '<div style="font-size:12px;color:' + MUTE + ';line-height:1.5;">' + esc(detailStr) + "</div>" : "") +
+    "</div>";
+}
+
 // appointment sub-card (vehicle · date · time · type)
 function apptCard(a) {
   if (!a) return "";
@@ -296,13 +311,12 @@ function outcomeBanner(c) {
  * Post-conversation email — fires after a call/SMS conversation (config-gated: mode
  * actionable|all, outbound-requires-reply). FINAL design is OUTCOME-FIRST: a manager sees
  * "what do I do?" in the banner, then the proof (who, score, sentiment, recording, summary,
- * action items, SMS thread). Every block omits when its data is absent. Backed only by fields
- * that reliably populate — no deal-value/trade-in/financing (those don't exist in the data).
+ * vehicle interested in, action items, SMS thread). Every block omits when its data is absent.
  * opts: { rooftopName, dept, tz, mtdCalls, links, pixelUrl, conversation:{
  *   id,title,summary,direction,channel('call'|'sms'),customer,phone,at,
  *   aiScore,grade,frustrated, sentiment,sentimentScore, intent,callOutcome,
  *   appointmentScheduled,appointment{vehicle,date,time,when,type}, callbackScheduled,queryResolved,hasActionItem,
- *   transfer:{department,reason,name}, actionItems:[..], keyTakeaways:[..],
+ *   transfer:{department,reason,name}, vehicle, vin, stockNumber, actionItems:[..], keyTakeaways:[..],
  *   recordingUrl,durationSec,endedReason, sms:[{direction,authorType,body,status,at}], smsFailed } }
  */
 function renderPostConversation(opts) {
@@ -340,6 +354,7 @@ function renderPostConversation(opts) {
       '<div style="margin-top:12px;">' + chips + "</div>" +
       recordingRow(c.recordingUrl, c.durationSec, isSms ? null : c.endedReason) +
       '<div style="font-size:13px;color:' + BODY + ';line-height:1.6;margin-top:14px;">' + (summary ? esc(summary) : "No summary captured for this conversation.") + "</div>" +
+      vehicleSection(c.vehicle, c.vin, c.stockNumber) +
       apptCard(c.appointmentScheduled ? (c.appointment || {}) : null) +
       (c.actionItems && c.actionItems.length ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Action items</div>' + actionList(c.actionItems, tz, WARM) : "") +
       bulletBlock("Key takeaways", c.keyTakeaways, BRAND) +
@@ -348,8 +363,8 @@ function renderPostConversation(opts) {
     '<div style="margin-top:18px;">' + btnPrimary(isSms ? "Open thread" : "Listen & review", url) + "</div>";
 
   // No-value = the blank-summary placeholder with nothing else to show (no action items, no booked
-  // appointment, no SMS thread, no takeaways, no recording) — exactly the empty email the gate exists for.
-  var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl);
+  // appointment, no SMS thread, no takeaways, no recording, no vehicle) — exactly the empty email the gate exists for.
+  var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl || c.vehicle);
   return stampValue(shell(opts, isSms ? "Text conversation" : "Conversation summary", esc(c.title || "New conversation"), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms ? "conversations handled" : "calls handled", url)), hasValue);
 }
 
@@ -465,6 +480,10 @@ function renderLeadCapture(opts) {
   try { if (d.at) when = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(d.at)); } catch (e) { when = ""; }
 
   var isSms = d.channel === "sms";
+  // Assigned BEFORE the fields table below reads it — `var` hoists the declaration but not the
+  // value, so defining this next to the banner made "Appointment status" render as "Requested"
+  // on an appointment the banner simultaneously called booked.
+  var booked = !!d.appointmentBooked;
   // The assistant's own name, from the call record — never a literal. It's per-rooftop and can even
   // differ between calls on one rooftop, so a hardcoded name eventually tells a dealer their AI is
   // called something it isn't.
@@ -472,7 +491,13 @@ function renderLeadCapture(opts) {
   // Deliberately NOT "the AI didn't ask" — it may have asked and been refused. State the gap, not a
   // cause. leadField already prints "not captured", so the hint is only the instruction.
   var notAsked = "ask on the callback";
-  var vehicle = [d.vehicleType, d.vehicle].filter(function (x) { return x && String(x).trim(); }).join(" ").trim();
+  // "Used" + "Used Ford F-150" must not render as "Used Used Ford F-150" — the model name the agent
+  // captures often already carries the condition word, so only prefix vehicleType when it doesn't.
+  var vName = String(d.vehicle || "").trim();
+  var vType = String(d.vehicleType || "").trim();
+  var vehicle = (vType && vName && new RegExp("^" + vType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i").test(vName))
+    ? vName
+    : [vType, vName].filter(Boolean).join(" ").trim();
   var financing = String(d.financing || "").trim();
   // Financing / trade-in: blank means the model saw no mention on the call — a DEFINITE "not
   // discussed", not a missing field, so it reads as an answer rather than a gap to chase.
@@ -503,19 +528,33 @@ function renderLeadCapture(opts) {
       // apptWhenNote carries "customer moved this by text — the call said X", so the BDC can't
       // confirm the superseded slot (set by leadCaptureCH.buildSmsLead).
       leadField("Appointment time", d.apptWhen, "no time given", d.apptWhenNote) +
+      // Booked vs merely requested changes what the BDC does with the time above.
+      leadField("Appointment status", booked ? "Booked by " + agent : "Requested — needs confirming") +
       leadField("Preferred location", d.location) +
       leadField("Financing Option Required", financingTxt) +
       leadField("Trade-in mentioned", tradeTxt) +
     "</table>";
 
+  // Three states, because telling a BDC "nothing is booked" about a BOOKED appointment invites a
+  // contradictory second callback to the customer.
+  var bTitle, bBody, bCol, bBg;
+  if (booked) {
+    bCol = GREEN_BIG; bBg = POS_BG;
+    bTitle = "&#128197; Appointment booked" + (d.apptWhen ? " — " + esc(d.apptWhen) : "");
+    bBody = esc(agent) + " booked this on the " + (isSms ? "text thread" : "call") + ". Nothing to chase — make sure it's staffed and the vehicle is at the right store.";
+  } else if (isSms) {
+    bCol = AMBER; bBg = AMBER_BG;
+    bTitle = "&#9873; This lead texted back";
+    bBody = "The customer replied by text — the thread is below. Details carried over from their call; nothing is booked.";
+  } else {
+    bCol = AMBER; bBg = AMBER_BG;
+    bTitle = "&#9873; Call this lead back to confirm";
+    bBody = esc(agent) + " captured the interest and told the customer someone would call in the morning to confirm the time and location. Nothing is booked.";
+  }
   var banner =
-    '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + AMBER_BG + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
-      '<div style="font-size:14px;font-weight:800;color:' + AMBER + ';">&#9873; ' + (isSms ? "This lead texted back" : "Call this lead back to confirm") + "</div>" +
-      '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' +
-        (isSms
-          ? "The customer replied by text — the thread is below. Details carried over from their call; nothing is booked."
-          : esc(agent) + " captured the interest and told the customer someone would call in the morning to confirm the time and location. Nothing is booked.") +
-      "</div>" +
+    '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + bBg + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
+      '<div style="font-size:14px;font-weight:800;color:' + bCol + ';">' + bTitle + "</div>" +
+      '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">' + bBody + "</div>" +
     "</td></tr></table>";
 
   var card =
@@ -537,7 +576,9 @@ function renderLeadCapture(opts) {
       smsThread(d.sms, d.smsFailed, 14) +
       crmBlock([
         ["Name", d.customer], ["Phone Number", phoneTxt], ["Email", d.email], ["Zipcode", d.zip],
-        ["Vehicle of Interest", vehicle], ["Appointment time", d.apptWhen], ["Preferred location", d.location],
+        ["Vehicle of Interest", vehicle], ["Appointment time", d.apptWhen],
+        ["Appointment status", booked ? "Booked" : "Requested — needs confirming"],
+        ["Preferred location", d.location],
         ["Financing Option Required", financingTxt], ["Trade-in mentioned", tradeTxt],
         [isSms ? "Texted" : "Called", when],
       ]) +

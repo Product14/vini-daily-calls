@@ -83,5 +83,9 @@ t("sms: thread-only carries no invented vehicle", noCall.vehicle, "");
 t("sms: outbound-only thread yields nothing typed", LC.buildSmsLead(null, {}, [{ direction: "out", body: "here is your link, zip 46815", status: "delivered" }]).zip, "");
 t("sms: failed delivery counted", LC.buildSmsLead(null, {}, [{ direction: "out", body: "x", status: "failed" }]).smsFailed, 1);
 
+// ── regressions from the Aug-4 live preview (Superior Auto) ────────────────────
+t("appt: 'Scheduled for tomorrow at 3:30 PM' loses the label", LC.pickApptWhen(["Scheduled for tomorrow at 3:30 PM"], []), "tomorrow at 3:30 PM");
+t("appt: 'Booked for Friday at 10 AM' loses the label", LC.pickApptWhen(["Booked for Friday at 10 AM"], []), "Friday at 10 AM");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

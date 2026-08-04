@@ -127,7 +127,7 @@ function extractZip(transcript) {
 // so both fields are parsed out of it rather than read from a column. Labels ("Proposed date and
 // time:", "Preferred visit on") are stripped so the field reads as a time, not a sentence.
 const DAY_TIME_RE = /\b(mon|tues|wednes|thurs|fri|satur|sun)day\b|\b\d{1,2}(:\d{2})?\s*(am|pm)\b|\btomorrow\b|\btoday\b/i;
-const TIME_LABEL_RE = /^(proposed\s+date\s+and\s+time|preferred\s+(visit|time|appointment)?\s*(time)?|requested\s+(visit|time)|appointment\s+time|visit\s+time)\s*[:\-]?\s*/i;
+const TIME_LABEL_RE = /^(proposed\s+date\s+and\s+time|preferred\s+(visit|time|appointment)?\s*(time)?|requested\s+(visit|time)|appointment\s+(time|scheduled\s+for)|visit\s+time|scheduled\s+for|booked\s+for|confirmed\s+for)\s*[:\-]?\s*/i;
 
 function cleanTimePhrase(s) {
   let t = String(s || "").trim().replace(/^[-•·]\s*/, "");
@@ -191,6 +191,12 @@ function asMs(v) {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? t : 0;
 }
+// "2026-08-04 16:28:00.093" (ClickHouse, zone-less) → "2026-08-04T16:28:00.093Z". Pass-through for
+// values that already carry a zone, and for anything unparseable.
+function isoInstant(v) {
+  const ms = asMs(v);
+  return ms ? new Date(ms).toISOString() : (v || null);
+}
 function durationSec(a, b) {
   const s = asMs(a), e = asMs(b);
   return s && e && e > s ? Math.round((e - s) / 1000) : 0;
@@ -234,6 +240,10 @@ function leadFromRow(r) {
     prequalSent: PREQUAL_SENT_RE.test(transcript + "\n" + summary.join("\n")),
     tradeIn: (sales.tradeInMention && sales.tradeInMention.value) || "",
     intent: (ov.overall && ov.overall.customerIntent) || "",
+    // Did the agent actually BOOK, or only capture a preferred time? The sheet's banner tells the BDC
+    // whether to confirm or just staff it — claiming "nothing is booked" on a booked appointment
+    // invites a duplicate/contradictory callback.
+    appointmentBooked: String((ov && ov.appointmentScheduled) || "").toLowerCase() === "yes",
     agentName: cleanName(r.agentName),
     summary,
     actionItems: parseJsonArray(r.actionItems),
@@ -241,7 +251,10 @@ function leadFromRow(r) {
     recordingUrl: r.recordingUrl || "",
     durationSec: durationSec(r.startedAt, r.endedAt),
     endedReason: r.endedReason || "",
-    at: r.at,
+    // ClickHouse returns "YYYY-MM-DD HH:mm:ss.SSS" with NO zone marker, and `new Date()` reads that
+    // as LOCAL time — correct on a UTC server, silently hours off anywhere else. Hand the template an
+    // unambiguous instant instead of relying on the runtime's timezone.
+    at: isoInstant(r.at),
   };
 }
 
@@ -334,6 +347,7 @@ function buildSmsLead(callLead, seed, msgs) {
   const base = callLead || {
     customer: "", phone: "", email: "", zip: "", vehicle: "", vehicleType: "", apptWhen: "",
     location: "", financing: "", prequalSent: false, tradeIn: "", intent: "", agentName: "",
+    appointmentBooked: false,
     summary: [], actionItems: [], transcript: "", recordingUrl: "", durationSec: 0, endedReason: "", at: null,
   };
   const moved = !!(typedWhen && base.apptWhen && typedWhen.toLowerCase() !== String(base.apptWhen).toLowerCase());
