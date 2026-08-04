@@ -27,6 +27,18 @@ function esc(v) { return String(v == null ? "" : v).replace(/&/g, "&amp;").repla
 var NO_VALUE_MARK = "<!--vini:no-value-->";
 function stampValue(html, hasValue) { return hasValue ? html : (String(html || "") + NO_VALUE_MARK); }
 function fmtInt(n) { n = Number(n) || 0; return n.toLocaleString("en-US"); }
+// Parse a data timestamp into an INSTANT. ClickHouse and the reporting feed both hand back
+// "YYYY-MM-DD HH:mm:ss[.sss]" with NO zone marker, and `new Date()` reads that as the RUNTIME's local
+// time — correct only because prod happens to run UTC. Anything else (a laptop, a non-UTC container)
+// silently shifts every rendered time by the local offset: a 12:28 PM call rendered 6:58 AM on IST.
+// Treat zone-less values as UTC, pass through anything that already carries a zone.
+function asDate(v) {
+  if (v instanceof Date) return v;
+  var s = String(v == null ? "" : v).trim();
+  if (!s) return new Date(NaN);
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) s = s.replace(" ", "T") + "Z";
+  return new Date(s);
+}
 // Pretty-print a phone for display (batch SMS lines + the leadHeader email chip). Ported 1:1 from
 // src/email/EmailerTracker.tsx's formatPhone — kept in sync manually, since this .cjs file (required
 // server-side) can't import a .tsx module (this repo already duplicates small helpers this way, e.g.
@@ -329,7 +341,7 @@ function renderPostConversation(opts) {
   var isSms = c.channel === "sms";
 
   var when = "";
-  try { if (c.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(c.at)); } catch (e) { when = ""; }
+  try { if (c.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(asDate(c.at)); } catch (e) { when = ""; }
   var headRow =
     '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       '<td valign="middle">' + avatar(c.customer, 40) +
@@ -374,7 +386,7 @@ function batchConvRow(c, tz) {
   var o = classifyOutcome(c);
   var isSms = c.channel === "sms";
   var when = "";
-  try { if (c.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(c.at)); } catch (e) { when = ""; }
+  try { if (c.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(asDate(c.at)); } catch (e) { when = ""; }
   var label = o.text.replace(/&#\d+;\s*/, ""); // strip the leading icon entity — too busy repeated N times in a list
   return '<tr><td style="padding:10px 0;border-bottom:1px solid ' + LINE + ';">' +
     '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
@@ -477,7 +489,7 @@ function renderLeadCapture(opts) {
   var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
   var tz = opts.tz;
   var when = "";
-  try { if (d.at) when = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(new Date(d.at)); } catch (e) { when = ""; }
+  try { if (d.at) when = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(asDate(d.at)); } catch (e) { when = ""; }
 
   var isSms = d.channel === "sms";
   // Assigned BEFORE the fields table below reads it — `var` hoists the declaration but not the
@@ -595,7 +607,7 @@ function renderLeadCapture(opts) {
 // One stacked action-item row (used by both the new-item and overdue emails).
 // `tz` = the dealer's IANA timezone so the due time reads in THEIR local time, not the server's.
 function aiRow(it, accent, tz) {
-  var due = it.dueAt ? new Date(it.dueAt) : null;
+  var due = it.dueAt ? asDate(it.dueAt) : null;
   var dueTxt = "";
   try { if (due && !isNaN(due.getTime())) dueTxt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(due); } catch (e) { dueTxt = ""; }
   // Title prefers a human intent label; falls back to the description when there's no intent
@@ -681,7 +693,7 @@ function renderActionItem(opts) {
 // "overdue by" age, from the oldest due date among a lead's items
 function overdueAge(dueAt) {
   if (!dueAt) return "";
-  var due = new Date(dueAt); if (isNaN(due.getTime())) return "";
+  var due = asDate(dueAt); if (isNaN(due.getTime())) return "";
   var ms = Date.now() - due.getTime(); if (ms <= 0) return "";
   var h = Math.floor(ms / 3.6e6);
   if (h < 24) return h + "h overdue";
@@ -738,7 +750,7 @@ function batchLeadCard(ld, tz, rightPillHtml) {
     return esc(title) + pr;
   });
   var extra = items.length > 2 ? " +" + (items.length - 2) + " more" : "";
-  var firstDue = items.length && items[0].dueAt ? new Date(items[0].dueAt) : null;
+  var firstDue = items.length && items[0].dueAt ? asDate(items[0].dueAt) : null;
   var dueTxt = "";
   try { if (firstDue && !isNaN(firstDue.getTime())) dueTxt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: tz || "America/New_York" }).format(firstDue); } catch (e) { dueTxt = ""; }
   return '<tr><td style="padding:11px 0;border-bottom:1px solid ' + LINE + ';">' +
@@ -812,7 +824,7 @@ function renderActionItemOverdueBatch(opts) {
     });
   }
   // Oldest-overdue-first so the cap/truncation always keeps the MOST urgent leads visible.
-  var sorted = leads.slice().sort(function (a, b) { return new Date(a.oldestDueAt || 0) - new Date(b.oldestDueAt || 0); });
+  var sorted = leads.slice().sort(function (a, b) { return asDate(a.oldestDueAt || 0) - asDate(b.oldestDueAt || 0); });
   var totalItems = sorted.reduce(function (s, ld) { return s + (Number(ld.totalOverdue) || (ld.items || []).length); }, 0);
   var cap = Number(opts.detailCap) || 20;
   var shown = sorted.slice(0, cap);
@@ -981,7 +993,7 @@ function renderActionItemOverdueBatchSms(opts) {
     });
   }
   // Oldest-overdue-first so the cap/truncation always keeps the MOST urgent leads visible.
-  var sorted = leads.slice().sort(function (a, b) { return new Date(a.oldestDueAt || 0) - new Date(b.oldestDueAt || 0); });
+  var sorted = leads.slice().sort(function (a, b) { return asDate(a.oldestDueAt || 0) - asDate(b.oldestDueAt || 0); });
   var header = [
     "OVERDUE" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
     leads.length + " leads with action items past SLA:",

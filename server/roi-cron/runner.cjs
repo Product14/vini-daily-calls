@@ -121,6 +121,13 @@ const sb = createClient(SB_URL || "http://invalid.local", SB_KEY || "noop", { au
 
 // ── dealer-local "today"/"yesterday" + send hour + UTC windows (start/end/month) ──
 const fmtUTC = (d) => d.toISOString().slice(0, 19).replace("T", " ");
+// Human label for a CALENDAR DATE (the dealer's reported day) — built from the y/m/d components, not
+// from an instant. Formatting the UTC instant of dealer-midnight only lands on the right date for
+// dealers BEHIND UTC; a rooftop ahead of it (Pacific/Guam, UTC+10) had its midnight fall on the
+// previous UTC date, so the digest headed "Monday, August 3" for a Guam dealer read "Sunday, August 2".
+// Anchoring at UTC noon makes the label offset-proof.
+const dateLabelFor = (y, m, d) =>
+  new Date(Date.UTC(y, m - 1, d, 12)).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 function localToUTC(y, m, day, tz) {
   const approx = new Date(Date.UTC(y, m - 1, day, 0, 0, 0));
   const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hour12: false }).formatToParts(approx);
@@ -141,7 +148,7 @@ function localParts(tz) {
   const yEnd = new Date(localToUTC(Y, M, D, tz).getTime() - 1000);
   const monthStart = localToUTC(yY, yM, 1, tz);   // first of the reported (yesterday's) month
   const localDate = `${yY}-${pad(yM)}-${pad(yD)}`;
-  const dateLabel = new Date(yStart.getTime()).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const dateLabel = dateLabelFor(yY, yM, yD);
   // apiEnd stays "today" (exclusive end) → the day window is yesterday..today = the reported day,
   // and MTD is the first of yesterday's month..today.
   return { localHour: H, localMinute: Min, localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
@@ -1025,7 +1032,7 @@ function windowsForDate(localDate, tz) {
   const yStart = localToUTC(y, m, d, tz);
   const yEnd = new Date(localToUTC(y, m, d + 1, tz).getTime() - 1000);
   const monthStart = localToUTC(y, m, 1, tz);
-  const dateLabel = new Date(yStart.getTime()).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const dateLabel = dateLabelFor(y, m, d);
   const apiEnd = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
   return { localDate, dateLabel, yStart: fmtUTC(yStart), yEnd: fmtUTC(yEnd), monthStart: fmtUTC(monthStart),
     apiStart: localDate, apiEnd, apiMonthStart: `${y}-${String(m).padStart(2, "0")}-01` };
