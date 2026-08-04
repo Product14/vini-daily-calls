@@ -83,5 +83,25 @@ t("sms: thread-only carries no invented vehicle", noCall.vehicle, "");
 t("sms: outbound-only thread yields nothing typed", LC.buildSmsLead(null, {}, [{ direction: "out", body: "here is your link, zip 46815", status: "delivered" }]).zip, "");
 t("sms: failed delivery counted", LC.buildSmsLead(null, {}, [{ direction: "out", body: "x", status: "failed" }]).smsFailed, 1);
 
+// ── regressions from the Aug-4 live preview (Superior Auto) ────────────────────
+t("appt: 'Scheduled for tomorrow at 3:30 PM' loses the label", LC.pickApptWhen(["Scheduled for tomorrow at 3:30 PM"], []), "tomorrow at 3:30 PM");
+t("appt: 'Booked for Friday at 10 AM' loses the label", LC.pickApptWhen(["Booked for Friday at 10 AM"], []), "Friday at 10 AM");
+
+// ── dealer-local time rendering ────────────────────────────────────────────────
+// These must hold on ANY machine, not just a UTC server: the suite runs on laptops.
+const T = require("../../../src/email/transactionalTemplates.cjs");
+const renderAt = (at, tz) => {
+  const html = T.renderLeadCapture({ rooftopName: "R", dept: "sales", tz,
+    lead: { customer: "C", phone: "+15550000000", at, vehicle: "F-150", apptWhen: "Friday at 4 PM" } });
+  const m = html.match(/([A-Z][a-z]{2}, [A-Z][a-z]{2} \d+, \d{1,2}:\d{2} [AP]M)/);
+  return m ? m[1] : "";
+};
+// 16:28Z is 12:28 PM in New York and 9:28 AM in Los Angeles — zone-less input must be read as UTC
+t("time: zone-less CH string renders in dealer tz (ET)", renderAt("2026-08-04 16:28:00.093", "America/New_York"), "Tue, Aug 4, 12:28 PM");
+t("time: same instant in Pacific", renderAt("2026-08-04 16:28:00.093", "America/Los_Angeles"), "Tue, Aug 4, 9:28 AM");
+t("time: explicit Z is respected", renderAt("2026-08-04T16:28:00.093Z", "America/New_York"), "Tue, Aug 4, 12:28 PM");
+t("time: offset-carrying input is respected", renderAt("2026-08-04T12:28:00.093-04:00", "America/New_York"), "Tue, Aug 4, 12:28 PM");
+t("time: dealer ahead of UTC (Guam, UTC+10)", renderAt("2026-08-04 16:28:00.093", "Pacific/Guam"), "Wed, Aug 5, 2:28 AM");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -509,8 +509,19 @@ async function runOnce() {
       // for a lead that ALREADY has an action-item or appointment notification this pass is
       // redundant noise, not new signal. Leads with ONLY conversation activity are unaffected.
       if (c.post_conversation_enabled) {
+        // FORMAT selection (roi_rooftop_config.post_conversation_template) — resolved up here because
+        // the coverage rule below depends on it.
+        const leadCapture = String(c.post_conversation_template || "") === "lead_capture";
         const coveredLeadKeys = new Set(jobs.map((j) => j.leadMatchKey).filter(Boolean));
         const isCovered = (cv) => {
+          // LEAD-CAPTURE rooftops NEVER defer. For them the lead sheet is the product — the dealer
+          // keys the lead into their CRM from it — and it already lists the action items under
+          // "Follow-ups <agent> logged", so an action-item email is a strictly poorer duplicate, not
+          // a reason to stay silent. Deferring here silenced EVERY sheet for the first such rooftop
+          // (Aug 2026): its calls always log a follow-up, so the action-item email always won the
+          // lead first and the sheet was dropped with no row and no error. Config alone couldn't fix
+          // that safely — re-enabling action-item alerts would silently break the sheet again.
+          if (leadCapture) return false;
           const lmk = leadMatchKey({ leadId: cv.leadId, customer: cv.customer, phone: cv.phone });
           return !!(lmk && coveredLeadKeys.has(lmk));
         };
@@ -544,13 +555,12 @@ async function runOnce() {
         for (const [k, { cv, rank }] of bestByLead) {
           chosen.push({ key: `call:lead:${k}:${callDay}:t${rank}`, cv, subject: `Conversation summary — ${cv.customer || name}` });
         }
-        // FORMAT selection (roi_rooftop_config.post_conversation_template). 'lead_capture' rooftops
-        // want a lead sheet, not a conversation summary — the extra fields (requested vehicle,
-        // financing/trade-in flags, preferred time + store, the ZIP the caller gave, the transcript)
-        // are NOT on the funnel feed, so they're enriched from ClickHouse in ONE batched query for
-        // this pass's calls. WHICH calls email is untouched — every gate above already decided that.
-        // A call the enrichment can't resolve falls back to the standard email: never a dropped alert.
-        const leadCapture = String(c.post_conversation_template || "") === "lead_capture";
+        // 'lead_capture' rooftops want a lead sheet, not a conversation summary — the extra fields
+        // (requested vehicle, financing/trade-in flags, preferred time + store, the ZIP the caller
+        // gave, the transcript) are NOT on the funnel feed, so they're enriched from ClickHouse in
+        // ONE batched query for this pass's calls. WHICH calls email is untouched — every gate above
+        // already decided that. A call the enrichment can't resolve falls back to the standard
+        // email: never a dropped alert. (`leadCapture` is resolved above, next to the coverage rule.)
         let extras = new Map();
         if (leadCapture && chosen.length) {
           if (!leadCaptureCH.hasCreds()) console.warn(`[events] ${name}: post_conversation_template=lead_capture but CLICKHOUSE_HOST/PASSWORD are unset — falling back to the standard conversation email`);
