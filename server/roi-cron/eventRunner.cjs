@@ -367,6 +367,17 @@ async function runOnce() {
     const overdueEodHour = (workingHours && parseHour(workingHours.endTime)) ?? OVERDUE_EOD_FALLBACK_HOUR;
     const overdueSlot = (() => { const { h } = localHourMin(tz); return h >= overdueEodHour ? "eod" : (h === overdueMorningHour ? "am" : null); })();
     const dept = L.department; // 'sales' | 'service'
+    // FORMAT of this rooftop's per-conversation email (roi_rooftop_config.post_conversation_template).
+    // 'lead_capture' also DEFINES THE EMAIL SET: the lead sheet is the only per-event email these
+    // dealers asked for (plus the daily digest), and the sheet already carries the follow-ups the
+    // action-item emails would repeat. Superior Auto's BDC received seven "7 overdue leads" emails
+    // in one evening that nobody asked for, because the *_enabled flags were re-enabled twice by
+    // something that leaves no audit row — so the email set can't be enforced by config alone.
+    // Switching the template back to default restores the standard types.
+    const leadCapture = String(c.post_conversation_template || "") === "lead_capture";
+    if (leadCapture && (c.post_appointment_enabled || c.action_item_enabled || c.action_item_overdue_enabled)) {
+      console.log(`  · ${name} [${dept}] lead-capture rooftop → only the lead sheet is sent (appointment/action-item types suppressed by template)`);
+    }
     const recs = recOf.get(L.team_id) ?? [];
     const deptOk = (r) => (dept === "sales" ? r.receives_sales : r.receives_service);
     // Per-TYPE recipient selection: dept + per-channel master + the subscription matrix, then
@@ -391,7 +402,7 @@ async function runOnce() {
     // Build the list of (type, eventKey, render, subject) jobs for the enabled types.
     const jobs = [];
     try {
-      if (c.post_appointment_enabled) {
+      if (c.post_appointment_enabled && !leadCapture) {
         const day = localDateISO(tz); // dealer-local "today", not UTC
         const j = await apiJson(`/api/meetings?scope=window&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&start=${day}&end=${day}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
         const mtd = await apptMTD(L.team_id, dept);
@@ -414,7 +425,7 @@ async function runOnce() {
             leadMatchKey: leadMatchKey({ leadId: m.leadId, customer: m.customer, phone: m.phone }) });
         }
       }
-      if (c.action_item_enabled) {
+      if (c.action_item_enabled && !leadCapture) {
         const [recent, open] = await Promise.all([
           fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=recent&minutes=${POLL_MINUTES}`),
           fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`),
@@ -462,7 +473,7 @@ async function runOnce() {
       // per-pass rebatch — an SLA is already breached, so a report on the dealer's own rhythm beats
       // a ping every few minutes. Outside the two slots, this whole block is skipped: no fetch, no
       // build — the feed is no longer polled all day, only at the two times that matter.
-      if (c.action_item_overdue_enabled && overdueSlot) {
+      if (c.action_item_overdue_enabled && overdueSlot && !leadCapture) {
         const [j, openForStat] = await Promise.all([
           fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=overdue`),
           fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`),
@@ -509,9 +520,6 @@ async function runOnce() {
       // for a lead that ALREADY has an action-item or appointment notification this pass is
       // redundant noise, not new signal. Leads with ONLY conversation activity are unaffected.
       if (c.post_conversation_enabled) {
-        // FORMAT selection (roi_rooftop_config.post_conversation_template) — resolved up here because
-        // the coverage rule below depends on it.
-        const leadCapture = String(c.post_conversation_template || "") === "lead_capture";
         const coveredLeadKeys = new Set(jobs.map((j) => j.leadMatchKey).filter(Boolean));
         const isCovered = (cv) => {
           // LEAD-CAPTURE rooftops NEVER defer. For them the lead sheet is the product — the dealer

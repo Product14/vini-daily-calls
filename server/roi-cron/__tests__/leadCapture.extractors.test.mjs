@@ -103,5 +103,24 @@ t("time: explicit Z is respected", renderAt("2026-08-04T16:28:00.093Z", "America
 t("time: offset-carrying input is respected", renderAt("2026-08-04T12:28:00.093-04:00", "America/New_York"), "Tue, Aug 4, 12:28 PM");
 t("time: dealer ahead of UTC (Guam, UTC+10)", renderAt("2026-08-04 16:28:00.093", "Pacific/Guam"), "Wed, Aug 5, 2:28 AM");
 
+// ── dealer feedback, Aug 2026 (Neil @ Superior Auto) ──────────────────────────
+t("zip: spoken 'double' digits", LC.extractZip("AI: What ZIP code are you coming from?\nCustomer: My ZIP code is four six double seven four."), "46774");
+t("zip: spoken 'triple' digits", LC.extractZip("AI: ZIP?\nCustomer: triple eight one two"), "88812");
+t("location: bare 'Location:' line", LC.pickLocation(["Scheduled for Saturday at 3 PM", "Location: Superior Auto, Saint Joe Road"], []), "Superior Auto, Saint Joe Road");
+t("location: 'Chosen location:' still works", LC.pickLocation(["Chosen location: Fort Wayne West"], []), "Fort Wayne West");
+
+const leadHtml = (over) => T.renderLeadCapture({ rooftopName: "R", dept: "sales", tz: "America/New_York",
+  lead: Object.assign({ customer: "Jason", phone: "+15550000000", at: "2026-08-04 18:24:00", agentName: "Ava",
+    vehicle: "2018 Chevrolet Malibu", apptWhen: "Saturday at 3 PM", appointmentBooked: true, zip: "46774" }, over || {}) });
+// the agent does not book into the dealer's CRM — their team does
+t("banner: never claims 'booked'", /Appointment booked|Booked by/.test(leadHtml()), false);
+t("banner: no 'nothing to chase' reassurance", /[Nn]othing to chase/.test(leadHtml()), false);
+t("banner: tells them to enter it in the CRM", /Enter this appointment in your CRM/.test(leadHtml()), true);
+t("banner: no agreed time → call back instead", /Call this lead back/.test(leadHtml({ apptWhen: "", appointmentBooked: false })), true);
+// the four fields the dealer needs on every lead
+t("required: missing email is called out", /Still needed for CRM entry: Email/.test(leadHtml({ email: "" })), true);
+t("required: lists every gap", /Still needed for CRM entry: Email \u00b7 Zip code/.test(leadHtml({ email: "", zip: "" })), true);
+t("required: no callout when all four present", /Still needed for CRM entry/.test(leadHtml({ email: "j@x.com" })), false);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
