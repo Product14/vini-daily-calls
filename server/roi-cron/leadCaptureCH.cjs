@@ -164,20 +164,45 @@ function pickApptWhen(apptDetails, summaryLines) {
   }
   return "";
 }
-function pickLocation(apptDetails, summaryLines) {
+// Location, with HOW we learned it. The model reports it three ways and we need all of them:
+//   • an appointmentDetails line — "Location: <store>" / "Chosen location: <store>"
+//   • summary prose where the customer picked — "chose the Fort Wayne West location"
+//   • summary prose where the agent simply STATED the closest store to the caller's zip —
+//     "was informed about the nearest location in Coldwater, MI"
+// The third shape was being dropped entirely (appointmentDetails comes back EMPTY on plenty of calls,
+// and then prose is the only record), which is why the dealer saw "not captured" on a call where the
+// location was clearly discussed. It's flagged `nearest` so the sheet can say the customer was told
+// this store rather than choosing it — their BDC confirms the location on the callback.
+function pickLocationInfo(apptDetails, summaryLines) {
   for (const d of apptDetails) {
-    // A bare "Location: <store>" is what the model actually writes most of the time; requiring
-    // chosen/preferred/selected/nearest meant the store the customer agreed to never appeared.
     const m = String(d).match(/^(?:(?:chosen|preferred|selected|nearest)\s+)?location\s*[:\-]\s*(.+)$/i)
       || String(d).match(/(?:chosen|preferred|selected|nearest)\s+location\s*[:\-]?\s*(.+)$/i);
-    if (m) return m[1].trim().replace(/[.]$/, "");
+    if (m) return { value: trimLocation(m[1]), nearest: /nearest/i.test(String(d)) };
   }
   for (const s of summaryLines) {
-    const m = String(s).match(/chose\s+the\s+(.+?)\s+location/i) || String(s).match(/location\s*[:\-]\s*(.+?)[.;]/i);
-    if (m) return m[1].trim();
+    const line = String(s);
+    const chose = line.match(/chose\s+the\s+(.+?)\s+location/i) || line.match(/at\s+the\s+(.+?)\s+location/i);
+    if (chose) return { value: trimLocation(chose[1]), nearest: false };
+    const labelled = line.match(/location\s*[:\-]\s*(.+?)[.;]/i);
+    if (labelled) return { value: trimLocation(labelled[1]), nearest: /nearest/i.test(line) };
+    // "…the nearest location in Coldwater, MI." / "…dealership at Fort Wayne East"
+    const prose = line.match(/\b(?:location|dealership|store|branch)\s+(?:in|at|is)\s+([^.;]+)/i);
+    if (prose) return { value: trimLocation(prose[1]), nearest: /\bnearest\b/i.test(line) };
   }
-  return "";
+  return { value: "", nearest: false };
 }
+// A location field should hold a place, not the rest of the sentence: prose capture runs to the
+// period, so trim a trailing day/time clause ("Fort Wayne East on Saturday" → "Fort Wayne East").
+function trimLocation(v) {
+  return String(v || "")
+    .replace(/\s+(?:on|this|next)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b.*$/i, "")
+    .replace(/\s+(?:on|at)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)\b.*$/i, "")
+    .replace(/\s+(?:tomorrow|today)\b.*$/i, "")
+    .trim().replace(/[,.]$/, "");
+}
+// String-only wrapper (kept for callers/tests that just want the name).
+function pickLocation(apptDetails, summaryLines) { return pickLocationInfo(apptDetails, summaryLines).value; }
+
 // "did the agent actually text the pre-qualification link?" — shown next to Financing so the BDC doesn't
 // re-send it. Phrasing check only; there is no structured flag for the link send.
 const PREQUAL_SENT_RE = /(texted|sent|sending).{0,60}pre-?qual|pre-?qual.{0,60}(link\s+(sent|texted)|sent\s+via\s+sms)/i;
@@ -236,6 +261,7 @@ function leadFromRow(r) {
   const sales = parseObj(r.sales);
   const summary = parseJsonArray(r.summary);
   const apptDetails = Array.isArray(ov.appointmentDetails) ? ov.appointmentDetails.filter(Boolean) : [];
+  const locInfo = pickLocationInfo(apptDetails, summary);
   const vehicles = Array.isArray(sales.vehicleRequested)
     ? sales.vehicleRequested.map((v) => (v && (v.vehicleName || v.name)) || "").filter(Boolean)
     : [];
@@ -252,7 +278,9 @@ function leadFromRow(r) {
     vehicle: vehicles.join(", "),
     vehicleType: sales.vehicleType || "",
     apptWhen: pickApptWhen(apptDetails, summary),
-    location: pickLocation(apptDetails, summary),
+    location: locInfo.value,
+    // "we told them this one" vs "they picked it" — the BDC confirms location on the callback
+    locationNote: locInfo.nearest ? "nearest to their ZIP — confirm on the callback" : "",
     financing: sales.financingRequest || "",
     prequalSent: PREQUAL_SENT_RE.test(transcript + "\n" + summary.join("\n")),
     tradeIn: (sales.tradeInMention && sales.tradeInMention.value) || "",
@@ -363,7 +391,7 @@ function buildSmsLead(callLead, seed, msgs) {
   const typedWhen = pickApptWhen([], typedLines);
   const base = callLead || {
     customer: "", phone: "", email: "", zip: "", vehicle: "", vehicleType: "", apptWhen: "",
-    location: "", financing: "", prequalSent: false, tradeIn: "", intent: "", agentName: "",
+    location: "", locationNote: "", financing: "", prequalSent: false, tradeIn: "", intent: "", agentName: "",
     appointmentBooked: false,
     summary: [], actionItems: [], transcript: "", recordingUrl: "", durationSec: 0, endedReason: "", at: null,
   };
@@ -386,5 +414,5 @@ function buildSmsLead(callLead, seed, msgs) {
 
 module.exports = {
   fetchLeadFields, fetchLeadFieldsByLead, leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
-  extractZip, pickApptWhen, pickLocation, _chQuery: chQuery,
+  extractZip, pickApptWhen, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };

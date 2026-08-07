@@ -122,5 +122,17 @@ t("required: missing email is called out", /Still needed for CRM entry: Email/.t
 t("required: lists every gap", /Still needed for CRM entry: Email \u00b7 Zip code/.test(leadHtml({ email: "", zip: "" })), true);
 t("required: no callout when all four present", /Still needed for CRM entry/.test(leadHtml({ email: "j@x.com" })), false);
 
+// ── location reported as PROSE (appointmentDetails empty) — dealer report, Aug 6 ─────────────
+// On plenty of calls report_overview.appointmentDetails comes back [], and the store survives only
+// in the summary sentence. That shape was dropped entirely, so the sheet said "not captured" on a
+// call where the location was plainly discussed.
+const loc = (a, s2) => LC.pickLocationInfo(a, s2);
+t("location: prose 'nearest location in X'", loc([], ["The customer provided ZIP code 49036 and was informed about the nearest location in Coldwater, MI. The sales team will call to confirm."]).value, "Coldwater, MI");
+t("location: prose 'nearest' is flagged, not presented as the customer's choice", loc([], ["...informed about the nearest location in Coldwater, MI."]).nearest, true);
+t("location: 'dealership at X' prose drops the day clause", loc([], ["He will visit the dealership at Fort Wayne East on Saturday."]).value, "Fort Wayne East");
+t("location: a customer CHOICE is not flagged as nearest", loc([], ["The customer chose the Fort Wayne West location for the visit."]).nearest, false);
+t("location: appointmentDetails still wins over prose", loc(["Location: Superior Auto, Saint Joe Road"], ["...nearest location in Coldwater, MI."]).value, "Superior Auto, Saint Joe Road");
+t("location: nothing discussed stays empty", loc([], ["The customer asked about financing only."]).value, "");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
