@@ -538,7 +538,7 @@ function renderLeadCapture(opts) {
       leadField("Appointment time", d.apptWhen, "no time given", d.apptWhenNote) +
       // Booked vs merely requested changes what the BDC does with the time above.
       leadField("Appointment status", d.apptWhen ? "Time agreed with customer — enter in CRM" : "No time agreed") +
-      leadField("Preferred location", d.location) +
+      leadField("Preferred location", d.location, undefined, d.locationNote) +
       leadField("Financing Option Required", financingTxt) +
       leadField("Trade-in mentioned", tradeTxt) +
     "</table>";
