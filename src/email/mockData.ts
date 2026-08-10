@@ -169,14 +169,17 @@ export const EMAIL_TYPES = [
 ] as const;
 export type EmailTypeKey = (typeof EMAIL_TYPES)[number]["key"];
 
-/** The 7 notification types as BARE keys (not the config "<type>_enabled" columns) — the keys used
- * in the roi_recipients.subscriptions matrix. Order = display order in the subscription grid. */
+/** The notification types as BARE keys (not the config "<type>_enabled" columns) — the keys used
+ * in the roi_recipients.subscriptions matrix. Order = display order in the subscription grid.
+ * 'chat' is subscription-only: website-chat emails store as post_conversation but recipient-match
+ * on this key (default ON for email), so a call-summary opt-out doesn't silence chat. */
 export const SUBSCRIPTION_TYPES = [
   { key: "daily", label: "Daily digest" },
   { key: "weekly", label: "Weekly digest" },
   { key: "monthly", label: "Monthly digest" },
   { key: "post_appointment", label: "Post-appointment" },
   { key: "post_conversation", label: "Post-conversation" },
+  { key: "chat", label: "Website chat" },
   { key: "action_item", label: "Action item" },
   { key: "action_item_overdue", label: "Action item overdue" },
 ] as const;
@@ -185,10 +188,11 @@ export type Channel = "email" | "sms";
 export type Subscriptions = Partial<Record<SubType, { email?: boolean; sms?: boolean }>>;
 export type RecipientRole = "salesperson" | "bdc" | "gm";
 const DIGEST_SUB_TYPES = new Set<SubType>(["daily", "weekly", "monthly"]);
-/** Mirror of server/roi-cron/subscriptions.cjs — email: all on; sms: transactional on, digests off. */
+/** Mirror of server/roi-cron/subscriptions.cjs — email: all on; sms: transactional on, digests off,
+ * chat off (chat is email-only today; SMS for it must be explicit opt-in if it ever ships). */
 export function defaultSub(type: SubType, channel: Channel): boolean {
   if (channel === "email") return true;
-  return !DIGEST_SUB_TYPES.has(type);
+  return !DIGEST_SUB_TYPES.has(type) && type !== "chat";
 }
 /** Effective subscription for a cell — explicit value wins, else the default. */
 export function isSubscribed(subs: Subscriptions | null | undefined, type: SubType, channel: Channel): boolean {

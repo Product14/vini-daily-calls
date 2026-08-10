@@ -9,6 +9,10 @@
  */
 
 // The 7 notification types (bare keys — NOT the roi_rooftop_config "<type>_enabled" column names).
+// 'chat' (website-chat emails) is a SUBSCRIPTION-ONLY key on top of these: those emails store as
+// email_type=post_conversation (tracker/dedupe grain) but recipient-match on their own 'chat' cell,
+// so a recipient's call-summary opt-out doesn't silence chat. It is deliberately NOT in these lists
+// (nothing that iterates email types should treat it as a distinct type).
 const DIGEST_TYPES = ["daily", "weekly", "monthly"];
 const TRANSACTIONAL_TYPES = ["post_appointment", "post_conversation", "action_item", "action_item_overdue"];
 const ALL_TYPES = [...DIGEST_TYPES, ...TRANSACTIONAL_TYPES];
@@ -20,10 +24,12 @@ const isDigest = (type) => DIGEST_TYPES.includes(type);
 
 /** Default subscription when a recipient has no explicit cell for (type, channel).
  * email: every type ON (preserves "email_enabled person receives every rooftop-enabled type").
- * sms:   transactional ON (preserves current transactional SMS); digests OFF (opt-in only). */
+ * sms:   transactional ON (preserves current transactional SMS); digests OFF (opt-in only);
+ *        'chat' OFF — chat is email-only today (no smsBody is ever built), and if that changes
+ *        it must be an explicit opt-in, never a new key silently defaulting SMS on. */
 function defaultSub(type, channel) {
   if (channel === "email") return true;
-  if (channel === "sms") return !isDigest(type); // digests default off
+  if (channel === "sms") return !isDigest(type) && type !== "chat"; // digests + chat default off
   return false;
 }
 

@@ -3137,6 +3137,9 @@ app.post("/api/recipients/verify", requireTrackerAuth, async (req, res) => {
 const SUB_TYPES = new Set([
   "daily", "weekly", "monthly",
   "post_appointment", "post_conversation", "action_item", "action_item_overdue",
+  // subscription-only key: website-chat emails STORE as post_conversation but match recipients on
+  // their own 'chat' cell (default ON) so a call-noise opt-out doesn't silence chat.
+  "chat",
 ]);
 app.post("/api/recipients/subscription", requireTrackerAuth, async (req, res) => {
   try {
