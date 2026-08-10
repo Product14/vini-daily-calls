@@ -442,6 +442,11 @@ async function runOnce() {
         const leadKey = (it) => it.leadId || it.lead_id || it.customer || it.id;
         const byLead = new Map();
         for (const it of recentItems) { const k = leadKey(it); const g = byLead.get(k) || []; g.push(it); byLead.set(k, g); }
+        // Zeigler Hyundai of Racine (Javian Perry, Aug 2026): the alert showed only OUR follow-up
+        // SLA clock ("due Aug 7, 9:17 PM") — enrich each lead with the visit date+time the CUSTOMER
+        // asked for on their latest call. Best-effort: no ClickHouse creds, no call on file, or no
+        // time stated → the field simply doesn't render. (Non-leadId keys match nothing — harmless.)
+        const apptAsks = await leadCaptureCH.fetchApptAsksByLead(L.team_id, [...byLead.keys()]);
         for (const [k, arrived] of byLead) {
           const leadOpen = openItems.filter((p) => leadKey(p) === k);
           const items = leadOpen.length ? leadOpen : arrived; // prefer the lead's full open set
@@ -452,6 +457,12 @@ async function runOnce() {
             aiScore: seed.aiScore, grade: seed.grade, sentiment: seed.sentiment, sentimentScore: seed.sentimentScore,
             lastSummary: seed.lastSummary || seed.conversationSummary,
           };
+          const ask = apptAsks.get(String(k));
+          if (ask) {
+            lead.requestedTime = ask.requestedTime;
+            lead.requestedTimeAt = ask.at; // phrases like "tomorrow" are relative to the CALL — the template dates them
+            lead.requestedTimeBooked = ask.booked; // "Booked for" vs "Customer asked for"
+          }
           // dedupe per lead per newest-arrived item, so a fresh item re-triggers the lead view once
           const newestId = arrived.map((x) => x.id).filter(Boolean).sort().slice(-1)[0] || k;
           jobs.push({ type: "action_item", key: `lead:${k}:${newestId}`,
@@ -461,7 +472,8 @@ async function runOnce() {
             // Raw per-lead data (not pre-rendered text) for the cross-lead batch renderers —
             // see the "EMAIL"/"SMS channel" blocks below. smsLead is a trimmed subset (fine for
             // SMS); emailLead carries the FULL lead object since leadHeader() shows more of it.
-            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length },
+            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length,
+              requestedTime: lead.requestedTime, requestedTimeBooked: lead.requestedTimeBooked },
             emailLead: { ...lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length },
             // Rooftop-level (not per-lead) — `open` is out of scope by the time the batch email
             // renders, so it's carried on the job like everything else the batch render needs.
@@ -495,6 +507,10 @@ async function runOnce() {
         const leadKey = (it) => it.leadId || it.lead_id || it.customer || it.id;
         const byLead = new Map();
         for (const it of overdue) { const k = leadKey(it); const g = byLead.get(k) || []; g.push(it); byLead.set(k, g); }
+        // Same requested-time enrichment as the new-item email above — the overdue report is where a
+        // dated ask matters MOST ("asked for tomorrow at 9" days ago), so the template stamps the
+        // call date next to it via requestedTimeAt.
+        const apptAsks = await leadCaptureCH.fetchApptAsksByLead(L.team_id, [...byLead.keys()]);
         const dayKey = localDateISO(tz);
         for (const [k, items] of byLead) {
           const seed = items[0] || {};
@@ -504,12 +520,19 @@ async function runOnce() {
             aiScore: seed.aiScore, grade: seed.grade, sentiment: seed.sentiment, sentimentScore: seed.sentimentScore,
             lastSummary: seed.lastSummary || seed.conversationSummary,
           };
+          const ask = apptAsks.get(String(k));
+          if (ask) {
+            lead.requestedTime = ask.requestedTime;
+            lead.requestedTimeAt = ask.at;
+            lead.requestedTimeBooked = ask.booked;
+          }
           const oldest = items.map((x) => x.dueAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
           jobs.push({ type: "action_item_overdue", key: `lead:${k}:overdue:${dayKey}:${overdueSlot}`,
             subject: `Overdue — ${lead.customer || name}`,
             html: T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
             smsBody: T.renderActionItemOverdueSms({ rooftopName: name, dept, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
-            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, oldestDueAt: oldest, totalOverdue: items.length },
+            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, oldestDueAt: oldest, totalOverdue: items.length,
+              requestedTime: lead.requestedTime, requestedTimeBooked: lead.requestedTimeBooked },
             emailLead: { ...lead, items, oldestDueAt: oldest, totalOverdue: items.length },
             totalPendingAllLeads,
             leadMatchKey: leadMatchKey({ leadId: seed.leadId || seed.lead_id, customer: lead.customer, phone: lead.phone }) });
@@ -574,6 +597,14 @@ async function runOnce() {
           if (!leadCaptureCH.hasCreds()) console.warn(`[events] ${name}: post_conversation_template=lead_capture but CLICKHOUSE_HOST/PASSWORD are unset — falling back to the standard conversation email`);
           extras = await leadCaptureCH.fetchLeadFields(L.team_id, chosen.map((x) => x.cv.id));
         }
+        // STANDARD summaries get the same requested-time enrichment as the action-item emails
+        // (Zeigler ask, Aug 2026): a call that only REQUESTED a slot shows nothing today — the
+        // appointment card renders only when the call actually booked. Keyed on the conversation's
+        // OWN call, so the time shown is the one asked on the call being summarized. Lead-capture
+        // sheets already carry apptWhen and skip this.
+        const callAsks = (!leadCapture && chosen.length)
+          ? await leadCaptureCH.fetchApptAsksByCall(L.team_id, chosen.map((x) => x.cv.id))
+          : new Map();
         for (const { key, cv, subject } of chosen) {
           const lx = extras.get(String(cv.id));
           if (lx) {
@@ -584,6 +615,11 @@ async function runOnce() {
               subject: `New lead — ${lead.customer || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
               html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }) });
             continue;
+          }
+          const ask = callAsks.get(String(cv.id));
+          if (ask && !cv.appointmentScheduled) {
+            cv.requestedTime = ask.requestedTime;
+            cv.requestedTimeBooked = ask.booked; // report says booked but feed flag lagged → "Booked for"
           }
           jobs.push({ type: "post_conversation", key, subject,
             html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });
