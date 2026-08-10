@@ -4,7 +4,8 @@
  * Jun-2026 review, sends one email per NEW event:
  *
  *   post_appointment       — a new appointment was booked            (reporting-vini /api/meetings)
- *   post_conversation      — a call conversation happened            (reporting-vini /api/conversations)
+ *   post_conversation      — a call/SMS/website-chat conversation    (reporting-vini /api/conversations,
+ *                            channel=call | sms | chat)
  *   action_item            — a new action item was created/assigned  (reporting-vini /api/action-items?scope=recent)
  *   action_item_overdue    — an action item breached its SLA         (reporting-vini /api/action-items?scope=overdue)
  *
@@ -339,6 +340,7 @@ async function runOnce() {
                            // These used to be swallowed (out.errors++, continue) with no alert → the pipeline
                            // failed silently for 13 days. Now they raise a Slack alert like send failures do.
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
+  const chatDoneTeams = new Set(); // website-chat poll also runs once per team (chat has no dept either)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
 
@@ -698,6 +700,41 @@ async function runOnce() {
             } else {
               // 'daily' (default): one digest per lead/day.
               pushSms(seed, allMsgs, `sms:${k}:${day}`, "summary", k);
+            }
+          }
+        }
+        // ── CHAT channel — website-chatbot threads (dealer_leads.conversations type='chat'; the
+        // bubbles share the SMS store, so the feed row looks like an SMS thread plus the widget's
+        // own analysis: summary, sentiment, outcome, booked-appointment flag, action items). A chat
+        // is a LIVE session — emailing on first sight would ship a half-finished thread — so a
+        // burst only emails once it SETTLES (quiet > EVENT_CHAT_SESSION_GAP_MIN), the backend marks
+        // the conversation completed, or the EOD flush. Same session mechanics as the SMS 'session'
+        // cadence; keys are conversation+day+session-start scoped, so a visitor who returns later
+        // the same day emails again with the new burst and dedupe holds across passes. A real
+        // visitor message is REQUIRED (hard gate, not config): the widget auto-greets on page view,
+        // so an all-AI thread is noise, not a conversation. Chat renders the standard conversation
+        // email everywhere for now (incl. lead_capture rooftops — the chat feed carries none of the
+        // lead-sheet sub-report fields, and a visitor-typed thread is the record the dealer works).
+        // Kill switch: EVENT_CHAT_CHANNEL=false (default ON). Once per team per pass (no dept split).
+        if (process.env.EVENT_CHAT_CHANNEL !== "false" && !chatDoneTeams.has(L.team_id)) {
+          chatDoneTeams.add(L.team_id);
+          const chatGapMin = Number(process.env.EVENT_CHAT_SESSION_GAP_MIN || 30);
+          const sinceMinChat = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
+          const jc = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=chat&minutes=${sinceMinChat}&limit=200`);
+          const nowC = Date.now();
+          for (const cv of jc.conversations || []) {
+            if (!cv.hasReply) continue; // auto-greeting with no visitor reply — never email
+            if (isCovered(cv)) { out.post_conversation_suppressed++; continue; }
+            const allMsgs = (cv.sms || []).filter((x) => x && x.at).sort((a, b) => String(a.at).localeCompare(String(b.at)));
+            const done = String(cv.status || "") === "completed";
+            for (const s of smsSessions(allMsgs, chatGapMin)) {
+              if (!s.hasReply) continue;
+              if ((nowC - s._lastT) <= chatGapMin * 60000 && !isEod && !done) continue; // still active → wait
+              const conv = { ...cv, channel: "chat", sms: s.msgs.slice(-12) };
+              jobs.push({ type: "post_conversation", key: `chat:${cv.id}:${day}:s${s.startAt}`,
+                subject: `Website chat — ${cv.customer || name}`,
+                html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: conv, links: L_ }),
+                smsBody: T.renderPostConversationSms({ rooftopName: name, dept, conversation: conv, links: L_ }) });
             }
           }
         }

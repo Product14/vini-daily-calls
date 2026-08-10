@@ -259,8 +259,9 @@ function bulletBlock(title, items, dotColor) {
 // SMS thread preview — last few bubbles + delivery health. `cap` defaults to a 4-bubble PREVIEW
 // (conversation-summary email, where the console link is the full record); the lead-capture sheet
 // passes a real cap because the dealer works the lead from the email itself — a last-4 window can
-// hide the message where the customer gave their ZIP or moved the time.
-function smsThread(messages, failedCount, cap) {
+// hide the message where the customer gave their ZIP or moved the time. `label` overrides the
+// section header ("Text thread") — the website-chat email shows the SAME bubbles as "Chat thread".
+function smsThread(messages, failedCount, cap, label) {
   var n = Number(cap) > 0 ? Number(cap) : 4;
   var all = Array.isArray(messages) ? messages : [];
   var msgs = all.slice(-n);
@@ -275,7 +276,7 @@ function smsThread(messages, failedCount, cap) {
     ? '<div style="margin-top:8px;font-size:11px;color:' + NEG + ';font-weight:700;">&#9888; ' + fmtInt(failedCount) + " message" + (failedCount === 1 ? "" : "s") + " failed to deliver — check the number.</div>"
     : "";
   return '<div style="margin-top:16px;">' +
-    '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin-bottom:6px;">Text thread</div>' +
+    '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin-bottom:6px;">' + esc(label || "Text thread") + "</div>" +
     (hidden > 0 ? '<div style="font-size:11px;color:' + FAINT + ';margin-bottom:6px;">Showing the last ' + msgs.length + " of " + all.length + " messages — open the thread for the rest.</div>" : "") +
     '<table width="100%" cellpadding="0" cellspacing="0">' + bubbles + "</table>" + health + "</div>";
 }
@@ -325,7 +326,7 @@ function outcomeBanner(c) {
  * "what do I do?" in the banner, then the proof (who, score, sentiment, recording, summary,
  * vehicle interested in, action items, SMS thread). Every block omits when its data is absent.
  * opts: { rooftopName, dept, tz, mtdCalls, links, pixelUrl, conversation:{
- *   id,title,summary,direction,channel('call'|'sms'),customer,phone,at,
+ *   id,title,summary,direction,channel('call'|'sms'|'chat'),customer,phone,at,
  *   aiScore,grade,frustrated, sentiment,sentimentScore, intent,callOutcome,
  *   appointmentScheduled,appointment{vehicle,date,time,when,type}, callbackScheduled,queryResolved,hasActionItem,
  *   requestedTime,requestedTimeBooked — the visit date/time the customer asked for ON THIS CALL
@@ -341,6 +342,7 @@ function renderPostConversation(opts) {
   var tz = opts.tz;
   var summary = String(c.summary || "").replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").trim();
   var isSms = c.channel === "sms";
+  var isChat = c.channel === "chat"; // website-chatbot thread — same bubbles as SMS, its own labels
 
   var when = "";
   try { if (c.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(asDate(c.at)); } catch (e) { when = ""; }
@@ -348,7 +350,7 @@ function renderPostConversation(opts) {
     '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       '<td valign="middle">' + avatar(c.customer, 40) +
         '<span style="display:inline-block;vertical-align:middle;margin-left:10px;">' +
-          '<span style="display:block;font-size:15px;font-weight:800;color:' + INK + ';">' + esc(c.customer || "Customer") + "</span>" +
+          '<span style="display:block;font-size:15px;font-weight:800;color:' + INK + ';">' + esc(c.customer || (isChat ? "Website visitor" : "Customer")) + "</span>" +
           (c.phone ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + "</span>" : "") +
         "</span></td>" +
       (when ? '<td align="right" valign="top" style="font-size:11px;color:' + MUTE + ';white-space:nowrap;">' + esc(when) + "</td>" : "") +
@@ -356,7 +358,7 @@ function renderPostConversation(opts) {
 
   // health chips: channel, AI score, sentiment (and frustrated only when true)
   var chips = "";
-  chips += pill((isSms ? "SMS" : "Call") + " · " + (c.direction === "outbound" ? "Outbound" : "Inbound"), MUTE, WASH);
+  chips += pill((isChat ? "Web chat" : isSms ? "SMS" : "Call") + " · " + (c.direction === "outbound" ? "Outbound" : "Inbound"), MUTE, WASH);
   chips += scorePill(c.aiScore, c.grade);
   chips += sentimentChip(c.sentiment, c.sentimentScore);
   if (c.frustrated) chips += pill("&#9888; Customer frustrated", NEG, NEG_BG);
@@ -375,14 +377,14 @@ function renderPostConversation(opts) {
       (!c.appointmentScheduled && c.requestedTime ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:12px;">&#128337; <b style="color:' + INK + ';">' + (c.requestedTimeBooked ? "Booked for:" : "Customer asked for:") + '</b> <span style="font-weight:700;color:' + INK + ';">' + esc(c.requestedTime) + "</span></div>" : "") +
       (c.actionItems && c.actionItems.length ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Action items</div>' + actionList(c.actionItems, tz, WARM) : "") +
       bulletBlock("Key takeaways", c.keyTakeaways, BRAND) +
-      smsThread(c.sms, c.smsFailed) +
+      smsThread(c.sms, c.smsFailed, null, isChat ? "Chat thread" : "Text thread") +
     "</td></tr></table>" +
-    '<div style="margin-top:18px;">' + btnPrimary(isSms ? "Open thread" : "Listen & review", url) + "</div>";
+    '<div style="margin-top:18px;">' + btnPrimary(isChat ? "Open chat" : isSms ? "Open thread" : "Listen & review", url) + "</div>";
 
   // No-value = the blank-summary placeholder with nothing else to show (no action items, no booked
   // appointment, no SMS thread, no takeaways, no recording, no vehicle) — exactly the empty email the gate exists for.
   var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || c.requestedTime || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl || c.vehicle);
-  return stampValue(shell(opts, isSms ? "Text conversation" : "Conversation summary", esc(c.title || "New conversation"), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms ? "conversations handled" : "calls handled", url)), hasValue);
+  return stampValue(shell(opts, isChat ? "Website chat" : isSms ? "Text conversation" : "Conversation summary", esc(c.title || (isChat ? "Website chat" : "New conversation")), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms || isChat ? "conversations handled" : "calls handled", url)), hasValue);
 }
 
 // One condensed row for the batch digest — avatar + name/phone/channel/time + a one-line outcome
@@ -398,7 +400,7 @@ function batchConvRow(c, tz) {
       '<td valign="middle" style="width:38px;">' + avatar(c.customer, 32) + '</td>' +
       '<td valign="middle" style="padding-left:10px;">' +
         '<div style="font-size:13px;font-weight:800;color:' + INK + ';">' + esc(c.customer || "Customer") + "</div>" +
-        '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + (isSms ? " · SMS" : " · Call") + (when ? " · " + esc(when) : "") +
+        '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + (c.channel === "chat" ? " · Web chat" : isSms ? " · SMS" : " · Call") + (when ? " · " + esc(when) : "") +
           (!c.appointmentScheduled && c.requestedTime ? ' · <span style="color:' + INK + ';font-weight:700;">asked for ' + esc(c.requestedTime) + "</span>" : "") + "</div>" +
       "</td>" +
       '<td align="right" valign="middle">' + pill(esc(label), o.col, o.bg) + "</td>" +
@@ -422,17 +424,18 @@ function renderPostConversationBatch(opts) {
     return renderPostConversation({ rooftopName: opts.rooftopName, dept: opts.dept, tz: opts.tz, mtdCalls: opts.mtdCalls, links: L, conversation: convos[0] || {} });
   }
   var isSmsBatch = convos.every(function (c) { return c.channel === "sms"; });
+  var isChatBatch = convos.every(function (c) { return c.channel === "chat"; });
   var cap = Number(opts.detailCap) || 20;
   var shown = convos.slice(0, cap);
   var hidden = convos.length - shown.length;
+  var noun = isChatBatch ? "website chats" : isSmsBatch ? "SMS conversations" : "calls";
   var rows = shown.map(function (c) { return batchConvRow(c, opts.tz); }).join("");
-  var noun = isSmsBatch ? "SMS conversations" : "calls";
   var body =
     '<div style="font-size:13px;color:' + BODY + ';margin-bottom:14px;">' + convos.length + " " + noun + ' today — condensed into one digest so it doesn\'t flood your inbox. Tap "View all" to open any of them.</div>' +
     '<table width="100%" cellpadding="0" cellspacing="0">' + rows + "</table>" +
     (hidden > 0 ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:10px;">+' + hidden + " more not shown here — view all in the console.</div>" : "") +
     '<div style="margin-top:18px;">' + btnPrimary("View all conversations", url) + "</div>";
-  return stampValue(shell(opts, isSmsBatch ? "SMS digest" : "Conversation digest", convos.length + " " + noun + " — " + (opts.rooftopName || "your rooftop"), body), true);
+  return stampValue(shell(opts, isChatBatch ? "Chat digest" : isSmsBatch ? "SMS digest" : "Conversation digest", convos.length + " " + noun + " — " + (opts.rooftopName || "your rooftop"), body), true);
 }
 
 // ── LEAD-CAPTURE email (per-rooftop custom format) ───────────────────────────────────────────
@@ -1095,19 +1098,20 @@ function renderPostConversationSms(opts) {
   var L = opts.links || {};
   var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
   var isSms = c.channel === "sms";
-  var who = c.customer || "a customer";
+  var isChat = c.channel === "chat";
+  var who = c.customer || (isChat ? "a website visitor" : "a customer");
   var dir = c.direction === "outbound" ? "Outbound" : "Inbound";
   var summary = String(c.summary || "").replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").replace(/\s+/g, " ").trim();
   var lines = [];
   lines.push("Vini" + (opts.rooftopName ? " · " + opts.rooftopName : ""));
-  lines.push((isSms ? "Text" : "Call") + " · " + dir + " with " + who +
+  lines.push((isChat ? "Web chat" : isSms ? "Text" : "Call") + " · " + dir + " with " + who +
     (c.intent ? " — " + humanizeIntent(c.intent) : ""));
   // Lead with the strongest outcome; else a short summary snippet.
   if (c.appointmentScheduled) lines.push("→ Appointment booked");
   else if (c.actionItems && c.actionItems.length) lines.push("→ " + c.actionItems.length + " action item" + (c.actionItems.length === 1 ? "" : "s"));
   if (!c.appointmentScheduled && c.requestedTime) lines.push((c.requestedTimeBooked ? "Booked for: " : "Asked for: ") + c.requestedTime);
   if (summary) lines.push(summary.length > 140 ? summary.slice(0, 137) + "…" : summary);
-  lines.push((isSms ? "Open thread: " : "Review: ") + url);
+  lines.push((isChat ? "Open chat: " : isSms ? "Open thread: " : "Review: ") + url);
   return lines.join("\n");
 }
 
@@ -1130,9 +1134,10 @@ function renderPostConversationBatchSms(opts) {
     return renderPostConversationSms({ rooftopName: opts.rooftopName, dept: opts.dept, conversation: convos[0] || {}, links: L });
   }
   var isSmsBatch = convos.every(function (c) { return c.channel === "sms"; });
+  var isChatBatch = convos.every(function (c) { return c.channel === "chat"; });
   var header = [
     "Vini" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
-    convos.length + " " + (isSmsBatch ? "SMS conversations" : "calls") + " today:",
+    convos.length + " " + (isChatBatch ? "website chats" : isSmsBatch ? "SMS conversations" : "calls") + " today:",
   ];
   var lines = convos.map(function (c) {
     var o = classifyOutcome(c);
