@@ -203,6 +203,64 @@ function trimLocation(v) {
 // String-only wrapper (kept for callers/tests that just want the name).
 function pickLocation(apptDetails, summaryLines) { return pickLocationInfo(apptDetails, summaryLines).value; }
 
+// ── the customer's REQUESTED date+time, for the action-item alert emails ────────────────────────
+// Zeigler Hyundai of Racine (Javian Perry, Aug 2026): "could these include the date and time
+// requested by the customer?" — the action-item alert only showed OUR follow-up SLA clock.
+// pickApptWhen above answers with the FIRST line carrying a day/time, which fits the one-line
+// prose shape ("Preferred visit on Tuesday at 3 PM") but mangles the equally-common SPLIT shape
+// ["Date: August 11, 2026","Time: 7 AM"] — it returns "Time: 7 AM" and drops the date, the exact
+// half the dealer asked for. This variant reassembles date + clock across lines. It is also
+// STRICTER than the lead sheet on prose: an alert asserting "customer asked for: tomorrow" off a
+// "will call back tomorrow" summary line would be trusted and wrong, so only visit-shaped,
+// non-callback lines qualify for the fallback.
+const MONTHS3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// "Saturday, August 8, 2026" | "August 11" | "2026-08-10" | "Tuesday" | "tomorrow" | "today".
+// The month-day form requires a standalone 1-2 digit day (\b) so "May 2025 Tucson" can't match.
+const DATE_TOKEN_RE = new RegExp(
+  "((?:(?:mon|tues|wednes|thurs|fri|satur|sun)day,?\\s+)?" +
+    "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:,?\\s+\\d{4})?" +
+    "|\\d{4}-\\d{2}-\\d{2}" +
+    "|(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b|\\btomorrow\\b|\\btoday\\b)", "i");
+const CLOCK_TOKEN_RE = /\b(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))\b/i;
+// "Preferred callback time: 4 PM today" is a CALLBACK slot, not a visit — never surface it as one.
+const CALLBACK_LINE_RE = /callback|call\s*back/i;
+// Bare "Date:"/"Time:" labels the split shape uses (cleanTimePhrase only knows the prose labels).
+const DATE_LABEL_RE = /^(?:appointment\s+|preferred\s+|proposed\s+|requested\s+)?date(?:\s+and\s+time)?\s*[:\-]\s*/i;
+const TIME_ONLY_LABEL_RE = /^(?:appointment\s+|preferred\s+|proposed\s+|requested\s+)?time\s*[:\-]\s*/i;
+// Prose fallback gate: the summary line must actually be about a visit for its day/time to count.
+const VISIT_CONTEXT_RE = /\b(visit|appointment|come\s+in|coming\s+in|come\s+by|stop(?:ping)?\s+by|swing\s+by|test[\s-]?drive|drop(?:ping)?\s+(?:it\s+)?off|bring(?:ing)?|schedul|book|showroom|service)\b/i;
+
+// "2026-08-10 at 9 AM" → "Aug 10, 2026 at 9 AM" — dealer-readable, applied to any embedded ISO date.
+function prettyIsoDates(s) {
+  return String(s || "").replace(/\b(\d{4})-(\d{2})-(\d{2})\b/g, (m, y, mo, d) => {
+    const mi = Number(mo) - 1;
+    return mi >= 0 && mi < 12 ? `${MONTHS3[mi]} ${Number(d)}, ${y}` : m;
+  });
+}
+
+function pickApptRequest(apptDetails, summaryLines) {
+  let datePart = "", timePart = "";
+  for (const raw of (apptDetails || [])) {
+    const t = String(raw || "").trim();
+    if (!t || CALLBACK_LINE_RE.test(t) || /\b(open|hours|closed|closes)\b/i.test(t)) continue;
+    // strip whatever label the model used ("Date:", "Appointment time:", "Scheduled for", …)
+    const line = cleanTimePhrase(t.replace(DATE_LABEL_RE, "").replace(TIME_ONLY_LABEL_RE, ""));
+    if (!line) continue;
+    const dm = line.match(DATE_TOKEN_RE), cm = line.match(CLOCK_TOKEN_RE);
+    // one line carrying both ("2026-08-05 at 9:00 AM") IS the answer — keep it whole when short so
+    // qualifiers survive, else reassemble from its own tokens
+    if (dm && cm) return prettyIsoDates(line.length <= 48 ? line : dm[1] + " at " + cm[1]);
+    // short single-purpose lines keep their qualifiers ("after 3 PM"), longer ones give the token
+    if (dm && !datePart) datePart = line.length <= 32 ? line : dm[1];
+    else if (cm && !timePart) timePart = line.length <= 24 ? line : cm[1];
+  }
+  if (datePart) return prettyIsoDates(timePart ? datePart + " at " + timePart : datePart);
+  if (timePart) return timePart;
+  return pickApptWhen([], (summaryLines || []).filter(
+    (s) => VISIT_CONTEXT_RE.test(String(s)) && !CALLBACK_LINE_RE.test(String(s)),
+  ));
+}
+
 // "did the agent actually text the pre-qualification link?" — shown next to Financing so the BDC doesn't
 // re-send it. Phrasing check only; there is no structured flag for the link send.
 const PREQUAL_SENT_RE = /(texted|sent|sending).{0,60}pre-?qual|pre-?qual.{0,60}(link\s+(sent|texted)|sent\s+via\s+sms)/i;
@@ -371,6 +429,42 @@ async function fetchLeadFieldsByLead(teamId, leadIds) {
   return out;
 }
 
+/**
+ * JUST the requested visit date+time per lead, for the action-item / overdue alerts — a light
+ * projection of fetchLeadFieldsByLead (no transcript, no identity joins: the overdue report can
+ * cover dozens of leads in one pass and only needs these three fields). Reads the lead's most
+ * recent call — for a just-created action item that IS the triggering call, and for an older one
+ * the latest ask is the one that stands. Map<leadId, {requestedTime, at, booked}>; a lead whose
+ * calls never stated a time simply isn't in the Map. Never throws into the send loop.
+ */
+async function fetchApptAsksByLead(teamId, leadIds) {
+  const ids = [...new Set((leadIds || []).filter(Boolean).map(String))];
+  if (!hasCreds() || !teamId || !ids.length) return new Map();
+  const sql =
+    "SELECT e.leadId leadId, toString(e.createdAt) at," +
+    " ifNull(e.report_overview,'') overview, ifNull(e.report_summary,'') summary" +
+    " FROM dealer_leads.endcallreports e" +
+    // TEAM-SCOPED: a leadId that isn't this rooftop's returns nothing. Cross-rooftop isolation.
+    " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND e.leadId IN (" + ids.map(lit).join(",") + ")" +
+    " AND notEmpty(e.report_overview)" +
+    " ORDER BY e.createdAt DESC LIMIT 1 BY e.leadId";
+  let rows;
+  try { rows = await chQuery(sql); }
+  catch (e) { console.warn("[appt-ask] ClickHouse lookup failed:", String(e).slice(0, 160)); return new Map(); }
+  const out = new Map();
+  for (const r of rows) {
+    const ov = parseObj(r.overview);
+    const apptDetails = Array.isArray(ov.appointmentDetails) ? ov.appointmentDetails.filter(Boolean) : [];
+    const when = pickApptRequest(apptDetails, parseJsonArray(r.summary));
+    if (when) out.set(String(r.leadId), {
+      requestedTime: when,
+      at: isoInstant(r.at), // the call it came from — the template dates stale asks with this
+      booked: String(ov.appointmentScheduled || "").toLowerCase() === "yes", // "Booked for" vs "asked for"
+    });
+  }
+  return out;
+}
+
 const SMS_FAILED = new Set(["failed", "undelivered", "error"]);
 const isInboundSms = (m) => m && (m.direction === "in" || m.direction === "inbound");
 
@@ -413,6 +507,7 @@ function buildSmsLead(callLead, seed, msgs) {
 }
 
 module.exports = {
-  fetchLeadFields, fetchLeadFieldsByLead, leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
-  extractZip, pickApptWhen, pickLocation, pickLocationInfo, _chQuery: chQuery,
+  fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, leadFromRow, buildSmsLead,
+  LEAD_FIELD_COLS, hasCreds,
+  extractZip, pickApptWhen, pickApptRequest, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };

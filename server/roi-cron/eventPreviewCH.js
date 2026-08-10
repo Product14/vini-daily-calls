@@ -304,18 +304,27 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
   if (!rows.length) return null;
   // Lead context (sentiment · score · grade · last summary) — best-effort from the lead's latest call.
   const ctx = await one(
-    "SELECT e.report_overview overview, q.scorePercentage score, q.overallGrade grade" +
+    "SELECT e.report_overview overview, ifNull(e.report_summary,'') summaryRaw, toString(e.createdAt) at," +
+    " q.scorePercentage score, q.overallGrade grade" +
     " FROM dealer_leads.endcallreports e" +
     " LEFT JOIN (SELECT callId, any(scorePercentage) scorePercentage, any(overallGrade) overallGrade FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 90 DAY GROUP BY callId) q ON e.callId=q.callId" +
     " WHERE e.teamId=" + lit(teamId) + " AND e.leadId=" + lit(leadId) + " AND e.__deleted=0 AND notEmpty(e.report_overview)" +
     " ORDER BY e.createdAt DESC LIMIT 1");
   const ov = parseOverview(ctx && ctx.overview), overall = ov.overall || {};
+  // The visit date/time the customer asked for — SAME extractor + sources as the cron send path
+  // (leadCaptureCH.fetchApptAsksByLead), so the tracker preview can't drift from the real email.
+  const { pickApptRequest } = require("./leadCaptureCH.cjs");
+  const apptDetails = Array.isArray(ov.appointmentDetails) ? ov.appointmentDetails.filter(Boolean) : [];
+  const requestedTime = ctx ? pickApptRequest(apptDetails, parseJsonArray(ctx.summaryRaw)) : "";
   const first = rows[0];
   const lead = {
     customer: cleanName(first.customer, first.phone) || "Customer", phone: first.phone, vehicle: first.vehicle || undefined,
     aiScore: ctx && ctx.score != null ? Number(ctx.score) : undefined, grade: ctx ? ctx.grade : undefined,
     sentiment: overall.sentiment, sentimentScore: overall.sentimentScore,
     lastSummary: parseJsonArray(ov && ov.summary).join(" ") || undefined,
+    requestedTime: requestedTime || undefined,
+    requestedTimeAt: requestedTime ? String(ctx.at || "") : undefined,
+    requestedTimeBooked: requestedTime ? String(ov.appointmentScheduled || "").toLowerCase() === "yes" : undefined,
   };
   // If this lead also has a text conversation, include the chat snippet for context.
   const cv = await smsConvByLead(teamId, leadId);

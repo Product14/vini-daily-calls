@@ -626,7 +626,10 @@ function aiRow(it, accent, tz) {
   var prCol = pr === "high" || pr === "urgent" ? NEG : pr === "medium" ? AMBER : MUTE;
   var meta = [
     it.priority ? '<span style="color:' + prCol + ';font-weight:700;">' + esc(String(it.priority)) + " priority</span>" : "",
-    dueTxt ? "due " + esc(dueTxt) : "",
+    // "follow up by", not "due" — this is OUR internal SLA clock, and a dealer reading a bare
+    // "due Aug 7, 9:17 PM" next to an appointment task took it for the CUSTOMER's slot (Zeigler,
+    // Aug 2026). The customer's actual ask renders separately via lead.requestedTime.
+    dueTxt ? "follow up by " + esc(dueTxt) : "",
     it.conversationTitle ? "from “" + esc(it.conversationTitle) + "”" : "",
   ].filter(Boolean).join(" · ");
   return '<tr><td style="padding:11px 14px;border:1px solid ' + LINE + ';border-left:3px solid ' + (accent || BRAND) + ';border-radius:10px;background:' + CARD + ';">' +
@@ -636,8 +639,26 @@ function aiRow(it, accent, tz) {
     "</td></tr><tr><td style=\"height:8px;line-height:8px;\">&nbsp;</td></tr>";
 }
 
-// Lead context header — avatar + name + phone, then score/sentiment/source chips + vehicle.
-function leadHeader(lead) {
+// "· from their Aug 7 call" — the requested time is free text relative to the CALL ("tomorrow at
+// 9 AM"), so an email read later (the overdue report especially) must say when it was said.
+// Same-day sends read "from today's call"; unparseable/absent timestamps render no suffix.
+function callDaySuffix(at, tz) {
+  if (!at) return "";
+  var d = asDate(at);
+  if (isNaN(d.getTime())) return "";
+  var txt;
+  try {
+    var fmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: tz || "America/New_York" });
+    var day = fmt.format(d);
+    txt = day === fmt.format(new Date()) ? "from today's call" : "from their " + day + " call";
+  } catch (e) { return ""; }
+  return ' <span style="color:' + MUTE + ';font-weight:400;">· ' + esc(txt) + "</span>";
+}
+
+// Lead context header — avatar + name + phone, then score/sentiment/source chips + vehicle +
+// the visit date/time the customer asked for (Zeigler ask, Aug 2026 — see requestedTime in
+// leadCaptureCH.pickApptRequest). `tz` = dealer timezone, only used to date the requested-time ask.
+function leadHeader(lead, tz) {
   lead = lead || {};
   var chips = "";
   chips += scorePill(lead.aiScore, lead.grade);
@@ -652,6 +673,7 @@ function leadHeader(lead) {
       "</span></td></tr></table>" +
     (chips ? '<div style="margin-top:12px;">' + chips + "</div>" : "") +
     (lead.vehicle ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:6px;"><b style="color:' + INK + ';">Vehicle of interest:</b> ' + esc(lead.vehicle) + "</div>" : "") +
+    (lead.requestedTime ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:6px;">&#128337; <b style="color:' + INK + ';">' + (lead.requestedTimeBooked ? "Booked for:" : "Customer asked for:") + '</b> <span style="font-weight:700;color:' + INK + ';">' + esc(lead.requestedTime) + "</span>" + callDaySuffix(lead.requestedTimeAt, tz) + "</div>" : "") +
     (lead.lastSummary ? '<div style="font-size:12px;color:' + BODY + ';line-height:1.6;margin-top:10px;border-top:1px solid ' + LINE + ';padding-top:10px;"><span style="font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:' + MUTE + ';">Last conversation</span><br/>' + esc(lead.lastSummary) + "</div>" : "") +
     "</td></tr></table>";
 }
@@ -661,7 +683,10 @@ function leadHeader(lead) {
  * single customer (lead) with ALL of their open action items grouped together, plus lead
  * context (AI score, sentiment, vehicle, last conversation). One actionable view per person.
  * opts: { rooftopName, dept, tz, links, pixelUrl,
- *   lead:{ customer,phone,vehicle,source,stage, aiScore,grade, sentiment,sentimentScore, lastSummary },
+ *   lead:{ customer,phone,vehicle,source,stage, aiScore,grade, sentiment,sentimentScore, lastSummary,
+ *     requestedTime,requestedTimeAt,requestedTimeBooked — the visit date/time the customer asked for
+ *     on their latest call (leadCaptureCH.fetchApptAsksByLead), + the call instant and whether the
+ *     agent actually booked it },
  *   items:[{ intent,description,priority,dueAt,conversationTitle }],
  *   totalOpen, justArrived:int }
  * Back-compat: if `item`/`pending` (old per-item shape) are passed, they're folded into `items`.
@@ -686,7 +711,7 @@ function renderActionItem(opts) {
 
   var body =
     heading +
-    leadHeader(lead) +
+    leadHeader(lead, opts.tz) +
     '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:18px 0 0;">To do for this customer</div>' +
     actionList(items, opts.tz, BRAND) +
     smsThread(opts.sms, opts.smsFailed) +
@@ -727,7 +752,7 @@ function renderActionItemOverdue(opts) {
   var banner = '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:16px;"><tr><td style="padding:12px 16px;font-size:13px;font-weight:800;color:' + NEG + ';">' +
     "&#9888; " + fmtInt(count) + " action item" + (count === 1 ? "" : "s") + " past SLA" + (lead.customer ? " for " + esc(lead.customer) : "") + (age ? " &nbsp;·&nbsp; oldest " + esc(age) : "") + " — resolve now.</td></tr></table>";
   var body = banner +
-    (lead.customer ? leadHeader(lead) + '<div style="height:10px;line-height:10px;">&nbsp;</div>' : "") +
+    (lead.customer ? leadHeader(lead, opts.tz) + '<div style="height:10px;line-height:10px;">&nbsp;</div>' : "") +
     '<table width="100%" cellpadding="0" cellspacing="0">' + items.slice(0, 8).map(function (it) { return aiRow(it, NEG, opts.tz); }).join("") + "</table>" +
     smsThread(opts.sms, opts.smsFailed) +
     '<div style="margin-top:6px;">' + btnPrimary("Resolve now", url) + "</div>";
@@ -769,7 +794,9 @@ function batchLeadCard(ld, tz, rightPillHtml) {
       "</td>" +
       (rightPillHtml ? '<td align="right" valign="middle">' + rightPillHtml + "</td>" : "") +
     "</tr></table>" +
-    '<div style="font-size:12.5px;color:' + BODY + ';margin-top:6px;padding-left:48px;">' + lineItems.join(" · ") + esc(extra) + (dueTxt ? ' <span style="color:' + MUTE + ';">· due ' + esc(dueTxt) + "</span>" : "") + "</div>" +
+    '<div style="font-size:12.5px;color:' + BODY + ';margin-top:6px;padding-left:48px;">' + lineItems.join(" · ") + esc(extra) +
+      (ld.requestedTime ? ' <span style="color:' + INK + ';font-weight:700;">· ' + (ld.requestedTimeBooked ? "booked for " : "asked for ") + esc(ld.requestedTime) + "</span>" : "") +
+      (dueTxt ? ' <span style="color:' + MUTE + ';">· follow up by ' + esc(dueTxt) + "</span>" : "") + "</div>" +
   "</td></tr>";
 }
 
@@ -892,6 +919,7 @@ function renderActionItemSms(opts) {
     (lead.vehicle ? " (" + lead.vehicle + ")" : "") + ":");
   items.slice(0, 3).forEach(function (it) { lines.push("- " + smsItemLabel(it)); });
   if (totalOpen > 3) lines.push("+" + (totalOpen - 3) + " more");
+  if (lead.requestedTime) lines.push((lead.requestedTimeBooked ? "Booked for: " : "Asked for: ") + lead.requestedTime);
   lines.push("Work this lead: " + url);
   return lines.join("\n");
 }
@@ -936,6 +964,7 @@ function renderActionItemOverdueSms(opts) {
   lines.push(count + " action item" + (count === 1 ? "" : "s") + " past SLA for " + who +
     (age ? " (oldest " + age + ")" : "") + ":");
   items.slice(0, 3).forEach(function (it) { lines.push("- " + smsItemLabel(it)); });
+  if (lead.requestedTime) lines.push((lead.requestedTimeBooked ? "Booked for: " : "Asked for: ") + lead.requestedTime);
   lines.push("Resolve now: " + url);
   return lines.join("\n");
 }
