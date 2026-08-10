@@ -14,6 +14,9 @@ import { createRequire } from "node:module";
 import { runClickhouse, hasClickhouseCreds } from "../agentMetrics.js";
 const require = createRequire(import.meta.url);
 const T = require("../../src/email/transactionalTemplates.cjs");
+// Requested-visit-time extractor — SAME one the cron send path uses (fetchApptAsksByLead/ByCall),
+// so tracker previews can't drift from the real emails.
+const { pickApptRequest } = require("./leadCaptureCH.cjs");
 
 // SQL string literal escape (ClickHouse) — defends the team/key params.
 const lit = (s) => "'" + String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
@@ -170,6 +173,8 @@ function convOpts(row, transfer) {
     sentiment: overall.sentiment, sentimentScore: overall.sentimentScore,
     intent: overall.customerIntent, callOutcome: ov.callOutcome,
     appointmentScheduled: appt, appointment: appt ? { vehicle: apptDetails[0], when: apptDetails.slice(1).join(" · "), type: ov.appointmentType } : null,
+    // the slot the customer asked for when nothing got booked (booked case = the appointment block)
+    requestedTime: appt ? undefined : (pickApptRequest(apptDetails, takeaways) || undefined),
     callbackScheduled: ov.callbackScheduled === "Yes", queryResolved: row.queryResolved === "Yes",
     transfer: transfer ? { department: transfer.requestedDepartment, reason: transfer.reason, name: transfer.requestedName } : null,
     actionItems, keyTakeaways: takeaways,
@@ -313,7 +318,6 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
   const ov = parseOverview(ctx && ctx.overview), overall = ov.overall || {};
   // The visit date/time the customer asked for — SAME extractor + sources as the cron send path
   // (leadCaptureCH.fetchApptAsksByLead), so the tracker preview can't drift from the real email.
-  const { pickApptRequest } = require("./leadCaptureCH.cjs");
   const apptDetails = Array.isArray(ov.appointmentDetails) ? ov.appointmentDetails.filter(Boolean) : [];
   const requestedTime = ctx ? pickApptRequest(apptDetails, parseJsonArray(ctx.summaryRaw)) : "";
   const first = rows[0];

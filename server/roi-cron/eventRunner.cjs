@@ -597,6 +597,14 @@ async function runOnce() {
           if (!leadCaptureCH.hasCreds()) console.warn(`[events] ${name}: post_conversation_template=lead_capture but CLICKHOUSE_HOST/PASSWORD are unset — falling back to the standard conversation email`);
           extras = await leadCaptureCH.fetchLeadFields(L.team_id, chosen.map((x) => x.cv.id));
         }
+        // STANDARD summaries get the same requested-time enrichment as the action-item emails
+        // (Zeigler ask, Aug 2026): a call that only REQUESTED a slot shows nothing today — the
+        // appointment card renders only when the call actually booked. Keyed on the conversation's
+        // OWN call, so the time shown is the one asked on the call being summarized. Lead-capture
+        // sheets already carry apptWhen and skip this.
+        const callAsks = (!leadCapture && chosen.length)
+          ? await leadCaptureCH.fetchApptAsksByCall(L.team_id, chosen.map((x) => x.cv.id))
+          : new Map();
         for (const { key, cv, subject } of chosen) {
           const lx = extras.get(String(cv.id));
           if (lx) {
@@ -607,6 +615,11 @@ async function runOnce() {
               subject: `New lead — ${lead.customer || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
               html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }) });
             continue;
+          }
+          const ask = callAsks.get(String(cv.id));
+          if (ask && !cv.appointmentScheduled) {
+            cv.requestedTime = ask.requestedTime;
+            cv.requestedTimeBooked = ask.booked; // report says booked but feed flag lagged → "Booked for"
           }
           jobs.push({ type: "post_conversation", key, subject,
             html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }) });

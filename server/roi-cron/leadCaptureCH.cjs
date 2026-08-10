@@ -465,6 +465,43 @@ async function fetchApptAsksByLead(teamId, leadIds) {
   return out;
 }
 
+/**
+ * Same three fields keyed by CALL — for the standard post_conversation summary, where the ask
+ * should come from THIS call (not "the lead's latest"). Dual-keyed on callId OR id for the same
+ * reason as fetchLeadFields: the conversations feed's `cv.id` is one or the other per row.
+ * Map<callId|id, {requestedTime, at, booked}>.
+ */
+async function fetchApptAsksByCall(teamId, callIds) {
+  const ids = [...new Set((callIds || []).filter(Boolean).map(String))];
+  if (!hasCreds() || !teamId || !ids.length) return new Map();
+  const inList = "(" + ids.map(lit).join(",") + ")";
+  const sql =
+    "SELECT e.callId callId, e.id id, toString(e.createdAt) at," +
+    " ifNull(e.report_overview,'') overview, ifNull(e.report_summary,'') summary" +
+    " FROM dealer_leads.endcallreports e" +
+    " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND (e.callId IN " + inList + " OR e.id IN " + inList + ")" +
+    " AND notEmpty(e.report_overview)" +
+    " ORDER BY e.updatedAt DESC LIMIT 1 BY e.callId";
+  let rows;
+  try { rows = await chQuery(sql); }
+  catch (e) { console.warn("[appt-ask] ClickHouse call lookup failed:", String(e).slice(0, 160)); return new Map(); }
+  const out = new Map();
+  for (const r of rows) {
+    const ov = parseObj(r.overview);
+    const apptDetails = Array.isArray(ov.appointmentDetails) ? ov.appointmentDetails.filter(Boolean) : [];
+    const when = pickApptRequest(apptDetails, parseJsonArray(r.summary));
+    if (!when) continue;
+    const ask = {
+      requestedTime: when,
+      at: isoInstant(r.at),
+      booked: String(ov.appointmentScheduled || "").toLowerCase() === "yes",
+    };
+    if (r.callId) out.set(String(r.callId), ask);
+    if (r.id) out.set(String(r.id), ask);
+  }
+  return out;
+}
+
 const SMS_FAILED = new Set(["failed", "undelivered", "error"]);
 const isInboundSms = (m) => m && (m.direction === "in" || m.direction === "inbound");
 
@@ -507,7 +544,7 @@ function buildSmsLead(callLead, seed, msgs) {
 }
 
 module.exports = {
-  fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, leadFromRow, buildSmsLead,
-  LEAD_FIELD_COLS, hasCreds,
+  fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, fetchApptAsksByCall,
+  leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
   extractZip, pickApptWhen, pickApptRequest, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };

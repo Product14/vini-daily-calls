@@ -328,6 +328,8 @@ function outcomeBanner(c) {
  *   id,title,summary,direction,channel('call'|'sms'),customer,phone,at,
  *   aiScore,grade,frustrated, sentiment,sentimentScore, intent,callOutcome,
  *   appointmentScheduled,appointment{vehicle,date,time,when,type}, callbackScheduled,queryResolved,hasActionItem,
+ *   requestedTime,requestedTimeBooked — the visit date/time the customer asked for ON THIS CALL
+ *     (leadCaptureCH.fetchApptAsksByCall); rendered only when nothing was booked (else apptCard has it),
  *   transfer:{department,reason,name}, vehicle, vin, stockNumber, actionItems:[..], keyTakeaways:[..],
  *   recordingUrl,durationSec,endedReason, sms:[{direction,authorType,body,status,at}], smsFailed } }
  */
@@ -368,6 +370,9 @@ function renderPostConversation(opts) {
       '<div style="font-size:13px;color:' + BODY + ';line-height:1.6;margin-top:14px;">' + (summary ? esc(summary) : "No summary captured for this conversation.") + "</div>" +
       vehicleSection(c.vehicle, c.vin, c.stockNumber) +
       apptCard(c.appointmentScheduled ? (c.appointment || {}) : null) +
+      // The slot the customer ASKED for when nothing got booked — the booked case is apptCard's.
+      // No call-date suffix: this email is about the very call the ask was made on (dated above).
+      (!c.appointmentScheduled && c.requestedTime ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:12px;">&#128337; <b style="color:' + INK + ';">' + (c.requestedTimeBooked ? "Booked for:" : "Customer asked for:") + '</b> <span style="font-weight:700;color:' + INK + ';">' + esc(c.requestedTime) + "</span></div>" : "") +
       (c.actionItems && c.actionItems.length ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Action items</div>' + actionList(c.actionItems, tz, WARM) : "") +
       bulletBlock("Key takeaways", c.keyTakeaways, BRAND) +
       smsThread(c.sms, c.smsFailed) +
@@ -376,7 +381,7 @@ function renderPostConversation(opts) {
 
   // No-value = the blank-summary placeholder with nothing else to show (no action items, no booked
   // appointment, no SMS thread, no takeaways, no recording, no vehicle) — exactly the empty email the gate exists for.
-  var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl || c.vehicle);
+  var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || c.requestedTime || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl || c.vehicle);
   return stampValue(shell(opts, isSms ? "Text conversation" : "Conversation summary", esc(c.title || "New conversation"), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms ? "conversations handled" : "calls handled", url)), hasValue);
 }
 
@@ -393,7 +398,8 @@ function batchConvRow(c, tz) {
       '<td valign="middle" style="width:38px;">' + avatar(c.customer, 32) + '</td>' +
       '<td valign="middle" style="padding-left:10px;">' +
         '<div style="font-size:13px;font-weight:800;color:' + INK + ';">' + esc(c.customer || "Customer") + "</div>" +
-        '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + (isSms ? " · SMS" : " · Call") + (when ? " · " + esc(when) : "") + "</div>" +
+        '<div style="font-size:11px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(c.phone)) + (isSms ? " · SMS" : " · Call") + (when ? " · " + esc(when) : "") +
+          (!c.appointmentScheduled && c.requestedTime ? ' · <span style="color:' + INK + ';font-weight:700;">asked for ' + esc(c.requestedTime) + "</span>" : "") + "</div>" +
       "</td>" +
       '<td align="right" valign="middle">' + pill(esc(label), o.col, o.bg) + "</td>" +
     "</tr></table>" +
@@ -1099,6 +1105,7 @@ function renderPostConversationSms(opts) {
   // Lead with the strongest outcome; else a short summary snippet.
   if (c.appointmentScheduled) lines.push("→ Appointment booked");
   else if (c.actionItems && c.actionItems.length) lines.push("→ " + c.actionItems.length + " action item" + (c.actionItems.length === 1 ? "" : "s"));
+  if (!c.appointmentScheduled && c.requestedTime) lines.push((c.requestedTimeBooked ? "Booked for: " : "Asked for: ") + c.requestedTime);
   if (summary) lines.push(summary.length > 140 ? summary.slice(0, 137) + "…" : summary);
   lines.push((isSms ? "Open thread: " : "Review: ") + url);
   return lines.join("\n");
