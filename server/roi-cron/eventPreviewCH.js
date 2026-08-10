@@ -157,6 +157,40 @@ function smsConvOpts(cv, thread) {
   };
 }
 
+// ── CHAT (website chatbot) support ───────────────────────────────────────────
+// type='chat' rows in the SAME conversations table, bubbles in the SAME smsMessages store —
+// so smsThread() works verbatim. What differs is the analysis: the widget writes its own
+// conversationAnalytics blob (chatSummary bullets, customerSentiment, appointmentDetails,
+// dealerActionItems), and some rooftops' chats write a full endcallreports-style report JSON
+// into `summary`. Identity falls back lead→customer, then the chat's own captured `number`
+// (a visitor can leave a phone before any lead row exists).
+const CHAT_CONV_SELECT =
+  "SELECT cv.conversationId conversationId, cv.leadId leadId, toString(cv.createdAt) at," +
+  " ifNull(cv.summary,'') summaryJson, ifNull(cv.conversationAnalytics,'') analyticsJson," +
+  " cu.name customer, coalesce(nullIf(cu.mobile_number,''), cv.number) phone FROM dealer_leads.conversations cv" + CONV_IDENTITY;
+const chatConvById = (conversationId) => one(CHAT_CONV_SELECT + " WHERE cv.conversationId=" + lit(conversationId) + " AND cv.type='chat' LIMIT 1");
+const chatConvLatest = (teamId) => one(CHAT_CONV_SELECT + " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='chat' AND ifNull(cv.isTest,0)=0 AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,''))) ORDER BY cv.createdAt DESC LIMIT 1");
+// conversation opts for a chat conversation (channel:'chat' → same thread render, chat labels).
+function chatConvOpts(cv, thread) {
+  const report = parseOverview(cv.summaryJson);
+  const analytics = parseOverview(cv.analyticsJson);
+  const arr = (v) => (Array.isArray(v) ? v.filter((x) => x && String(x).trim()).map(String) : []);
+  const ov = report.overview || {};
+  // 'pending_confirmation' is NOT booked — only a confirmed/booked widget appointment (or an
+  // explicit report Yes) may claim one, or the email announces appointments that never land.
+  const apptStatus = String((analytics.appointmentDetails || {}).status || "").toLowerCase();
+  return {
+    id: cv.conversationId, channel: "chat", direction: "inbound",
+    title: report.title || "Website chat", customer: cv.customer, phone: cv.phone, at: cv.at,
+    summary: arr(report.summary).join(" ") || arr(analytics.chatSummary).join(" "),
+    sentiment: (analytics.customerSentiment || {}).sentiment || (ov.overall || {}).sentiment,
+    appointmentScheduled: ["confirmed", "booked", "scheduled"].includes(apptStatus) || String(ov.appointmentScheduled || "").toLowerCase() === "yes",
+    queryResolved: String(report.queryResolved || "").toLowerCase() === "yes",
+    actionItems: [...arr(analytics.dealerActionItems), ...arr(report.actionItems)],
+    sms: thread.messages, smsFailed: thread.failed,
+  };
+}
+
 // Build the conversation opts from a joined endcallreports row (+ quality + transfer).
 function convOpts(row, transfer) {
   const ov = parseOverview(row.overview);
@@ -235,25 +269,42 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       }
       return T.renderPostConversation({ rooftopName: name, dept, tz, conversation: smsConvOpts(cv, th), links });
     };
+    const renderChat = async (cv) => {
+      const th = await smsThread(cv.conversationId);
+      return T.renderPostConversation({ rooftopName: name, dept, tz, conversation: chatConvOpts(cv, th), links });
+    };
     // explicit SMS event → render that text conversation's thread
     if (String(eventKey || "").startsWith("sms:")) {
       const cv = await smsConvById(eventKey.slice(4));
       if (cv) return renderSms(cv);
       if (strict) return null; // explicit SMS event didn't resolve — never substitute another customer
     }
+    // explicit CHAT event → render that website-chat thread (chat labels, widget analysis)
+    if (String(eventKey || "").startsWith("chat:")) {
+      const cv = await chatConvById(eventKey.slice(5));
+      if (cv) return renderChat(cv);
+      if (strict) return null; // explicit chat event didn't resolve — never substitute another customer
+    }
+    const keyed = eventKey && !eventKey.startsWith("sms:") && !eventKey.startsWith("chat:");
+    // freshest non-call candidate (SMS thread or website chat) for the representative fallbacks
+    const latestAlt = async () => {
+      const [smsCv, chatCv] = await Promise.all([smsConvLatest(teamId), chatConvLatest(teamId)]);
+      const alts = [smsCv && { at: smsCv.at, render: () => renderSms(smsCv) }, chatCv && { at: chatCv.at, render: () => renderChat(chatCv) }];
+      return alts.filter(Boolean).sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))[0] || null;
+    };
     const order = " ORDER BY e.createdAt DESC LIMIT 1";
-    let row = eventKey && !eventKey.startsWith("sms:") ? await one(base + " AND (e.callId=" + lit(eventKey) + " OR e.id=" + lit(eventKey) + ")" + order) : null;
+    let row = keyed ? await one(base + " AND (e.callId=" + lit(eventKey) + " OR e.id=" + lit(eventKey) + ")" + order) : null;
     if (!row && !eventKey) {
-      // no explicit event → show whichever is more recent: the latest call or the latest SMS thread
+      // no explicit event → show whichever is most recent: latest call, SMS thread, or website chat
       row = await one(base + order);
-      const cv = await smsConvLatest(teamId);
-      if (cv && (!row || Date.parse(cv.at) > Date.parse(row.at))) return renderSms(cv);
+      const alt = await latestAlt();
+      if (alt && (!row || Date.parse(alt.at) > Date.parse(row.at))) return alt.render();
     }
     if (!row) {
       if (eventKey && strict) return null; // requested event didn't resolve — don't email a different customer
-      // matched key found no call, or rooftop has only SMS — fall back to the latest SMS thread
-      const cv = await smsConvLatest(teamId);
-      if (cv) return renderSms(cv);
+      // matched key found no call, or rooftop has only SMS/chat — fall back to the latest thread
+      const alt = await latestAlt();
+      if (alt) return alt.render();
       return null;
     }
     if (leadCapture) {
@@ -349,7 +400,8 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
 // sent-status from roi_event_emails. Read-only. emailType: post_appointment |
 // post_conversation | action_item | action_item_overdue.
 // Direction classifiers (→ 'inbound'|'outbound'): calls use report_inOutType; SMS uses whether the
-// conversation was agent-initiated (outboundTask/followup); appointments inherit their booking call's.
+// conversation was agent-initiated (outboundTask/followup); website chats are always inbound;
+// appointments inherit their booking call's.
 const CALL_DIR = (col) => "if(positionCaseInsensitive(ifNull(" + col + ",''),'out')>0,'outbound','inbound')";
 const SMS_DIR = "if(notEmpty(cv.outboundTaskId) OR notEmpty(cv.followupId),'outbound','inbound')";
 // A post_conversation SMS event requires a REAL customer reply — at least one human INBOUND
@@ -429,7 +481,27 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
         label: who + " — Text conversation", sub: r.direction === "outbound" ? "SMS · Outbound" : "SMS · Inbound",
       };
     }).filter(Boolean);
-    return [...calls, ...sms].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(off, off + lim);
+    // website chats (always inbound — the visitor opened the widget on the dealer's own site).
+    // Same reply gate as SMS; identity may be lead→customer OR the chat's own captured number,
+    // so unlike SMS a lead row isn't required. Skipped entirely on an outbound-only filter.
+    const chatSql =
+      "SELECT toString(cv.conversationId) eventKey, toString(cv.createdAt) createdAt, cu.name customer," +
+      " coalesce(nullIf(cu.mobile_number,''), cv.number) phone," +
+      " coalesce(nullIf(dm.dept,''),'sales') dept FROM dealer_leads.conversations cv" + CONV_IDENTITY +
+      " LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
+      " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='chat' AND ifNull(cv.isTest,0)=0" +
+      " AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,''))) AND cv.createdAt >= " + since +
+      " AND " + SMS_HAS_REPLY +
+      " ORDER BY cv.createdAt DESC LIMIT 1 BY cv.conversationId LIMIT " + (off + lim);
+    const chats = dir === "outbound" ? [] : (await runClickhouse(chatSql)).filter((r) => r.dept === dept).map((r) => {
+      const who = displayName(r);
+      if (!who) return null; // drop truly-anonymous junk (no name AND no phone)
+      return {
+        eventKey: "chat:" + r.eventKey, customer: who, phone: r.phone || "", createdAt: r.createdAt, direction: "inbound",
+        label: who + " — Website chat", sub: "Chat · Inbound",
+      };
+    }).filter(Boolean);
+    return [...calls, ...sms, ...chats].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(off, off + lim);
   }
 
   // action_item / action_item_overdue — lead level (matches the generator's lead:<id> grouping),
@@ -497,6 +569,15 @@ export async function countEventsCH({ sinceDays = 120 } = {}) {
     " WHERE cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since +
     " AND " + SMS_HAS_REPLY +
     " GROUP BY team_id, department, direction"), "total");
+  // website chats — replied threads, always inbound; a lead row OR a captured number is enough
+  // identity (mirrors listEventsCH so the grid total agrees with the drill-down rows).
+  fold(await runClickhouse(
+    "SELECT cv.teamId team_id, coalesce(nullIf(dm.dept,''),'sales') department," +
+    " 'inbound' direction, uniqExact(cv.conversationId) total, toString(max(cv.createdAt)) last_at" +
+    " FROM dealer_leads.conversations cv LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
+    " WHERE cv.type='chat' AND ifNull(cv.isTest,0)=0 AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,''))) AND cv.createdAt >= " + since +
+    " AND " + SMS_HAS_REPLY +
+    " GROUP BY team_id, department"), "total");
   for (const [k, v] of convAgg) { const [team_id, department, direction] = k.split("::"); out.push({ team_id, department, direction, email_type: "post_conversation", total: v.total, last_at: v.last_at }); }
   // action items (curated actionItems feed) — count distinct LEADS (one email per lead), split by the
   // lead's inferred call direction. Open and overdue (now that real due dates exist) are separate columns.
@@ -564,6 +645,14 @@ export async function countEventsByDayCH({ teamId, department, emailType, tz = "
       " AND coalesce(nullIf(dm.dept,''),'sales')=" + lit(dept) + " AND cv.createdAt >= " + since +
       " AND " + SMS_HAS_REPLY + " GROUP BY day");
     bump(sms, "created"); bump(sms, "eligible");
+    const chats = await runClickhouse(
+      "SELECT " + day("cv.createdAt") + " day, uniqExact(cv.conversationId) n" +
+      " FROM dealer_leads.conversations cv LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
+      " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='chat' AND ifNull(cv.isTest,0)=0" +
+      " AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,'')))" +
+      " AND coalesce(nullIf(dm.dept,''),'sales')=" + lit(dept) + " AND cv.createdAt >= " + since +
+      " AND " + SMS_HAS_REPLY + " GROUP BY day");
+    bump(chats, "created"); bump(chats, "eligible");
   } else {
     // action_item / action_item_overdue
     const aiScope = emailType === "action_item_overdue" ? "overdue" : "open";

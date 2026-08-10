@@ -4,7 +4,8 @@
  * Jun-2026 review, sends one email per NEW event:
  *
  *   post_appointment       — a new appointment was booked            (reporting-vini /api/meetings)
- *   post_conversation      — a call conversation happened            (reporting-vini /api/conversations)
+ *   post_conversation      — a call/SMS/website-chat conversation    (reporting-vini /api/conversations,
+ *                            channel=call | sms | chat)
  *   action_item            — a new action item was created/assigned  (reporting-vini /api/action-items?scope=recent)
  *   action_item_overdue    — an action item breached its SLA         (reporting-vini /api/action-items?scope=overdue)
  *
@@ -325,7 +326,7 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,post_conversation_template,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
+    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,chat_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,post_conversation_template,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
     sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
@@ -339,6 +340,7 @@ async function runOnce() {
                            // These used to be swallowed (out.errors++, continue) with no alert → the pipeline
                            // failed silently for 13 days. Now they raise a Slack alert like send failures do.
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
+  const chatDoneTeams = new Set(); // website-chat poll also runs once per team (chat has no dept either)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
   const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
 
@@ -702,6 +704,61 @@ async function runOnce() {
           }
         }
       }
+      // ── CHAT channel — website-chatbot threads (dealer_leads.conversations type='chat'; the
+      // bubbles share the SMS store, so the feed row looks like an SMS thread plus the widget's
+      // own analysis: summary, sentiment, outcome, booked-appointment flag, action items).
+      //
+      // LIVE-FOR-ALL-TEAMS GATING (deliberately NOT post_conversation_enabled): chat is a distinct,
+      // rare, high-intent surface (~tens/day fleet-wide vs hundreds of calls), so it must not
+      // inherit the call channel's noise controls. Rooftop gate = roi_rooftop_config.chat_enabled,
+      // DEFAULT ON (a missing row/column counts as enabled — set false to opt a rooftop out).
+      // Recipient matching likewise uses its own 'chat' subscription key (subscriptionType below,
+      // default ON for email): most seeded recipients carry an explicit post_conversation:false
+      // (call-summary noise), and riding that cell would silence chat for exactly the dealers with
+      // the most chat traffic (e.g. New Brighton Ford: 28 replied chats/30d, 0 post_conversation
+      // subscribers). EMAIL-ONLY for now — no smsBody, so the dealer-SMS channel never fires for
+      // chat (a new subscription key defaults SMS ON, which would text people who never opted in).
+      // Everything else that guards sends still applies: dealer dry_run, global DRY_RUN, churn
+      // gate, verified-recipient gate, and the roi_event_emails dedupe.
+      //
+      // A chat is a LIVE session — emailing on first sight would ship a half-finished thread — so a
+      // burst only emails once it SETTLES (quiet > EVENT_CHAT_SESSION_GAP_MIN), the backend marks
+      // the conversation completed, or the EOD flush. Same session mechanics as the SMS 'session'
+      // cadence; keys are conversation+day+session-start scoped, so a visitor who returns later
+      // the same day emails again with the new burst and dedupe holds across passes. A real
+      // visitor message is REQUIRED (hard gate, not config): the widget auto-greets on page view,
+      // so an all-AI thread is noise, not a conversation. Chat renders the standard conversation
+      // email everywhere for now (incl. lead_capture rooftops — the chat feed carries none of the
+      // lead-sheet sub-report fields, and a visitor-typed thread is the record the dealer works).
+      // Kill switch: EVENT_CHAT_CHANNEL=false (default ON). Once per team per pass (no dept split).
+      if (process.env.EVENT_CHAT_CHANNEL !== "false" && c.chat_enabled !== false && !chatDoneTeams.has(L.team_id)) {
+        chatDoneTeams.add(L.team_id);
+        const chatGapMin = Number(process.env.EVENT_CHAT_SESSION_GAP_MIN || 30);
+        const { h, m } = localHourMin(tz);
+        const isEod = h >= SMS_EOD_HOUR;
+        const day = localDateISO(tz);
+        const sinceMinChat = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
+        const jc = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=chat&minutes=${sinceMinChat}&limit=200`);
+        const nowC = Date.now();
+        // Defer to a same-pass appointment/action-item email for the same lead (same rule as the
+        // call/SMS paths) — that email already carries the chat lead's context.
+        const coveredLeadKeys = new Set(jobs.map((j) => j.leadMatchKey).filter(Boolean));
+        for (const cv of jc.conversations || []) {
+          if (!cv.hasReply) continue; // auto-greeting with no visitor reply — never email
+          const lmk = leadMatchKey({ leadId: cv.leadId, customer: cv.customer, phone: cv.phone });
+          if (lmk && coveredLeadKeys.has(lmk)) { out.post_conversation_suppressed++; continue; }
+          const allMsgs = (cv.sms || []).filter((x) => x && x.at).sort((a, b) => String(a.at).localeCompare(String(b.at)));
+          const done = String(cv.status || "") === "completed";
+          for (const s of smsSessions(allMsgs, chatGapMin)) {
+            if (!s.hasReply) continue;
+            if ((nowC - s._lastT) <= chatGapMin * 60000 && !isEod && !done) continue; // still active → wait
+            const conv = { ...cv, channel: "chat", sms: s.msgs.slice(-12) };
+            jobs.push({ type: "post_conversation", subscriptionType: "chat", key: `chat:${cv.id}:${day}:s${s.startAt}`,
+              subject: `Website chat — ${cv.customer || name}`,
+              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: conv, links: L_ }) });
+          }
+        }
+      }
     } catch (e) { out.errors++; feedFailures.push({ rooftop: name, dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); console.log(`  ✗ ${name} [${dept}] feed error: ${String(e).slice(0, 140)}`); continue; }
 
     // action_item / action_item_overdue are BATCHED across leads below — the same reasoning as
@@ -717,7 +774,10 @@ async function runOnce() {
         id = await claim({ ...base, email_type: job.type }, job.key);
         if (!id) { out.skipped_dupe++; continue; } // already handled in a prior pass
         // Recipients are chosen PER TYPE (subscription matrix + role tier), not per rooftop.
-        const emails = emailsForType(job.type);
+        // subscriptionType overrides the matrix key when a job's audience differs from its stored
+        // email_type — chat jobs store as post_conversation (tracker/dedupe grain) but match the
+        // 'chat' key so a recipient's call-noise opt-out doesn't silence chat.
+        const emails = emailsForType(job.subscriptionType || job.type);
         // Inject the open-tracking pixel now that we have the row id, so the stored
         // HTML and the sent bytes both carry it (id keys the open back to this row).
         const html = withPixel(job.html, id);
