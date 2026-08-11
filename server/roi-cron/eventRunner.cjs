@@ -569,15 +569,23 @@ async function runOnce() {
           //
           // endedReason='voicemail' is exact: across 7,125 such calls in that sample, 0 booked an
           // appointment and 0 resolved a query, so nothing of value is suppressed.
-          if (String(cv.endedReason || "").toLowerCase() === "voicemail") continue;
+          if (T.isNoConversation(cv.endedReason)) continue;
           // OUTBOUND REPLY GATE (applies to BOTH sales and service): only email if customer responded.
           // when enabled (default), skip outbound calls with no action items / appointments.
           if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
           // SUBSTANCE GATE — there must be something a human can actually read or act on.
+          //
+          // The summary check MUST go through T.cleanSummary(). `report_summary` is never literally
+          // blank in production (13,359/13,359 rows had a value), so a raw `String(cv.summary).trim()`
+          // test passes 100% of the time and is a no-op. What the model actually emits for a call with
+          // no conversation is an EMPTY SHELL — `[]`, `[,,]`, `["",""]` — which is a truthy string but
+          // renders as nothing. 47% of calls are shells like this; 3,710 of them over 3 days would have
+          // emailed, and none booked. cleanSummary resolves a shell to "" so this gate can see it, and
+          // it is the SAME function the template renders with, so gate and email cannot disagree.
+          //
           // A transcript deliberately does NOT count: a screener/IVR call transcribes the machine's
-          // words ("please record your message"), which is exactly the empty email this gate exists to
-          // stop. A summary, an action item, a booking or a resolved query all do count.
-          if (!(String(cv.summary || "").trim() || cv.hasActionItem || cv.appointmentScheduled || cv.queryResolved === true)) continue;
+          // words ("please record your message"), which is exactly the empty email being stopped.
+          if (!(T.cleanSummary(cv.summary) || cv.hasActionItem || cv.appointmentScheduled || cv.queryResolved === true)) continue;
           // spam gate — a call the model flagged as spam is never a real conversation. No-op until
           // the conversations feed surfaces `spam`; harmless when absent.
           if (cv.spam === true || cv.spam === "Yes") continue;

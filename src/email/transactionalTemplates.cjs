@@ -313,6 +313,56 @@ function recordingRow(url, durationSec, endedReason) {
 
 // Shared outcome classification — same priority order used by the full banner (below) and the
 // condensed batch row, so the two never drift on what counts as "needs follow-up" vs "logged".
+/* Summary values arrive from the feed as a JSON array STRING of sentences, e.g.
+ *   ["He asked about vehicles in a $350-425 budget.","He chose a pre-owned 2024 Accord."]
+ * The previous bracket-strip (`replace(/^\[\s*"?|"?\s*\]$/g,'')`) only removed the OUTER brackets, so
+ * every multi-sentence summary reached the dealer with the literal separator still in it:
+ *   …$350 to $425 monthly payment budget.","He expressed interest in sedans…
+ * That is live on effectively every post-conversation email. It also let the model's empty shells
+ * through: `[,,]` rendered as ",," and `["",""]` as ",".
+ *
+ * Parse it properly, and treat a value with no letters or digits as absent. `report_summary` is NEVER
+ * literally blank in production (13,359/13,359 rows had something), so "is there a summary?" MUST be
+ * asked through this function — a raw truthiness test on the field is always true and is therefore a
+ * no-op as a gate. eventRunner's substance gate calls this for exactly that reason. */
+function cleanSummary(raw) {
+  var s = String(raw == null ? "" : raw).trim();
+  if (!s) return "";
+  if (s.charAt(0) === "[") {
+    try {
+      var arr = JSON.parse(s);
+      if (Array.isArray(arr)) {
+        return arr.map(function (x) { return typeof x === "string" ? x.trim() : ""; }).filter(Boolean).join(" ");
+      }
+    } catch (e) { /* truncated or non-JSON — fall through to the textual unwrap */ }
+  }
+  s = s.replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").trim();
+  return /[A-Za-z0-9]/.test(s) ? s : "";
+}
+
+/* endedReason values that mean NO HUMAN EVER SPOKE on the call. Substring/exact set rather than a
+ * single `=== 'voicemail'` test, because production carries a whole family of these and an exact match
+ * silently missed most of them (measured over 3 days: voicemail_full 8, machine_ivr 41, no_answer 796,
+ * silence_timeout 294, pipeline_error 489, number_not_found 124, connection_failed 61, no_audio 39,
+ * busy 24 — 2,280 of which still emailed, and NOT ONE booked an appointment or resolved a query).
+ *
+ * `customer_declined` is deliberately NOT here: declining is a real human response, and a dealer may
+ * legitimately want to see it. Those calls are already handled — outbound ones by the reply gate, and
+ * the rest by the summary gate, since their summaries are empty shells. */
+var NO_CONVERSATION_ENDED_REASONS = {
+  voicemail: 1, voicemail_full: 1, machine_ivr: 1,          // reached a machine
+  no_answer: 1, busy: 1,                                     // nobody picked up
+  number_not_found: 1, connection_failed: 1, no_audio: 1,    // never actually connected
+  pipeline_error: 1,                                         // technical failure, not a conversation
+  silence_timeout: 1,                                        // connected, but nobody ever spoke
+};
+function isNoConversation(endedReason) {
+  var er = String(endedReason || "").trim().toLowerCase().replace(/-/g, "_");
+  if (!er) return false;
+  if (NO_CONVERSATION_ENDED_REASONS[er]) return true;
+  return er.indexOf("voicemail") >= 0; // catches any future voicemail_* variant
+}
+
 // Priority: booked > voicemail/no-answer > transferred > needs-follow-up > callback > resolved > logged.
 //
 // "No live contact" is checked SECOND, ahead of needs-follow-up, and that ordering is deliberate. A
@@ -360,7 +410,7 @@ function renderPostConversation(opts) {
   var L = opts.links || {};
   var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
   var tz = opts.tz;
-  var summary = String(c.summary || "").replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").trim();
+  var summary = cleanSummary(c.summary); // JSON-array shell -> readable prose; empty shells -> ""
   var isSms = c.channel === "sms";
   var isChat = c.channel === "chat"; // website-chatbot thread — same bubbles as SMS, its own labels
 
@@ -1330,6 +1380,9 @@ function renderDigestSms(opts) {
 }
 
 module.exports = {
+  // shared with eventRunner so the send GATE and the RENDER can never disagree about
+  // whether a conversation has a real summary / was a real conversation.
+  cleanSummary, isNoConversation,
   renderPostAppointment: renderPostAppointment,
   renderPostConversation: renderPostConversation,
   renderActionItem: renderActionItem,
