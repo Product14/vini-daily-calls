@@ -405,8 +405,11 @@ async function runOnce() {
     const jobs = [];
     try {
       if (c.post_appointment_enabled && !leadCapture) {
-        const day = localDateISO(tz); // dealer-local "today", not UTC
-        const j = await apiJson(`/api/meetings?scope=window&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&start=${day}&end=${day}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
+        // Query for appointments created in the last POLL_MINUTES, not meetings scheduled for today.
+        // This ensures booked-but-future-scheduled appointments (e.g. booked today, appointment next month)
+        // still trigger an email. scope=recent + minutes=25 means: fetch meeting records where createdAt
+        // is within the last 25 minutes, regardless of when the meeting is scheduled.
+        const j = await apiJson(`/api/meetings?scope=recent&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&minutes=${POLL_MINUTES}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
         const mtd = await apptMTD(L.team_id, dept);
         for (const m of (j.meetings || []).slice(0, 50)) {
           if (!m.id) continue;
@@ -419,6 +422,9 @@ async function runOnce() {
             customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
             type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
             transportation: m.transportation || m.transportationOption, status: m.status, byVini, recordingUrl: m.recordingUrl,
+            bookedAt: m.bookedAt,  // when the appointment was created
+            assignedTo: m.assignedTo,  // who booked it
+            leadId: m.leadId,  // link to the lead for context
           };
           jobs.push({ type: "post_appointment", key: m.id,
             subject: `${byVini ? "Vini booked an appointment" : "New appointment"} — ${name}`,
@@ -483,61 +489,39 @@ async function runOnce() {
             leadMatchKey: leadMatchKey({ leadId: seed.leadId || seed.lead_id, customer: lead.customer, phone: lead.phone }) });
         }
       }
-      // Scheduled 2x/day report (before-open + EOD, real dealer hours) instead of a continuous
-      // per-pass rebatch — an SLA is already breached, so a report on the dealer's own rhythm beats
-      // a ping every few minutes. Outside the two slots, this whole block is skipped: no fetch, no
-      // build — the feed is no longer polled all day, only at the two times that matter.
+      // Scheduled 2x/day digest (before-open + EOD, real dealer hours) — a single email per team·dept·slot
+      // showing the total count + recent list of overdue items. No individual per-lead emails (which flooded
+      // to 9k+/day). The SLA is already breached, so a digest on the dealer's own rhythm is more useful than
+      // per-item spam. Outside the two slots, this whole block is skipped: no fetch, no build.
       if (c.action_item_overdue_enabled && overdueSlot && !leadCapture) {
         const [j, openForStat] = await Promise.all([
           fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=overdue`),
           fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`),
         ]);
         const overdue = j.actionItems || [];
-        // Paginated above (fetchAllActionItems) — a rooftop's full overdue backlog is fetched
-        // regardless of size. `capped` only fires if it exceeds the pagination safety backstop
-        // (2000 items), which is surfaced rather than silently dropped.
         if (j.capped || openForStat.capped) {
           out.action_items_feed_capped++;
-          console.warn(`  ⚠ ${name} [${dept}] overdue feed hit the pagination safety cap (${ACTION_ITEMS_MAX_PAGES * ACTION_ITEMS_PAGE_LIMIT}+ items) — some overdue leads may be invisible this pass`);
+          console.warn(`  ⚠ ${name} [${dept}] overdue feed hit cap — some items may be invisible`);
         }
-        // Rooftop-wide "total pending" for the report's one aggregate line — already filtered to
-        // actionable items by fetchAllActionItems, so this can't be inflated by lost-lead noise.
+        const totalOverdueCount = overdue.length;
         const totalPendingAllLeads = openForStat.total;
-        // LEAD-LEVEL escalation: group a customer's overdue items into ONE red email so the
-        // manager sees "who's been waiting too long". Re-escalates once per lead per SLOT (not
-        // per day) — a lead can appear in both the before-open and the EOD report if still overdue.
-        const leadKey = (it) => it.leadId || it.lead_id || it.customer || it.id;
-        const byLead = new Map();
-        for (const it of overdue) { const k = leadKey(it); const g = byLead.get(k) || []; g.push(it); byLead.set(k, g); }
-        // Same requested-time enrichment as the new-item email above — the overdue report is where a
-        // dated ask matters MOST ("asked for tomorrow at 9" days ago), so the template stamps the
-        // call date next to it via requestedTimeAt.
-        const apptAsks = await leadCaptureCH.fetchApptAsksByLead(L.team_id, [...byLead.keys()]);
-        const dayKey = localDateISO(tz);
-        for (const [k, items] of byLead) {
-          const seed = items[0] || {};
-          const lead = {
-            customer: seed.customer || seed.leadName, phone: seed.phone, vehicle: seed.vehicle,
-            source: seed.leadSource || seed.source, stage: seed.stage,
-            aiScore: seed.aiScore, grade: seed.grade, sentiment: seed.sentiment, sentimentScore: seed.sentimentScore,
-            lastSummary: seed.lastSummary || seed.conversationSummary,
-          };
-          const ask = apptAsks.get(String(k));
-          if (ask) {
-            lead.requestedTime = ask.requestedTime;
-            lead.requestedTimeAt = ask.at;
-            lead.requestedTimeBooked = ask.booked;
-          }
-          const oldest = items.map((x) => x.dueAt).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0];
-          jobs.push({ type: "action_item_overdue", key: `lead:${k}:overdue:${dayKey}:${overdueSlot}`,
-            subject: `Overdue — ${lead.customer || name}`,
-            html: T.renderActionItemOverdue({ rooftopName: name, dept, tz, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
-            smsBody: T.renderActionItemOverdueSms({ rooftopName: name, dept, lead, items, oldestDueAt: oldest, totalOverdue: items.length, links: L_ }),
-            smsLead: { customer: lead.customer, phone: lead.phone, vehicle: lead.vehicle, items, oldestDueAt: oldest, totalOverdue: items.length,
-              requestedTime: lead.requestedTime, requestedTimeBooked: lead.requestedTimeBooked },
-            emailLead: { ...lead, items, oldestDueAt: oldest, totalOverdue: items.length },
-            totalPendingAllLeads,
-            leadMatchKey: leadMatchKey({ leadId: seed.leadId || seed.lead_id, customer: lead.customer, phone: lead.phone }) });
+        if (totalOverdueCount > 0) {
+          // ONE digest per team·dept·slot (not per lead) — shows count + top ~10 most-urgent items
+          const dayKey = localDateISO(tz);
+          // Sort by dueAt (oldest first = most overdue) and take top items for the list
+          const topItems = overdue
+            .sort((a, b) => {
+              const adue = a.dueAt ? new Date(a.dueAt).getTime() : Infinity;
+              const bdue = b.dueAt ? new Date(b.dueAt).getTime() : Infinity;
+              return adue - bdue;
+            })
+            .slice(0, 10); // Show 10 most urgent per digest
+          jobs.push({ type: "action_item_overdue", key: `rooftop:${L.team_id}:${dept}:overdue:${dayKey}:${overdueSlot}`,
+            subject: `Overdue items — ${totalOverdueCount} pending · ${name}`,
+            html: T.renderOverdueActionItemsDigest({ rooftopName: name, dept, tz, topItems, totalOverdueCount, totalPendingAllLeads, links: L_ }),
+            smsBody: T.renderOverdueActionItemsDigestSms({ rooftopName: name, dept, topItems, totalOverdueCount, links: L_ }),
+            // Rooftop-level digest (not per-lead) — no leadMatchKey
+          });
         }
       }
       // post_conversation runs LAST (after post_appointment/action_item/action_item_overdue above)

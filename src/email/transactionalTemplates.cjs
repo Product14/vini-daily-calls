@@ -54,6 +54,17 @@ function formatPhone(raw) {
   if (d.length === 10) return "+1 (" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
   return hadPlus ? "+" + d : d;
 }
+function formatDateTime(iso, tz) {
+  if (!iso) return "";
+  try {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    var fmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "UTC" });
+    return fmt.format(d);
+  } catch (e) {
+    return "";
+  }
+}
 function money(n) { n = Number(n) || 0; return "$" + n.toLocaleString("en-US"); }
 function btnPrimary(label, href) {
   return '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:' + VIOLET + ';color:#fff;text-decoration:none;font-size:13px;font-weight:700;padding:12px 22px;border-radius:10px;">' + esc(label) + " &nbsp;&#8599;</a>";
@@ -136,6 +147,8 @@ function renderPostAppointment(opts) {
         detail("For", a.intent ? humanizeIntent(a.intent) : "") +
         detail("Vehicle", a.vehicle && a.vehicle !== "—" ? a.vehicle : "") +
         detail("Transport", a.transportation) +
+        (a.bookedAt ? detail("Booked at", formatDateTime(a.bookedAt, opts.tz)) : "") +
+        (a.assignedTo ? detail("Booked by", a.assignedTo) : "") +
       "</table>" +
     "</td></tr></table>" +
     recordingRow(a.recordingUrl, null, null) +
@@ -950,6 +963,7 @@ function renderPostAppointmentSms(opts) {
   if (a.when) lines.push(a.when);
   if (a.vehicle) lines.push("Vehicle: " + a.vehicle);
   if (a.intent) lines.push(humanizeIntent(a.intent));
+  if (a.bookedAt) lines.push("Booked: " + formatDateTime(a.bookedAt, opts.tz));
   lines.push("Details: " + url);
   return lines.join("\n");
 }
@@ -1088,6 +1102,79 @@ function renderActionItemBatchSms(opts) {
 }
 
 /**
+ * Overdue action items DIGEST — rooftop-wide, sent 2x/day (AM + EOD). Shows total count +
+ * top N most-urgent (oldest-due-first) items in a scannable list. One email per team·dept·slot,
+ * not per-lead. Replaces the old per-lead overdue emails (which flooded to 9k+/day).
+ * opts: { rooftopName, dept, tz, topItems:[{customer,phone,vehicle,intent,dueAt,description},...],
+ *   totalOverdueCount, totalPendingAllLeads, links }
+ */
+function renderOverdueActionItemsDigest(opts) {
+  opts = opts || {};
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  var items = (Array.isArray(opts.topItems) ? opts.topItems : []).filter(Boolean);
+  var total = Number(opts.totalOverdueCount) || 0;
+  var totalPending = Number(opts.totalPendingAllLeads) || 0;
+  var shown = items.slice(0, 10);
+  var hidden = Math.max(0, total - shown.length);
+
+  // Red banner: total count + "resolve now"
+  var banner = '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:16px;"><tr><td style="padding:12px 16px;font-size:13px;font-weight:800;color:' + NEG + ';">' +
+    "&#9888; " + fmtInt(total) + " action item" + (total === 1 ? "" : "s") + " past SLA — resolve now." +
+    (totalPending > 0 ? '<div style="font-size:11.5px;font-weight:600;color:' + BODY + ';margin-top:4px;">' + fmtInt(totalPending) + " total pending action item" + (totalPending === 1 ? "" : "s") + " rooftop-wide</div>" : "") +
+    "</td></tr></table>";
+
+  // Item list: customer + top detail + age
+  var itemCards = shown.map(function (it) {
+    var age = it.dueAt ? overdueAge(it.dueAt) : "";
+    var label = (it.intent && humanizeIntent(it.intent)) || it.description || "Follow-up";
+    var name = (it.customer || "Customer").trim();
+    var row = '<tr style="border-bottom:1px solid ' + LINE + ';" valign="top"><td style="padding:12px 16px;font-size:12px;"><div style="font-weight:600;color:' + BODY + ';">' +
+      esc(name) + (it.phone ? ' <span style="color:' + MUTE + ';">' + esc(formatPhone(it.phone)) + '</span>' : '') + '</div>' +
+      '<div style="color:' + MUTE + ';margin-top:3px;">' + esc(label) + (age ? ' · ' + esc(age) : '') + '</div>' +
+      (it.vehicle ? '<div style="color:' + MUTE + ';margin-top:2px;font-size:11px;">' + esc(it.vehicle) + '</div>' : '') +
+      '</td></tr>';
+    return row;
+  }).join("");
+
+  var itemTable = items.length > 0 ? '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;overflow:hidden;">' +
+    itemCards + '</table>' : '';
+
+  var moreNote = hidden > 0 ? '<div style="margin-top:12px;padding:12px 16px;font-size:12px;color:' + MUTE + ';border:1px dashed ' + LINE + ';border-radius:12px;text-align:center;">+' + fmtInt(hidden) + " more item" + (hidden === 1 ? "" : "s") + " — view all in the console</div>" : '';
+
+  var body = banner + itemTable + moreNote + '<div style="margin-top:14px;">' + btnPrimary("Resolve now", url) + "</div>";
+  var title = fmtInt(total) + " overdue action item" + (total === 1 ? "" : "s");
+  return stampValue(shell(opts, "Overdue · digest", title, body), total > 0);
+}
+
+/**
+ * Overdue action items DIGEST SMS — concise list of top items + count. Same data shape.
+ * opts: { rooftopName, topItems:[{customer,phone,intent,dueAt,...},...], totalOverdueCount, links }
+ */
+function renderOverdueActionItemsDigestSms(opts) {
+  opts = opts || {};
+  var L = opts.links || {};
+  var url = L.actionItems || L.console || "https://console.spyne.ai/converse-ai";
+  var items = (Array.isArray(opts.topItems) ? opts.topItems : []).filter(Boolean);
+  var total = Number(opts.totalOverdueCount) || 0;
+  var shown = items.slice(0, 5);
+
+  var lines = [
+    "OVERDUE" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
+    total + " action item" + (total === 1 ? "" : "s") + " past SLA:",
+  ];
+  shown.forEach(function (it) {
+    var age = it.dueAt ? overdueAge(it.dueAt) : "";
+    var label = (it.intent && humanizeIntent(it.intent)) || it.description || "Follow-up";
+    var phone = formatPhone(it.phone);
+    lines.push("- " + (it.customer || "Customer") + (phone ? " " + phone : "") + (age ? " · " + age : "") + " · " + label);
+  });
+  if (total > shown.length) lines.push("+" + (total - shown.length) + " more");
+  lines.push("Resolve now: " + url);
+  return lines.join("\n");
+}
+
+/**
  * Post-conversation SMS — one terse line about a call/text + the strongest outcome + a link.
  * opts: { rooftopName, dept, conversation:{customer,channel,direction,summary,intent,
  *   appointmentScheduled,actionItems}, links }
@@ -1199,6 +1286,8 @@ module.exports = {
   renderActionItemBatchSms: renderActionItemBatchSms,
   renderActionItemBatch: renderActionItemBatch,
   renderActionItemOverdueBatch: renderActionItemOverdueBatch,
+  renderOverdueActionItemsDigest: renderOverdueActionItemsDigest,
+  renderOverdueActionItemsDigestSms: renderOverdueActionItemsDigestSms,
   renderPostConversationBatch: renderPostConversationBatch,
   renderPostConversationBatchSms: renderPostConversationBatchSms,
   renderLeadCapture: renderLeadCapture,
