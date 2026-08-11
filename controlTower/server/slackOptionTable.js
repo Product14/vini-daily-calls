@@ -75,19 +75,14 @@ export function buildTableHtml(p) {
   const sumMtd = (key) => AGENTS.reduce((s, a) => s + (Number(mtd(a, key)) || 0), 0);
   const sumArr = (key) => AGENTS.reduce((s, a) => s + (Number(A[a]?.[key]) || 0), 0);
 
+  // User 12-Aug: slimmed Slack table — removed CARR/In OB/Live ARR/Live agents,
+  // Leads, % All Clear, Blocked ARR; Warm leads → Qualified Leads.
   const rows = [
-    { label: "CARR",         fmt: money, arrKey: "cArr",   overall: money(sumArr("cArr")) },
-    { label: "In OB",        fmt: money, arrKey: "obArr",  overall: money(sumArr("obArr")) },
-    { label: "Live ARR",     fmt: money, arrKey: "liveArr",overall: money(sumArr("liveArr")) },
-    { label: "Live agents",  fmt: num,   key: "liveAgents", overall: num(f.live.agents) },
-    { label: "% Green",      fmt: pct,   key: "pctGreen",   overall: pct(rag.total ? rag.green / rag.total : null) },
-    { label: "Leads",        fmt: num,   key: "leads",     showMtd: true, overall: num(sumD1("leads")),     overallMtd: num(sumMtd("leads")) },
-    { label: "Warm leads",   fmt: num,   key: "warmLeads", showMtd: true, overall: num(sumD1("warmLeads")), overallMtd: num(sumMtd("warmLeads")) },
-    { label: "Appointments", fmt: num,   key: "appts",  cond: "appts", showMtd: true, overall: num(sumD1("appts")), overallVal: sumD1("appts"), overallMtd: num(sumMtd("appts")) },
-    { label: "ABR",          fmt: pct1,  key: "abr",    cond: "abr",   showMtd: true, overall: pct1(sumD1("leads") ? sumD1("appts") / sumD1("leads") : null), overallVal: sumD1("leads") ? sumD1("appts") / sumD1("leads") : null, overallMtd: pct1(sumMtd("leads") ? sumMtd("appts") / sumMtd("leads") : null) },
-    { label: "ROI Multiple", fmt: mult,  key: "roiMultiple", useMtd: true, overall: "—" },
-    { label: "% All Clear",  fmt: pct,   key: "pctAllClear",overall: "—" },
-    { label: "Blocked ARR",  fmt: money, key: "arrBlocked", overall: money(sumD1("arrBlocked")) },
+    { label: "% Green",         fmt: pct,   key: "pctGreen",   overall: pct(rag.total ? rag.green / rag.total : null) },
+    { label: "Qualified Leads", fmt: num,   key: "qualified", showMtd: true, overall: num(sumD1("qualified")), overallMtd: num(sumMtd("qualified")) },
+    { label: "Appointments",    fmt: num,   key: "appts",  cond: "appts", showMtd: true, overall: num(sumD1("appts")), overallVal: sumD1("appts"), overallMtd: num(sumMtd("appts")) },
+    { label: "ABR",             fmt: pct1,  key: "abr",    cond: "abr",   showMtd: true, overall: pct1(sumD1("leads") ? sumD1("appts") / sumD1("leads") : null), overallVal: sumD1("leads") ? sumD1("appts") / sumD1("leads") : null, overallMtd: pct1(sumMtd("leads") ? sumMtd("appts") / sumMtd("leads") : null) },
+    { label: "ROI Multiple",    fmt: mult,  key: "roiMultiple", useMtd: true, overall: "—" },
   ];
 
   const cellColor = (label) =>
@@ -142,7 +137,7 @@ export function buildTableHtml(p) {
         <div style="display:flex; gap:14px;">
           ${chip({ label: "Live ARR", value: money(f.live.arr), sub: `${mrr(f.live.arr)} · ${num(f.live.agents)} agents${p.overallArrDeltas?.liveArr ? ` · <span style="color:${dColorLight(p.overallArrDeltas.liveArr)}; font-weight:800;">${signedMoney(p.overallArrDeltas.liveArr)} d/d</span>` : ""}`, bg: PAL.chipBlue, valueColor: PAL.blue })}
           ${chip({ label: "In OB",    value: money(f.ob.arr),   sub: `${num(f.ob.agents)} agents`,          bg: PAL.chipGray })}
-          ${chip({ label: "Churn",    value: money(f.churned.arr), sub: `${num(f.churned.agents)} agents`,  bg: PAL.chipRed,   valueColor: PAL.red })}
+          ${chip({ label: "Churn MTD", value: money(f.churned.arr), sub: `${num(f.churned.agents)} agents`,  bg: PAL.chipRed,   valueColor: PAL.red })}
           ${chip({ label: "% Green",  value: pct(rag.total ? rag.green / rag.total : null), sub: `${rag.green}G · ${rag.amber}A · ${rag.red}R`, bg: PAL.chipGreen, valueColor: PAL.green })}
         </div>
 
@@ -156,11 +151,6 @@ export function buildTableHtml(p) {
           </tr>
           ${bodyRows}
         </table>
-
-        <div style="margin-top:18px; font-size:15px; color:${PAL.soft}; line-height:1.6;">
-          Big figure = yesterday (${p.asOfDate}); "MTD" = month-to-date (Leads / Appointments / ABR, which accrue); "d/d" = day-on-day movement vs the prior report (on CARR / In OB / Live ARR). Live agents, % Green, ROI, Blocked ARR are current snapshots. MRR = ARR ÷ 12.
-          Overall = sum for counts &amp; ARR, portfolio rate for %/ratios. % All Clear blanks where the Superbryn quality feed has no recent calls.
-        </div>
       </div>
     </div>
   </body></html>`;
