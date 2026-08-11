@@ -79,6 +79,7 @@ export function buildTableHtml(p) {
   // Leads, % All Clear, Blocked ARR; Warm leads → Qualified Leads.
   const rows = [
     { label: "% Green",         fmt: pct,   key: "pctGreen",   overall: pct(rag.total ? rag.green / rag.total : null) },
+    { label: "Leads",           fmt: num,   key: "leads",     showMtd: true, overall: num(sumD1("leads")),     overallMtd: num(sumMtd("leads")) },
     { label: "Qualified Leads", fmt: num,   key: "qualified", showMtd: true, overall: num(sumD1("qualified")), overallMtd: num(sumMtd("qualified")) },
     { label: "Appointments",    fmt: num,   key: "appts",  cond: "appts", showMtd: true, overall: num(sumD1("appts")), overallVal: sumD1("appts"), overallMtd: num(sumMtd("appts")) },
     { label: "ABR",             fmt: pct1,  key: "abr",    cond: "abr",   showMtd: true, overall: pct1(sumD1("leads") ? sumD1("appts") / sumD1("leads") : null), overallVal: sumD1("leads") ? sumD1("appts") / sumD1("leads") : null, overallMtd: pct1(sumMtd("leads") ? sumMtd("appts") / sumMtd("leads") : null) },
@@ -137,7 +138,6 @@ export function buildTableHtml(p) {
         <div style="display:flex; gap:14px;">
           ${chip({ label: "Live ARR", value: money(f.live.arr), sub: `${mrr(f.live.arr)} · ${num(f.live.agents)} agents${p.overallArrDeltas?.liveArr ? ` · <span style="color:${dColorLight(p.overallArrDeltas.liveArr)}; font-weight:800;">${signedMoney(p.overallArrDeltas.liveArr)} d/d</span>` : ""}`, bg: PAL.chipBlue, valueColor: PAL.blue })}
           ${chip({ label: "In OB",    value: money(f.ob.arr),   sub: `${num(f.ob.agents)} agents`,          bg: PAL.chipGray })}
-          ${chip({ label: "Churn MTD", value: money(f.churned.arr), sub: `${num(f.churned.agents)} agents`,  bg: PAL.chipRed,   valueColor: PAL.red })}
           ${chip({ label: "% Green",  value: pct(rag.total ? rag.green / rag.total : null), sub: `${rag.green}G · ${rag.amber}A · ${rag.red}R`, bg: PAL.chipGreen, valueColor: PAL.green })}
         </div>
 
