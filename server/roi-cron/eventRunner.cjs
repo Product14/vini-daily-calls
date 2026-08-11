@@ -556,11 +556,11 @@ async function runOnce() {
         const bestByLead = new Map();
         const chosen = []; // [{ key, cv, subject }] — one entry per email this pass, in either mode
         for (const cv of j.conversations || []) {
-          // outbound: only when customer was connected (not voicemail) and either responded or config allows all.
-          // voicemail calls (connected=false) never trigger emails regardless of action items.
+          // OUTBOUND GATE (applies to BOTH sales and service): skip voicemail/no-answer calls entirely.
+          // voicemail calls (connected=false, duration=0) never trigger emails.
           if (cv.direction === "outbound" && !cv.connected) continue;
-          // outbound: further require reply gate (config: post_conversation_outbound_requires_reply).
-          // when enabled, skip outbound calls with no action items / appointments (customer didn't respond).
+          // OUTBOUND REPLY GATE (applies to BOTH sales and service): only email if customer responded.
+          // when enabled (default), skip outbound calls with no action items / appointments.
           if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
           // spam gate — a call the model flagged as spam is never a real conversation. No-op until
           // the conversations feed surfaces `spam`; harmless when absent.
