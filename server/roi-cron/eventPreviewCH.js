@@ -33,7 +33,10 @@ function durationSec(startIso, endIso) {
   const a = Date.parse(startIso), b = Date.parse(endIso);
   return a && b && b > a ? Math.round((b - a) / 1000) : 0;
 }
-// human "When" + relative-day for an appointment, in the dealer's tz
+// human "When" + relative-day for an appointment, in the dealer's tz.
+// Off-year dates MUST carry the year and MUST NOT return a relDay: the appointment email leads with
+// relDay, which has no year, so a 2024-12-21 slot rendered as "Sat, Dec 21 · 11:00 AM" and the dealer
+// read it as a future date (Honda of Downtown LA, Aug 2026). Mirrors schedInfo() in eventRunner.cjs.
 function fmtWhen(dt, tz) {
   if (!dt) return { when: "", relDay: "", time: "" };
   const d = new Date(String(dt).replace(" ", "T") + (String(dt).endsWith("Z") ? "" : "Z"));
@@ -43,8 +46,10 @@ function fmtWhen(dt, tz) {
   const time = new Intl.DateTimeFormat("en-US", { timeZone: z, hour: "numeric", minute: "2-digit", hour12: true }).format(d);
   const today = day(new Date()), that = day(d);
   const tmr = day(new Date(Date.now() + 864e5));
-  const relDay = that === today ? "Today" : that === tmr ? "Tomorrow" : new Intl.DateTimeFormat("en-US", { timeZone: z, weekday: "short", month: "short", day: "numeric" }).format(d);
-  return { when: relDay + " · " + time, relDay, time };
+  const offYear = that.slice(0, 4) !== today.slice(0, 4);
+  const dated = new Intl.DateTimeFormat("en-US", { timeZone: z, weekday: "short", month: "short", day: "numeric", ...(offYear ? { year: "numeric" } : {}) }).format(d);
+  const relDay = that === today ? "Today" : that === tmr ? "Tomorrow" : dated;
+  return { when: (offYear ? dated : relDay) + " · " + time, relDay: offYear ? "" : relDay, time };
 }
 
 // Identity resolution defends against SharedReplacingMergeTree duplicate rows: a plain any()
