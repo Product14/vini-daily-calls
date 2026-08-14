@@ -68,6 +68,10 @@ function isUSActiveWindow(d = new Date()) {
 // margin, or events arriving in the gap are lost forever. The earlier `isUSBusinessHour() ? 4 : 20`
 // was a silent data-loss bug: a 4-min look-back under a 15-min cron dropped 11 min of events/cycle.
 const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 25);
+// meetings.meta.source values that mean "this appointment row is not one Vini booked" — no
+// post_appointment email, on either channel. Kept as a set so a sibling value can be muted with a
+// one-word change; 'callback' is deliberately NOT in here (it hasn't been asked for or verified).
+const NON_VINI_META_SOURCES = new Set(["warm_transfer"]);
 // SMS post-conversation is batched to END OF DAY (the thread runs all day, so one email per lead/day
 // instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
 const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
@@ -333,7 +337,10 @@ async function runOnce() {
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0 };
+  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0,
+    // Appointment rows dropped because meta.source says Vini didn't book them. Counted (not silent)
+    // so a rooftop whose feed is full of warm_transfer rows shows up in the pass summary.
+    appt_skipped_not_ours: 0 };
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
   const feedFailures = []; // upstream FEED errors (per rooftop/dept) — the pass couldn't even fetch events.
@@ -411,12 +418,29 @@ async function runOnce() {
         // is within the last 25 minutes, regardless of when the meeting is scheduled.
         const j = await apiJson(`/api/meetings?scope=recent&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&minutes=${POLL_MINUTES}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
         const mtd = await apptMTD(L.team_id, dept);
-        for (const m of (j.meetings || []).slice(0, 50)) {
+        const candidates = (j.meetings || []).slice(0, 50);
+        // meta.source per meeting — the feed doesn't carry it, so it's resolved from ClickHouse.
+        // See NON_VINI_META_SOURCES for what it's for. Best-effort: no creds / lookup failure →
+        // empty Map → nothing is gated, exactly as before.
+        const metaSrc = await leadCaptureCH.fetchMeetingMetaSource(L.team_id, candidates.map((m) => m && m.id));
+        for (const m of candidates) {
           if (!m.id) continue;
           // Only surface VINI-booked appointments (source='spyne'). Skip known BDC/CRM bookings —
           // a "Vini booked you an appointment" email about the dealer's own booking is noise.
           // (When the feed doesn't report source yet, keep firing with a generic label.)
           if (m.source && m.source !== "spyne") continue;
+          // …and `source='spyne'` alone is NOT proof Vini made the booking. meta.source says how the
+          // row came to exist: 'warm_transfer' rows are appointments Vini did not create, pulled in
+          // around a transfer, so an email about one announces a booking that never happened.
+          // Honda of Downtown Los Angeles, 2026-08-14: all 7 of the "New appointment" emails a
+          // manager received for ONE customer in 6 seconds were warm_transfer rows (start times
+          // Jul-2024 → Jan-2026 — her own past service visits).
+          const meta = String(metaSrc.get(String(m.id)) || "").toLowerCase();
+          if (NON_VINI_META_SOURCES.has(meta)) {
+            out.appt_skipped_not_ours++;
+            console.log(`  · ${name} [${dept}] appointment ${m.id} skipped — meta.source=${meta} (not booked by Vini)`);
+            continue;
+          }
           const byVini = m.source === "spyne";
           const apptData = {
             customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,

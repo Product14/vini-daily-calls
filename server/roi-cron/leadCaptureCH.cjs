@@ -502,6 +502,46 @@ async function fetchApptAsksByCall(teamId, callIds) {
   return out;
 }
 
+/**
+ * meta.source per meeting — how the appointment row came to exist, which is NOT the same thing as
+ * `meetings.source` ('spyne' vs 'bdc', i.e. who owns the booking). A row can be source='spyne' and
+ * still not be something Vini booked: 'warm_transfer' rows are the dealer's existing appointments
+ * pulled in around a transfer, so an email about one announces an appointment nobody just made.
+ *
+ * The reporting-vini /api/meetings feed doesn't carry meta at all (neither the live shape nor the
+ * report_appointments snapshot has the field), so the send path resolves it here, straight from
+ * ClickHouse, keyed on the same meeting id the feed hands back.
+ *
+ * Map<meetingId, metaSource> — dual-keyed on meeting_id AND _id because the feed's `id` is one or
+ * the other per row. Ids absent from the Map have no meta.source (or ClickHouse was unreachable);
+ * the caller treats that as "send", so an outage can never silently mute real appointments.
+ */
+async function fetchMeetingMetaSource(teamId, meetingIds) {
+  const ids = [...new Set((meetingIds || []).filter(Boolean).map(String))];
+  if (!hasCreds() || !teamId || !ids.length) return new Map();
+  const inList = "(" + ids.map(lit).join(",") + ")";
+  const sql =
+    "SELECT toString(m.meeting_id) meetingId, toString(m._id) rowId," +
+    // SharedReplacingMergeTree keeps duplicate physical rows and an early version can carry an empty
+    // meta — prefer a populated value across them (same defence as IDENTITY_JOINS elsewhere).
+    " anyIf(JSONExtractString(m.meta,'source'), notEmpty(JSONExtractString(m.meta,'source'))) metaSource" +
+    " FROM dealer_leads.meetings m" +
+    // TEAM-SCOPED: a meeting id that isn't this rooftop's returns nothing. Cross-rooftop isolation.
+    " WHERE m.team_id=" + lit(teamId) + " AND (m.meeting_id IN " + inList + " OR m._id IN " + inList + ")" +
+    " GROUP BY meetingId, rowId";
+  let rows;
+  try { rows = await chQuery(sql); }
+  catch (e) { console.warn("[appt-meta] ClickHouse meeting lookup failed:", String(e).slice(0, 160)); return new Map(); }
+  const out = new Map();
+  for (const r of rows) {
+    const src = String(r.metaSource || "").trim();
+    if (!src) continue;
+    if (r.meetingId) out.set(String(r.meetingId), src);
+    if (r.rowId) out.set(String(r.rowId), src);
+  }
+  return out;
+}
+
 const SMS_FAILED = new Set(["failed", "undelivered", "error"]);
 const isInboundSms = (m) => m && (m.direction === "in" || m.direction === "inbound");
 
@@ -544,7 +584,7 @@ function buildSmsLead(callLead, seed, msgs) {
 }
 
 module.exports = {
-  fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, fetchApptAsksByCall,
+  fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, fetchApptAsksByCall, fetchMeetingMetaSource,
   leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
   extractZip, pickApptWhen, pickApptRequest, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };
