@@ -1,8 +1,18 @@
 # ABR Trends (`/abr-trends`)
 
-> **Now covers calls as well as SMS.** `vini_funnel_base.sql` is the channel-aware spine;
-> the three `vini_funnel_extract_*.sql` files are what the dashboard is built from. The
-> `vini_sms_*.sql` files are the SMS-only predecessors, kept for reference.
+> **Live at `/abr-trends`.** The page is `AbrTrends.tsx`; data comes precomputed from
+> `GET /api/abr-trends`, refreshed by the `abr-trends-refresh` cron every 30 min.
+>
+> **The runtime SQL lives in `server/`, not here** — `server/abrTrendsBase.sql` is the
+> channel-aware spine (parameterised with `{START}`/`{END}`) and `server/abrTrends.js`
+> appends the extract SELECTs, runs them and packs the payload. It has to sit beside the
+> server module for Vercel's file tracer to bundle it, same as `server/agentBaseFact.sql`.
+> There is deliberately **one** copy: three divergent copies of `agentBaseFact` is a bug
+> this repo already has.
+>
+> Files here are reference/ad-hoc: `vini_funnel_extract_*.sql` document the SELECT shapes
+> (substitute the placeholders to run them standalone), `vini_funnel_extract_rooftops.sql`
+> is staged for its own tab, and `vini_sms_*.sql` are the SMS-only predecessors.
 
 Diagnostics for changes in SMS appointment-booking and reply rates, for sales inbound,
 sales outbound and service outbound agents. The question this answers: *appointments are

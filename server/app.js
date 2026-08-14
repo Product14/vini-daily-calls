@@ -16,6 +16,7 @@ import { sendProgramsReportEmail } from "./programsEmail.js";
 import { runAgentMetrics, runAgentMetricsIncremental, runAgentMetricsWeekMonth, hasClickhouseCreds } from "./agentMetrics.js";
 import { runAgentRooftops, runAgentRooftopsIncremental, runAgentRooftopsTotalsOnly } from "./agentRooftop.js";
 import { readAgentCache, writeAgentCache, hasCacheDb } from "./agentCache.js";
+import { getAbrTrends, refreshAbrTrends, ABR_CACHE_KEY } from "./abrTrends.js";
 
 // Best-effort run log, mirrors what server/roi-cron/runner.cjs writes for
 // sync-live/sync-lifecycle — gives every refresh tier a "last synced" trail
@@ -4113,5 +4114,48 @@ app.get("/api/cron/agents-refresh-full", makeAgentsRefreshRoute("full", {
   rooftop: refreshRooftopCache,
   overall: refreshMetricsCache,
 }));
+
+// ── ABR Trends (/abr-trends) ─────────────────────────────────────────────
+// Same shape as /api/agents above: serve the precomputed bundle, never scan
+// ClickHouse on a page load. See server/abrTrends.js for why the payload is
+// pre-aggregated and pre-aligned.
+app.get("/api/abr-trends", async (req, res) => {
+  try {
+    const force = req.query.refresh === "1";
+    // Edge-cache the ~150 KB bundle. The cron refreshes every 30 min, so a stale copy is
+    // harmless and stale-while-revalidate means the first visitor after a scale-to-zero
+    // gets the last good bundle instantly instead of waiting on a cold lambda.
+    // ?refresh=1 is uncacheable by design.
+    if (!force) {
+      res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=3600");
+    }
+    const { payload, computedAt, source } = await getAbrTrends({ force });
+    if (!payload?.fun) return res.status(503).json({ error: "no data yet — cron has not run" });
+    return res.json({ ...payload, computedAt, source });
+  } catch (err) {
+    console.error("[/api/abr-trends]", err);
+    return res.status(500).json({ error: String(err?.message ?? err) });
+  }
+});
+
+// ── GET /api/cron/abr-trends-refresh — precompute the bundle ─────────────
+app.get("/api/cron/abr-trends-refresh", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const ranAt = new Date().toISOString();
+  try {
+    const payload = await refreshAbrTrends();
+    const summary = { ranAt, cacheDb: hasCacheDb(), cacheKey: ABR_CACHE_KEY, ...payload.meta };
+    await logCronRun("abr-trends-refresh", true, summary);
+    return res.json({ ok: true, ...summary });
+  } catch (err) {
+    const summary = { ranAt, error: String(err?.message ?? err) };
+    console.error("[cron/abr-trends-refresh]", err);
+    await logCronRun("abr-trends-refresh", false, summary);
+    return res.status(500).json({ ok: false, ...summary });
+  }
+});
 
 export default app;

@@ -1,5 +1,15 @@
 -- Vini Conversation Funnel — CHANNEL-AWARE spine (SMS + Calls)
 --
+-- RUNTIME SQL. Lives beside server/abrTrends.js because Vercel's file tracer only
+-- bundles files read with a static path relative to an imported module — same reason
+-- server/agentBaseFact.sql sits here. This is the ONE copy: there is deliberately no
+-- duplicate under src/abr-trends/, because that is exactly how agentBaseFact.sql, the
+-- Metabase card and vini_reporting.rmv_conversation_fact drifted apart on five separate
+-- definitions.
+--
+-- {START} / {END} are substituted by server/abrTrends.js. To run this ad hoc (MCP,
+-- Metabase, a scratch query), replace them with toDate('YYYY-MM-DD') literals.
+--
 -- Shared base for the /abr-trends dashboard. Emits one row per conversation with an
 -- identical column set for both channels, so `channel` is a FILTER, not a branch:
 --   channel, conv_id, tool_key, lead_id, team_id, ts, rooftop, svc, dir,
@@ -74,8 +84,8 @@
 -- ============================================================================
 
 WITH
-    toDate('2026-06-01') AS date_from,
-    toDate('2026-08-14') AS date_to_excl,
+    {START} AS date_from,
+    {END}   AS date_to_excl,
     ['Purchase Intent','Pricing Inquiry','Appointment','Financing Inquiry','Trade Inquiry',
      'Deposit Placed','Ancillary Inquiry','Purchase Closed','Vehicle Inquiry','General Engagement'] AS sales_qualified,
     ['Service Appointment Booked','Walk In Committed','Callback Requested','Transferred To Service Team',
