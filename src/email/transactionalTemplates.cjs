@@ -313,16 +313,73 @@ function recordingRow(url, durationSec, endedReason) {
 
 // Shared outcome classification — same priority order used by the full banner (below) and the
 // condensed batch row, so the two never drift on what counts as "needs follow-up" vs "logged".
-// Priority: booked > transferred > needs-follow-up > callback > resolved > voicemail/no-answer > logged.
+/* Summary values arrive from the feed as a JSON array STRING of sentences, e.g.
+ *   ["He asked about vehicles in a $350-425 budget.","He chose a pre-owned 2024 Accord."]
+ * The previous bracket-strip (`replace(/^\[\s*"?|"?\s*\]$/g,'')`) only removed the OUTER brackets, so
+ * every multi-sentence summary reached the dealer with the literal separator still in it:
+ *   …$350 to $425 monthly payment budget.","He expressed interest in sedans…
+ * That is live on effectively every post-conversation email. It also let the model's empty shells
+ * through: `[,,]` rendered as ",," and `["",""]` as ",".
+ *
+ * Parse it properly, and treat a value with no letters or digits as absent. `report_summary` is NEVER
+ * literally blank in production (13,359/13,359 rows had something), so "is there a summary?" MUST be
+ * asked through this function — a raw truthiness test on the field is always true and is therefore a
+ * no-op as a gate. eventRunner's substance gate calls this for exactly that reason. */
+function cleanSummary(raw) {
+  var s = String(raw == null ? "" : raw).trim();
+  if (!s) return "";
+  if (s.charAt(0) === "[") {
+    try {
+      var arr = JSON.parse(s);
+      if (Array.isArray(arr)) {
+        return arr.map(function (x) { return typeof x === "string" ? x.trim() : ""; }).filter(Boolean).join(" ");
+      }
+    } catch (e) { /* truncated or non-JSON — fall through to the textual unwrap */ }
+  }
+  s = s.replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").trim();
+  return /[A-Za-z0-9]/.test(s) ? s : "";
+}
+
+/* endedReason values that mean NO HUMAN EVER SPOKE on the call. Substring/exact set rather than a
+ * single `=== 'voicemail'` test, because production carries a whole family of these and an exact match
+ * silently missed most of them (measured over 3 days: voicemail_full 8, machine_ivr 41, no_answer 796,
+ * silence_timeout 294, pipeline_error 489, number_not_found 124, connection_failed 61, no_audio 39,
+ * busy 24 — 2,280 of which still emailed, and NOT ONE booked an appointment or resolved a query).
+ *
+ * `customer_declined` is deliberately NOT here: declining is a real human response, and a dealer may
+ * legitimately want to see it. Those calls are already handled — outbound ones by the reply gate, and
+ * the rest by the summary gate, since their summaries are empty shells. */
+var NO_CONVERSATION_ENDED_REASONS = {
+  voicemail: 1, voicemail_full: 1, machine_ivr: 1,          // reached a machine
+  no_answer: 1, busy: 1,                                     // nobody picked up
+  number_not_found: 1, connection_failed: 1, no_audio: 1,    // never actually connected
+  pipeline_error: 1,                                         // technical failure, not a conversation
+  silence_timeout: 1,                                        // connected, but nobody ever spoke
+};
+function isNoConversation(endedReason) {
+  var er = String(endedReason || "").trim().toLowerCase().replace(/-/g, "_");
+  if (!er) return false;
+  if (NO_CONVERSATION_ENDED_REASONS[er]) return true;
+  return er.indexOf("voicemail") >= 0; // catches any future voicemail_* variant
+}
+
+// Priority: booked > voicemail/no-answer > transferred > needs-follow-up > callback > resolved > logged.
+//
+// "No live contact" is checked SECOND, ahead of needs-follow-up, and that ordering is deliberate. A
+// voicemail call usually DOES carry an action item (a "left a voicemail, try again" to-do), so when
+// needs-follow-up was tested first it won, and a call where nobody ever spoke was headlined
+// "Needs human follow-up · Vini flagged a to-do below". Reaching an answering machine is the more
+// important fact about the call, so it leads. Booked still outranks it: if the call somehow both hit
+// voicemail and produced a booking, the booking is what the dealer must act on.
 function classifyOutcome(c) {
   if (c.appointmentScheduled) return { col: GREEN_BIG, bg: POS_BG, text: "&#128197; Booked an appointment", sub: "Vini set this up — confirm staffing & prep." };
+  var er = String(c.endedReason || "").toLowerCase();
+  if (er.indexOf("voicemail") >= 0) return { col: MUTE, bg: SLATE_BG, text: "&#9993; Left a voicemail", sub: "No live contact — Vini will keep trying per cadence." };
+  if (er.indexOf("no-answer") >= 0 || er.indexOf("no_answer") >= 0 || er.indexOf("hangup") >= 0) return { col: MUTE, bg: SLATE_BG, text: "No live conversation", sub: "Call ended early — nothing to action." };
   if (c.transfer && (c.transfer.department || c.transfer.reason)) return { col: VIOLET, bg: "#EDE9FE", text: "&#128222; Handed to your team", sub: "Transferred to " + esc(c.transfer.department || "your team") + (c.transfer.reason ? " — " + esc(c.transfer.reason) : "") };
   if ((c.actionItems && c.actionItems.length) || c.hasActionItem) return { col: AMBER, bg: AMBER_BG, text: "&#9873; Needs human follow-up", sub: (c.actionItems && c.actionItems.length ? fmtInt(c.actionItems.length) + " action item" + (c.actionItems.length === 1 ? "" : "s") + " below." : "Vini flagged a to-do below.") };
   if (c.callbackScheduled) return { col: AMBER, bg: AMBER_BG, text: "&#8635; Callback scheduled", sub: "Vini promised a call back — make sure it happens." };
   if (c.queryResolved) return { col: GREEN_BIG, bg: POS_BG, text: "&#10003; Resolved — no action needed", sub: "Vini handled this end to end." };
-  var er = String(c.endedReason || "").toLowerCase();
-  if (er.indexOf("voicemail") >= 0) return { col: MUTE, bg: SLATE_BG, text: "&#9993; Left a voicemail", sub: "No live contact — Vini will keep trying per cadence." };
-  if (er.indexOf("no-answer") >= 0 || er.indexOf("no_answer") >= 0 || er.indexOf("hangup") >= 0) return { col: MUTE, bg: SLATE_BG, text: "No live conversation", sub: "Call ended early — nothing to action." };
   return { col: MUTE, bg: SLATE_BG, text: "Conversation logged", sub: "" };
 }
 // OUTCOME banner — the single "what do I do about this?" answer, shown first.
@@ -353,7 +410,7 @@ function renderPostConversation(opts) {
   var L = opts.links || {};
   var url = L.conversations || L.console || "https://console.spyne.ai/converse-ai";
   var tz = opts.tz;
-  var summary = String(c.summary || "").replace(/^\[\s*"?|"?\s*\]$/g, "").replace(/^"|"$/g, "").trim();
+  var summary = cleanSummary(c.summary); // JSON-array shell -> readable prose; empty shells -> ""
   var isSms = c.channel === "sms";
   var isChat = c.channel === "chat"; // website-chatbot thread — same bubbles as SMS, its own labels
 
@@ -369,33 +426,83 @@ function renderPostConversation(opts) {
       (when ? '<td align="right" valign="top" style="font-size:11px;color:' + MUTE + ';white-space:nowrap;">' + esc(when) + "</td>" : "") +
     "</tr></table>";
 
-  // health chips: channel, AI score, sentiment (and frustrated only when true)
+  // health chips: channel, sentiment (and frustrated only when true).
+  // The AI-score pill is deliberately gone — a 0-10 grade of Vini's own performance is not something a
+  // dealer acts on, and it read as noise next to the outcome. Outcomes and facts only.
   var chips = "";
   chips += pill((isChat ? "Web chat" : isSms ? "SMS" : "Call") + " · " + (c.direction === "outbound" ? "Outbound" : "Inbound"), MUTE, WASH);
-  chips += scorePill(c.aiScore, c.grade);
   chips += sentimentChip(c.sentiment, c.sentimentScore);
   if (c.frustrated) chips += pill("&#9888; Customer frustrated", NEG, NEG_BG);
   if (c.intent) chips += pill(esc(humanizeIntent(c.intent)), BRAND, "#EDE9FE");
+
+  // SUMMARY as a called-out block rather than loose prose — it is the one thing every reader reads,
+  // so it gets a tinted rail instead of blending into the card.
+  var summaryBlock = summary
+    ? '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;background:#EFF6FF;border-left:3px solid #0284C7;border-radius:6px;"><tr><td style="padding:11px 14px;font-size:13px;line-height:1.6;color:' + BODY + ';">' +
+        '<b style="color:#0C4A6E;">&#10003; Summary</b> &nbsp;' + esc(summary) + "</td></tr></table>"
+    : '<div style="font-size:13px;color:' + MUTE + ';line-height:1.6;margin-top:14px;">No summary captured for this conversation.</div>';
+
+  // WHAT THE CUSTOMER SHARED — only fields the conversation actually produced. Every row is
+  // conditional, so a call that yielded nothing renders no table at all rather than a wall of "—".
+  // Nothing here is inferred: no derived "engagement score", no guessed blockers. If the dealer reads
+  // it as a fact, it has to BE a fact.
+  // ZIP and preferred-location are intentionally absent: those belong to the lead-sheet format
+  // (renderLeadCapture), which is a per-rooftop opt-in, and are not shown on the standard summary.
+  var facts = [];
+  if (c.email) facts.push(["Email", esc(c.email)]);
+  if (c.financing) facts.push(["Financing", esc(c.financing)]);
+  if (c.tradeIn) facts.push(["Trade-in", esc(c.tradeIn)]);
+  var factsBlock = facts.length
+    ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 6px;">What the customer shared</div>' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">' +
+        facts.map(function (f) {
+          return '<tr><td style="padding:5px 0;border-bottom:1px solid ' + LINE + ';color:' + MUTE + ';">' + f[0] + "</td>" +
+                 '<td align="right" style="padding:5px 0;border-bottom:1px solid ' + LINE + ';color:' + INK + ';font-weight:700;">' + f[1] + "</td></tr>";
+        }).join("") +
+      "</table>"
+    : "";
+
+  // COPY INTO CRM — calls only, and only when there is an identity to paste. Reuses the same helper
+  // the lead sheet uses so the two formats stay visually identical; the lead sheet itself is untouched.
+  var crm = "";
+  if (!isSms && !isChat && (c.customer || c.phone)) {
+    var crmLines = [["Name", c.customer], ["Phone", c.phone ? formatPhone(c.phone) : ""]];
+    if (c.email) crmLines.push(["Email", c.email]);
+    if (c.vehicle) crmLines.push(["Vehicle of interest", c.vehicle]);
+    var apptWhen = (c.appointmentScheduled && c.appointment && (c.appointment.when || c.appointment.date)) || c.requestedTime || "";
+    if (apptWhen) crmLines.push([c.appointmentScheduled ? "Appointment" : "Requested time", apptWhen]);
+    if (c.financing) crmLines.push(["Financing", c.financing]);
+    if (c.tradeIn) crmLines.push(["Trade-in", c.tradeIn]);
+    if (when) crmLines.push(["Called", when]);
+    crm = crmBlock(crmLines);
+  }
 
   var card =
     '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:18px 20px;">' +
       headRow +
       '<div style="margin-top:12px;">' + chips + "</div>" +
       recordingRow(c.recordingUrl, c.durationSec, isSms ? null : c.endedReason) +
-      '<div style="font-size:13px;color:' + BODY + ';line-height:1.6;margin-top:14px;">' + (summary ? esc(summary) : "No summary captured for this conversation.") + "</div>" +
+      summaryBlock +
       vehicleSection(c.vehicle, c.vin, c.stockNumber) +
+      factsBlock +
       apptCard(c.appointmentScheduled ? (c.appointment || {}) : null) +
       // The slot the customer ASKED for when nothing got booked — the booked case is apptCard's.
       // No call-date suffix: this email is about the very call the ask was made on (dated above).
       (!c.appointmentScheduled && c.requestedTime ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:12px;">&#128337; <b style="color:' + INK + ';">' + (c.requestedTimeBooked ? "Booked for:" : "Customer asked for:") + '</b> <span style="font-weight:700;color:' + INK + ';">' + esc(c.requestedTime) + "</span></div>" : "") +
       (c.actionItems && c.actionItems.length ? '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';margin:16px 0 0;">Action items</div>' + actionList(c.actionItems, tz, WARM) : "") +
       bulletBlock("Key takeaways", c.keyTakeaways, BRAND) +
+      // The thread IS the record for SMS/chat; for a call the transcript is. Only one ever renders,
+      // since a call carries no bubbles and a thread carries no transcript.
       smsThread(c.sms, c.smsFailed, null, isChat ? "Chat thread" : "Text thread") +
+      (isSms || isChat ? "" : transcriptBlock(c.transcript, 6000)) +
+      crm +
     "</td></tr></table>" +
     '<div style="margin-top:18px;">' + btnPrimary(isChat ? "Open chat" : isSms ? "Open thread" : "Listen & review", url) + "</div>";
 
   // No-value = the blank-summary placeholder with nothing else to show (no action items, no booked
   // appointment, no SMS thread, no takeaways, no recording, no vehicle) — exactly the empty email the gate exists for.
+  // A transcript alone is NOT value: a screener/voicemail call transcribes the answering machine, which
+  // is precisely the empty email this gate exists to stop (the eventRunner substance gate mirrors this).
   var hasValue = !!(summary || (c.actionItems && c.actionItems.length) || c.appointmentScheduled || c.requestedTime || (c.sms && c.sms.length) || (c.keyTakeaways && c.keyTakeaways.length) || c.recordingUrl || c.vehicle);
   return stampValue(shell(opts, isChat ? "Website chat" : isSms ? "Text conversation" : "Conversation summary", esc(c.title || (isChat ? "Website chat" : "New conversation")), outcomeBanner(c) + card + mtdStrip(opts.mtdCalls, isSms || isChat ? "conversations handled" : "calls handled", url)), hasValue);
 }
@@ -1273,6 +1380,9 @@ function renderDigestSms(opts) {
 }
 
 module.exports = {
+  // shared with eventRunner so the send GATE and the RENDER can never disagree about
+  // whether a conversation has a real summary / was a real conversation.
+  cleanSummary, isNoConversation,
   renderPostAppointment: renderPostAppointment,
   renderPostConversation: renderPostConversation,
   renderActionItem: renderActionItem,

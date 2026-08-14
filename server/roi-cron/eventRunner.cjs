@@ -556,12 +556,36 @@ async function runOnce() {
         const bestByLead = new Map();
         const chosen = []; // [{ key, cv, subject }] — one entry per email this pass, in either mode
         for (const cv of j.conversations || []) {
-          // OUTBOUND GATE (applies to BOTH sales and service): skip voicemail/no-answer calls entirely.
-          // voicemail calls (connected=false, duration=0) never trigger emails.
-          if (cv.direction === "outbound" && !cv.connected) continue;
+          // VOICEMAIL GATE (BOTH sales and service, BOTH directions). The agent reached an answering
+          // machine, so there is no conversation to report — no human ever spoke.
+          //
+          // This MUST key on endedReason, not duration. The earlier `!cv.connected` test assumed a
+          // voicemail call has duration 0; it does not. The agent monologues at the machine, so all
+          // 2,430 outbound voicemail calls in a 2-day production sample ran 75-187s (avg 109s) and were
+          // therefore `connected:true` — a 0/2,430 hit rate. Meanwhile 96.7% of ALL outbound calls end
+          // in voicemail, and 5,392 of them carry an action item ("left a voicemail" follow-ups), which
+          // satisfied the reply gate below. That is the "2 minutes of conversation, nothing to read"
+          // email: ~2,700/day of it.
+          //
+          // endedReason='voicemail' is exact: across 7,125 such calls in that sample, 0 booked an
+          // appointment and 0 resolved a query, so nothing of value is suppressed.
+          if (T.isNoConversation(cv.endedReason)) continue;
           // OUTBOUND REPLY GATE (applies to BOTH sales and service): only email if customer responded.
           // when enabled (default), skip outbound calls with no action items / appointments.
           if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
+          // SUBSTANCE GATE — there must be something a human can actually read or act on.
+          //
+          // The summary check MUST go through T.cleanSummary(). `report_summary` is never literally
+          // blank in production (13,359/13,359 rows had a value), so a raw `String(cv.summary).trim()`
+          // test passes 100% of the time and is a no-op. What the model actually emits for a call with
+          // no conversation is an EMPTY SHELL — `[]`, `[,,]`, `["",""]` — which is a truthy string but
+          // renders as nothing. 47% of calls are shells like this; 3,710 of them over 3 days would have
+          // emailed, and none booked. cleanSummary resolves a shell to "" so this gate can see it, and
+          // it is the SAME function the template renders with, so gate and email cannot disagree.
+          //
+          // A transcript deliberately does NOT count: a screener/IVR call transcribes the machine's
+          // words ("please record your message"), which is exactly the empty email being stopped.
+          if (!(T.cleanSummary(cv.summary) || cv.hasActionItem || cv.appointmentScheduled || cv.queryResolved === true)) continue;
           // spam gate — a call the model flagged as spam is never a real conversation. No-op until
           // the conversations feed surfaces `spam`; harmless when absent.
           if (cv.spam === true || cv.spam === "Yes") continue;
@@ -582,9 +606,15 @@ async function runOnce() {
         // ONE batched query for this pass's calls. WHICH calls email is untouched — every gate above
         // already decided that. A call the enrichment can't resolve falls back to the standard
         // email: never a dropped alert. (`leadCapture` is resolved above, next to the coverage rule.)
+        // This same batched query now ALSO runs for standard (non-lead-capture) rooftops, because the
+        // conversation summary's "What the customer shared" rows (financing, trade-in) come from the
+        // same report_sales fields and are not on the funnel feed either. It stays one query per pass,
+        // and the voicemail gate above means `chosen` is now a small fraction of what it used to be.
+        // Standard rooftops use it for those rows ONLY — the lead-sheet branch below is still gated on
+        // `leadCapture`, so which template a rooftop gets is unchanged.
         let extras = new Map();
-        if (leadCapture && chosen.length) {
-          if (!leadCaptureCH.hasCreds()) console.warn(`[events] ${name}: post_conversation_template=lead_capture but CLICKHOUSE_HOST/PASSWORD are unset — falling back to the standard conversation email`);
+        if (chosen.length) {
+          if (leadCapture && !leadCaptureCH.hasCreds()) console.warn(`[events] ${name}: post_conversation_template=lead_capture but CLICKHOUSE_HOST/PASSWORD are unset — falling back to the standard conversation email`);
           extras = await leadCaptureCH.fetchLeadFields(L.team_id, chosen.map((x) => x.cv.id));
         }
         // STANDARD summaries get the same requested-time enrichment as the action-item emails
@@ -597,7 +627,11 @@ async function runOnce() {
           : new Map();
         for (const { key, cv, subject } of chosen) {
           const lx = extras.get(String(cv.id));
-          if (lx) {
+          // `leadCapture &&` is LOAD-BEARING. `extras` is now fetched for every rooftop (see above), so
+          // without this guard a standard rooftop with resolvable enrichment would silently start
+          // receiving the lead SHEET instead of its conversation summary. The template a rooftop gets
+          // must depend only on its own post_conversation_template setting.
+          if (leadCapture && lx) {
             // feed values are the fallback for identity only — the rest is the sales sub-report.
             const lead = { ...lx, customer: lx.customer || cv.customer || "", phone: lx.phone || cv.phone || "", at: lx.at || cv.at };
             const vehLabel = [lead.vehicleType, lead.vehicle].filter(Boolean).join(" ").trim();
@@ -605,6 +639,16 @@ async function runOnce() {
               subject: `New lead — ${lead.customer || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
               html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }) });
             continue;
+          }
+          // Standard summary: carry over the sales fields the funnel feed doesn't have. Vehicle prefers
+          // the feed's own value and only falls back to enrichment, so the summary keeps describing the
+          // call it is about.
+          if (lx) {
+            cv.email = cv.email || lx.email;
+            cv.financing = cv.financing || lx.financing;
+            cv.tradeIn = cv.tradeIn || lx.tradeIn;
+            cv.vehicle = cv.vehicle || lx.vehicle;
+            cv.transcript = cv.transcript || lx.transcript;
           }
           const ask = callAsks.get(String(cv.id));
           if (ask && !cv.appointmentScheduled) {
