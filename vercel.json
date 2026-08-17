@@ -20,6 +20,7 @@
     { "path": "/api/cron/csm-sync",       "schedule": "0 6 * * *"    },
     { "path": "/api/cron/sync-live",   "schedule": "0 5 * * *"   },
     { "path": "/api/cron/sync-lifecycle", "schedule": "10 5 * * *" },
-    { "path": "/api/cron/sync-health", "schedule": "20 * * * *" }
+    { "path": "/api/cron/sync-health", "schedule": "20 * * * *" },
+    { "path": "/api/cron/abr-trends-refresh", "schedule": "7,37 * * * *" }
   ]
 }

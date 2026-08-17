@@ -5,6 +5,7 @@ import Dashboard from "../inventory-dashboard.tsx";
 import AgentsDashboard from "./agents/AgentsDashboard.tsx";
 import DreamDashboard from "./dream/DreamDashboard.tsx";
 import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
+import AbrTrends from "./abr-trends/AbrTrends.tsx";
 import { EmailerTracker } from "./email/EmailerTracker.tsx";
 import { RealtimeLog } from "./email/RealtimeLog.tsx";
 import { TrackerAuthGate } from "./email/TrackerAuthGate.tsx";
@@ -36,6 +37,9 @@ function Router() {
   }
   if (path === "/scorecard" || path.startsWith("/scorecard/")) {
     return <AgentsDashboard mainView="scorecard" />;
+  }
+  if (path === "/abr-trends" || path.startsWith("/abr-trends/")) {
+    return <AbrTrends />;
   }
   if (path === "/dream" || path.startsWith("/dream/")) {
     return <DreamDashboard />;
