@@ -25,10 +25,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export const ABR_CACHE_KEY = "abr-trends";
 
-// Window: 90 days back covers ~13 weeks and 4 months, enough for the weekly and monthly
-// grains to show a trend. The daily grain is trimmed to DAYS below — a 90-column daily
-// matrix is unreadable, and the extra days cost payload for nothing.
-const WINDOW_DAYS = 90;
+// Window: 180 days. Chosen from what the data actually supports, not a round number.
+// SMS effectively begins in Apr 2026 (247,169 conversations, vs 1,209 in Mar and 578 in
+// Feb), so a 90-day window clipped off the first real SMS month; 180 covers Apr onward in
+// full plus ~6 months of call history, which starts being meaningful in Feb. Going to 365
+// would add half a year of near-zero SMS months and double the scan for almost nothing.
+// The daily grain is trimmed to DAYS below regardless — a 180-column daily matrix is
+// unreadable and the extra days cost payload for nothing.
+const WINDOW_DAYS = 180;
 const DAYS = 28;
 
 const BASE = readFileSync(join(here, "abrTrendsBase.sql"), "utf8");
@@ -107,9 +111,17 @@ FROM ex GROUP BY g, p, ch, b, f, i`;
 
 const KEYS = ["att", "rch", "eng", "qual", "tool", "bkd", "dnum"];
 
-// A period is partial when it extends past the last fully-loaded day. The UI marks
-// these and excludes them from the per-row median that drives the heat colour —
-// otherwise the current (short) week reads as a collapse every time you open the page.
+// A period is partial at EITHER edge:
+//   trailing — it extends past the last fully-loaded day (the current week/month)
+//   leading  — it starts before the query window, so it is clipped
+// Both matter. The leading week can hold as little as 1 of 7 days: at a 90-day window
+// the first week bucket had 2 days in it and showed 28 booked against the next week's
+// 104, which reads as a catastrophic week rather than a clipped one. The UI marks these
+// and excludes them from the per-row median that drives the heat colour.
+function periodStart(p) {
+  const [y, m, d] = p.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
 function periodEnd(grain, p) {
   const [y, m, d] = p.split("-").map(Number);
   if (grain === "d") return new Date(Date.UTC(y, m - 1, d));
@@ -121,6 +133,9 @@ function pack(funnelRows, itemRows) {
   // Yesterday is the last day guaranteed fully loaded; today is still accumulating.
   const dataEnd = new Date(Date.now() - 86400000);
   dataEnd.setUTCHours(0, 0, 0, 0);
+  // Mirrors {START} in baseSql() — anything starting before this is clipped.
+  const dataStart = new Date(Date.now() - WINDOW_DAYS * 86400000);
+  dataStart.setUTCHours(0, 0, 0, 0);
 
   const per = {};
   for (const g of ["d", "w", "m"]) {
@@ -135,7 +150,7 @@ function pack(funnelRows, itemRows) {
 
   const partial = {};
   for (const g of ["d", "w", "m"]) {
-    partial[g] = per[g].map((p) => periodEnd(g, p) > dataEnd);
+    partial[g] = per[g].map((p) => periodEnd(g, p) > dataEnd || periodStart(p) < dataStart);
   }
 
   const fun = {};
@@ -164,6 +179,13 @@ function pack(funnelRows, itemRows) {
 }
 
 let _inflight = null;
+
+// In-process memory cache, same idea as agentsCache behind /api/agents. Two jobs:
+// a warm lambda serves repeat hits without touching Postgres, and local dev (where
+// POSTGRES_URL is usually unset, so there is no cache DB at all) doesn't re-scan
+// ClickHouse on every page reload.
+const MEM_TTL_MS = 5 * 60 * 1000;
+let _mem = null; // { payload, computedAt, at }
 
 export async function refreshAbrTrends() {
   if (!hasClickhouseCreds()) throw new Error("ClickHouse creds not set");
@@ -201,12 +223,18 @@ export function refreshAbrTrendsOnce() {
 }
 
 export async function getAbrTrends({ force = false } = {}) {
+  if (!force && _mem && Date.now() - _mem.at < MEM_TTL_MS) {
+    return { payload: _mem.payload, computedAt: _mem.computedAt, source: "memory" };
+  }
   if (!force && hasCacheDb()) {
     const cached = await readAgentCache(ABR_CACHE_KEY);
     if (cached?.payload?.fun) {
+      _mem = { payload: cached.payload, computedAt: cached.computedAt, at: Date.now() };
       return { payload: cached.payload, computedAt: cached.computedAt, source: "cache" };
     }
   }
   const payload = await refreshAbrTrendsOnce();
-  return { payload, computedAt: payload?.meta?.computedAt ?? null, source: "live" };
+  const computedAt = payload?.meta?.computedAt ?? null;
+  _mem = { payload, computedAt, at: Date.now() };
+  return { payload, computedAt, source: "live" };
 }
