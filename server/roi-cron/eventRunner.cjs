@@ -68,6 +68,11 @@ function isUSActiveWindow(d = new Date()) {
 // margin, or events arriving in the gap are lost forever. The earlier `isUSBusinessHour() ? 4 : 20`
 // was a silent data-loss bug: a 4-min look-back under a 15-min cron dropped 11 min of events/cycle.
 const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 25);
+// How far PAST its start time an appointment may still trigger a "new appointment" email. A booking
+// made this morning for a slot that has just passed is still news; a row whose slot was days or years
+// ago is not (see the DMS-history flood documented at the gates in runOnce). Absolute age, not
+// dealer-local — 6h keeps same-day bookings and blocks anything from a previous day.
+const APPT_PAST_GRACE_MS = Number(process.env.EVENT_APPT_PAST_GRACE_MIN || 360) * 60000;
 // SMS post-conversation is batched to END OF DAY (the thread runs all day, so one email per lead/day
 // instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
 const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
@@ -183,16 +188,66 @@ function localHourMin(tz) {
     return { h, m: g("minute") };
   } catch { return { h: 0, m: 0 }; }
 }
-// Appointment time in the dealer's local zone, e.g. "Mon, Jun 23 · 2:30 PM".
-function fmtSched(iso, tz) {
-  if (!iso) return "";
-  const d = new Date(iso); if (isNaN(d.getTime())) return "";
+// Appointment start times are STORED AND SERVED AS UTC, but a zone-less string ("2026-08-14 17:43:06"
+// — the ClickHouse/Mongo shape) is parsed by `new Date` as the SERVER's local clock, which shifts
+// every rendered date by the host offset. Normalize to UTC explicitly so the dealer-local formatting
+// below is right regardless of where this runs.
+function asUtcDate(iso) {
+  if (!iso) return null;
+  const s = String(iso).trim();
+  const norm = /([zZ]|[+-]\d{2}:?\d{2})$/.test(s) ? s.replace(" ", "T") : `${s.replace(" ", "T")}Z`;
+  const d = new Date(norm);
+  return isNaN(d.getTime()) ? null : d;
+}
+// Everything the post-appointment path needs to know about a start time, from ONE parse:
+//   when    — dealer-local "Mon, Jun 23 · 2:30 PM", carrying the YEAR when it's not this year
+//   ts/past — is this appointment already in the past (the "new appointment" gate below)
+//   offYear — the appointment is not in the dealer's current calendar year
+// offYear exists because a year-LESS date is indistinguishable from a future one: Honda of Downtown
+// LA (Aug 2026) received "Sat, Dec 21 · 11:00 AM" for a 2024-12-21 appointment and read it as
+// something in the future ("is this for July of 2027?").
+function schedInfo(iso, tz) {
+  const d = asUtcDate(iso);
+  if (!d) return { ts: null, past: false, offYear: false, when: "" };
   const z = tz || "America/New_York";
+  const yearOf = (x) => { try { return new Intl.DateTimeFormat("en-US", { timeZone: z, year: "numeric" }).format(x); } catch { return ""; } };
+  const offYear = yearOf(d) !== yearOf(new Date());
+  let when = "";
   try {
-    const dp = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: z }).format(d);
+    const dp = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", ...(offYear ? { year: "numeric" } : {}), timeZone: z }).format(d);
     const tp = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: z }).format(d);
-    return `${dp} · ${tp}`;
-  } catch { return ""; }
+    when = `${dp} · ${tp}`;
+  } catch { when = ""; }
+  return { ts: d.getTime(), past: d.getTime() < Date.now(), offYear, when };
+}
+// Appointment time in the dealer's local zone, e.g. "Mon, Jun 23 · 2:30 PM" (+ year when off-year).
+function fmtSched(iso, tz) { return schedInfo(iso, tz).when; }
+// `relDay` ("Today" / "Tomorrow" / "Fri, Sep 27") is what the appointment email LEADS with, and it
+// never carries a year — so it may only be used when it cannot mislead. An off-year or already-past
+// appointment falls back to the fully-qualified `when`.
+const safeRelDay = (sched, relDay) => (sched.offYear || sched.past ? "" : relDay);
+// ── APPOINTMENT-EMAIL GATES ────────────────────────────────────────────────────────────────────
+// Is this meetings-feed row a genuine NEW appointment? Returns a skip reason ('past' | 'cancelled' |
+// 'slot_dupe') or null to send. `seenSlots` is a per-pass, per-rooftop+dept Set (mutated here).
+//
+// The feed can carry SEVERAL rows per customer per call, and the email dedupe is keyed on the meeting
+// id, so without these gates every row reads as brand-new and gets its own email. Honda of Downtown
+// Los Angeles, 2026-08-14: ONE call produced 7 rows — the dealer's DMS appointment HISTORY written
+// back as fresh source='spyne'/status='scheduled' meetings (start times Jul-2024 → Jan-2026, each with
+// its own meeting id + external_crm_appointment_id) → 7 "New appointment" emails to 8 recipients in 6
+// seconds. A reschedule arrives the same way: a 'cancelled' row plus a new 'scheduled' one for the
+// SAME slot, 2 seconds apart (Toronto Honda) → 2 emails, one of them announcing a cancelled slot.
+function apptSkipReason(m, sched, seenSlots, now = Date.now()) {
+  // (1) Already happened → not a new appointment, whatever the row claims.
+  if (sched.ts !== null && sched.ts < now - APPT_PAST_GRACE_MS) return "past";
+  // (2) A cancelled/no-show row is not a booking and must never headline "New appointment".
+  if (/cancel|no[\s_-]?show/i.test(String(m.status || ""))) return "cancelled";
+  // (3) Same lead + same start time = ONE booking however many meeting ids it arrives under. Keyed
+  //     on the SLOT, not the id, so a re-keyed duplicate collapses into the first one seen.
+  const slotKey = `${m.leadId || m.customer || m.phone || m.id}|${sched.ts ?? m.when ?? ""}`;
+  if (seenSlots.has(slotKey)) return "slot_dupe";
+  seenSlots.add(slotKey);
+  return null;
 }
 // A customer-originated SMS (vs an AI/agent outbound) — the anchor for "the customer responded".
 const isInboundSms = (mm) => !!mm && (mm.direction === "in" || mm.direction === "inbound" || mm.authorType === "human");
@@ -333,7 +388,10 @@ async function runOnce() {
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0 };
+  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0,
+    // What the appointment gates dropped this pass. Counted (not silent) so a rooftop whose feed is
+    // replaying DMS history is visible in the pass summary instead of just producing fewer emails.
+    appt_skipped_past: 0, appt_skipped_cancelled: 0, appt_skipped_slot_dupe: 0 };
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
   const feedFailures = []; // upstream FEED errors (per rooftop/dept) — the pass couldn't even fetch events.
@@ -411,6 +469,8 @@ async function runOnce() {
         // is within the last 25 minutes, regardless of when the meeting is scheduled.
         const j = await apiJson(`/api/meetings?scope=recent&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&minutes=${POLL_MINUTES}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
         const mtd = await apptMTD(L.team_id, dept);
+        // One email per booked SLOT per pass — see gate (3).
+        const apptSlots = new Set();
         for (const m of (j.meetings || []).slice(0, 50)) {
           if (!m.id) continue;
           // Only surface VINI-booked appointments (source='spyne'). Skip known BDC/CRM bookings —
@@ -418,8 +478,16 @@ async function runOnce() {
           // (When the feed doesn't report source yet, keep firing with a generic label.)
           if (m.source && m.source !== "spyne") continue;
           const byVini = m.source === "spyne";
+          const sched = schedInfo(m.when, m.tz || tz);
+          // Past / cancelled / duplicate-slot rows are never a "new appointment" — see apptSkipReason.
+          const skip = apptSkipReason(m, sched, apptSlots);
+          if (skip) {
+            out[`appt_skipped_${skip}`]++;
+            console.log(`  · ${name} [${dept}] appointment ${m.id} skipped (${skip})${sched.when ? ` — ${sched.when}` : ""}`);
+            continue;
+          }
           const apptData = {
-            customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
+            customer: m.customer, phone: m.phone, when: sched.when, time: m.time, relDay: safeRelDay(sched, m.relDay),
             type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
             transportation: m.transportation || m.transportationOption, status: m.status, byVini, recordingUrl: m.recordingUrl,
             bookedAt: m.bookedAt,  // when the appointment was created
@@ -1067,8 +1135,9 @@ async function previewEvent(opts) {
     const m = list.find((x) => String(x.id) === eventKey) || (keyed ? null : list[0]);
     if (!m) return null;
     const mtd = await apptMTD(teamId, dept).catch(() => 0);
+    const sched = schedInfo(m.when, m.tz || tz);
     return T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: {
-      customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
+      customer: m.customer, phone: m.phone, when: sched.when, time: m.time, relDay: safeRelDay(sched, m.relDay),
       type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
       transportation: m.transportation || m.transportationOption, status: m.status, byVini: m.source === "spyne", recordingUrl: m.recordingUrl,
     } });
@@ -1107,7 +1176,9 @@ async function previewEvent(opts) {
   return T.renderActionItem({ rooftopName: name, dept, tz, lead, items: use, totalOpen: use.length, justArrived: 0, mtdOpen: j.total, links: L_ });
 }
 
-module.exports = { runOnce, previewEvent, isUSActiveWindow };
+// schedInfo / safeRelDay / apptSkipReason are exported for the appointment-gate tests
+// (server/roi-cron/__tests__/appointmentGates.test.mjs).
+module.exports = { runOnce, previewEvent, isUSActiveWindow, schedInfo, safeRelDay, apptSkipReason };
 if (IS_CLI) {
   (async () => {
     await runOnce();
