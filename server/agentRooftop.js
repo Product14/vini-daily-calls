@@ -13,21 +13,26 @@ import { fileURLToPath } from "node:url";
 import { runClickhouse, hasClickhouseCreds } from "./agentMetrics.js";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
+import { applyQualifiedOutboundRule } from "./qualifiedOutboundRule.js";
 import { injectDealerWebsite, classifyOemBrands } from "./oemBrands.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// applyWarmTransferExclusion: meta.source='warm_transfer' meetings are appointment
-// rows we did not create — never counted here. Same rule as the Overall view
-// (agentMetrics.js) and the event emails, so all three reconcile.
+// Load-time rewrites of the Metabase-synced spine, innermost first:
+//   callbackOutboundAttribution — credit outbound-driven callbacks to the Outbound agent
+//   warmTransferExclusion       — meta.source='warm_transfer' meetings aren't appointments we created
+//   qualifiedOutboundRule       — Sales Outbound qualifies on the campaign outcome; corrected vocab
+//   injectDealerWebsite         — dealer_website column for OEM-brand classification
+// Identical to the Overall view's chain (agentMetrics.js), so the two views reconcile.
+const SPINE = "agentBaseFact.sql";
 const BASE_FACT = injectDealerWebsite(
-  applyWarmTransferExclusion(
-    applyCallbackOutboundAttribution(
-      readFileSync(join(here, "agentBaseFact.sql"), "utf8"),
-      "agentBaseFact.sql"
+  applyQualifiedOutboundRule(
+    applyWarmTransferExclusion(
+      applyCallbackOutboundAttribution(readFileSync(join(here, SPINE), "utf8"), SPINE),
+      SPINE
     ),
-    "agentBaseFact.sql"
+    SPINE
   ),
-  "agentBaseFact.sql"
+  SPINE
 );
 
 // Trailing window the rooftop view covers (daily rows + totals). 120 days spans

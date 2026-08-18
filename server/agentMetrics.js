@@ -11,6 +11,7 @@
 import { createRequire } from "node:module";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
+import { applyQualifiedOutboundRule } from "./qualifiedOutboundRule.js";
 
 const require = createRequire(import.meta.url);
 // Inbound callbacks driven by an outbound touch are re-attributed to the
@@ -25,7 +26,7 @@ const QUERIES_RAW = require("./agentMetricsQueries.json");
 // send path applies, so the dashboard and the emails agree).
 const QUERIES = Object.fromEntries(
   Object.entries(QUERIES_RAW).map(([k, sql]) =>
-    [k, k.endsWith("_vouchers") ? sql : applyWarmTransferExclusion(applyCallbackOutboundAttribution(sql, k), k)])
+    [k, k.endsWith("_vouchers") ? sql : applyQualifiedOutboundRule(applyWarmTransferExclusion(applyCallbackOutboundAttribution(sql, k), k), k)])
 );
 
 export function hasClickhouseCreds() {
