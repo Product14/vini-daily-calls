@@ -81,11 +81,23 @@ function readCallFailures(r) {
 
 // Normalize a spine row to the field names the control-tower consumers expect.
 // ABR denominator policy (single source for the whole control tower):
-//   • Sales Outbound + Service Inbound → appts ÷ QUALIFIED calls
-//     (their raw lead lists are huge / pre-filter heavily, so leads over-count)
-//   • Sales Inbound + Service Outbound → appts ÷ touched leads
+//   • Sales Inbound + Sales Outbound + Service Inbound → appts ÷ QUALIFIED leads
+//     (their raw lead lists are huge / pre-filter heavily, so touched leads over-count)
+//   • Service Outbound → appts ÷ touched leads
+// Sales Inbound moved from touched to qualified on 2026-08-18, alongside its new qualified
+// rule (report.qualified / conversationAnalytics.outcome — see server/qualifiedRules.js).
 // agent_type here is the raw spine label ("Sales Outbound" / "Service Inbound").
-const ABR_USES_QUALIFIED = new Set(["Sales Outbound", "Service Inbound"]);
+//
+// ⚠️ TWO CONSEQUENCES OF THE SALES-INBOUND SWITCH:
+//  1. Its ABR jumps ~2.4% -> ~10% (a much smaller denominator), which crosses the
+//     `abr: { good: 0.05, amber: 0.02 }` grading thresholds in agentsEmailTemplate.js —
+//     Sales Inbound goes amber -> green without anything improving. Those thresholds were
+//     calibrated when two of four agents used touched; three of four now use qualified, so
+//     they likely want recalibrating per denominator.
+//  2. Sales Inbound qualified is NOT nested inside engaged (report.qualified is a model
+//     verdict, not a transcript test — ~3% of qualified leads never engaged), so this ABR
+//     is not a clean funnel conversion. It is appts per qualified lead, nothing more.
+const ABR_USES_QUALIFIED = new Set(["Sales Inbound", "Sales Outbound", "Service Inbound"]);
 export function abrDenominator(r) {
   return ABR_USES_QUALIFIED.has(r.agent_type)
     ? Number(r.qualified_leads ?? 0)
