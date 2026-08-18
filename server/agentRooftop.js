@@ -13,19 +13,19 @@ import { fileURLToPath } from "node:url";
 import { runClickhouse, hasClickhouseCreds } from "./agentMetrics.js";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
-import { applyQualifiedOutboundRule } from "./qualifiedOutboundRule.js";
+import { applyQualifiedRules } from "./qualifiedRules.js";
 import { injectDealerWebsite, classifyOemBrands } from "./oemBrands.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Load-time rewrites of the Metabase-synced spine, innermost first:
 //   callbackOutboundAttribution — credit outbound-driven callbacks to the Outbound agent
 //   warmTransferExclusion       — meta.source='warm_transfer' meetings aren't appointments we created
-//   qualifiedOutboundRule       — Sales Outbound qualifies on the campaign outcome; corrected vocab
+//   qualifiedRules              — per-agent qualified: Sales OB = campaign outcome, Sales IB = AI verdict
 //   injectDealerWebsite         — dealer_website column for OEM-brand classification
 // Identical to the Overall view's chain (agentMetrics.js), so the two views reconcile.
 const SPINE = "agentBaseFact.sql";
 const BASE_FACT = injectDealerWebsite(
-  applyQualifiedOutboundRule(
+  applyQualifiedRules(
     applyWarmTransferExclusion(
       applyCallbackOutboundAttribution(readFileSync(join(here, SPINE), "utf8"), SPINE),
       SPINE

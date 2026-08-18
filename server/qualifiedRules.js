@@ -1,4 +1,9 @@
-// SALES OUTBOUND qualified = the CAMPAIGN OUTCOME, not an inferred intent label.
+// PER-AGENT qualified rules. The old single "intent match" rule no longer applies to Sales.
+//   SALES OUTBOUND = the CAMPAIGN OUTCOME (campaignLeadMappings.outcome) + engaged that period.
+//   SALES INBOUND   = the AI's own verdict: report.qualified='Yes' on calls,
+//                     conversationAnalytics.outcome in an intent allowlist on SMS.
+//                     Source: Product14/vini-success products/sales-inbound/queries/features.sql.
+//   SERVICE (both)  = unchanged, still the IRA/action-item intent rule.
 // Plus: the buying-intent action-item vocabulary, which had silently decayed.
 //
 // Mirrors reporting-vini @ ac8e585 / ac631eb (src/lib/reports/agentBaseFact.sql). Both repos must apply
@@ -119,8 +124,11 @@ const JOIN_BLOCK = `LEFT JOIN ob_campaign_outcome oco
 // injects is honoured: a lead that called the outbound line back is Sales Outbound and must be judged by
 // the outbound rule. Both channel columns carry the switch, so \`qualified\` stays a plain greatest():
 //   greatest(oc_q AND spoke, oc_q AND reply_real) == oc_q AND (spoke OR reply_real)
-const OB_CALL = `    if(agent_type = 'Sales Outbound',
-       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(ec.is_connected, 0) = 1, 1, 0),
+const CALL_SWITCH = `    multiIf(
+       agent_type = 'Sales Outbound',
+         if(ifNull(oco.oc_q, 0) = 1 AND ifNull(ec.is_connected, 0) = 1, 1, 0),
+       agent_type = 'Sales Inbound',
+         ifNull(ec.report_qualified, 0),
        ifNull(ec.qualified_via_call, 0))    AS qualified_via_call,`;
 
 // Variant A — server/agentBaseFact.sql (Rooftop view).
@@ -135,10 +143,12 @@ const A_OLD = `    ifNull(ec.qualified_via_call, 0)        AS qualified_via_call
         ifNull(sb.qualified_via_sms, 0)
     ) AS qualified,`;
 
-const A_NEW = `${OB_CALL}
-    -- Sales Outbound: campaign outcome + a real (non-opt-out) reply. Others keep the buying-intent gate.
-    if(agent_type = 'Sales Outbound',
-       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+const A_NEW = `${CALL_SWITCH}
+    multiIf(
+       agent_type = 'Sales Outbound',
+         if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+       agent_type = 'Sales Inbound',
+         ifNull(sb.sms_outcome_qualified, 0),
        ifNull(sb.qualified_via_sms, 0))     AS qualified_via_sms,
     greatest(qualified_via_call, qualified_via_sms) AS qualified,`;
 
@@ -148,13 +158,47 @@ const B_OLD = `    ifNull(ec.qualified_via_call, 0)        AS qualified_via_call
     ifNull(sb.sms_engaged, 0)               AS sms_engaged,
     greatest(ifNull(ec.qualified_via_call, 0), if(ifNull(sb.sms_engaged, 0) = 1 AND ifNull(sbi.has_buying_intent, 0) = 1, 1, 0)) AS qualified,`;
 
-const B_NEW = `${OB_CALL}
-    -- Sales Outbound: campaign outcome + a real (non-opt-out) reply. Others keep sms_engaged AND intent.
-    if(agent_type = 'Sales Outbound',
-       if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+const B_NEW = `${CALL_SWITCH}
+    multiIf(
+       agent_type = 'Sales Outbound',
+         if(ifNull(oco.oc_q, 0) = 1 AND ifNull(sb.n_human_inbound_real, 0) > 0, 1, 0),
+       agent_type = 'Sales Inbound',
+         ifNull(sb.sms_outcome_qualified, 0),
        if(ifNull(sb.sms_engaged, 0) = 1 AND ifNull(sbi.has_buying_intent, 0) = 1, 1, 0)) AS qualified_via_sms,
     ifNull(sb.sms_engaged, 0)               AS sms_engaged,
     greatest(qualified_via_call, qualified_via_sms) AS qualified,`;
+
+
+// ── 6. SALES INBOUND signals (source: Product14/vini-success) ───────────────────────────────────────
+// Calls: the AI's own report.qualified verdict rather than an IRA primary_intent match. vini-success
+// notes report.connected is unreadable (key present on 0 of 451,526 rows). Prod 30d (sales):
+// 'Yes' 22,474 calls / 10,371 leads, 'No' 65,145, '' 245.
+// ⚠️ NOT gated on connected, so qualified is NOT nested inside engaged for Sales Inbound — measured
+// 100 of 3,080 qualified leads (3.2%) never engaged. Do not build a "share of engaged" chart on it.
+const IB_ECR_ANCHOR = "        ) AS is_qualifying_call,";
+const IB_ECR_BLOCK = `${IB_ECR_ANCHOR}
+        -- Sales Inbound gate (qualifiedRules.js): the AI's own verdict on the call.
+        if(JSONExtractString(ifNull(report, '{}'), 'qualified') = 'Yes', 1, 0) AS is_report_qualified,`;
+
+const IB_AGG_ANCHOR = "        max(is_qualifying_call) AS qualified_via_call,";
+const IB_AGG_BLOCK = `${IB_AGG_ANCHOR}
+        max(is_report_qualified) AS report_qualified,`;
+
+// SMS: conversationAnalytics.outcome is a per-conversation AI verdict; this allowlist is the
+// intent-bearing subset. Absent values are real outcomes that are NOT qualification (Opt Out, Not
+// Interested, Already Purchased, Reconnect Needed, Human Requested, Wrong Number, Language Barrier,
+// Operating Hours, Decision Maker Unavailable, ...). vini-success measured the outcome present on
+// EXACTLY the engaged conversations and perfectly nested inside engaged (0 violations / 14,980).
+// Prod 60d: 9 of the 10 occur — 'Appointment' never appears on SMS, kept for fidelity with the source.
+const IB_SMS_AGG = `,
+        max(has(['Purchase Intent','Pricing Inquiry','Appointment','Financing Inquiry','Trade Inquiry',
+                 'Deposit Placed','Ancillary Inquiry','Purchase Closed','Vehicle Inquiry',
+                 'General Engagement'],
+                JSONExtractString(ifNull(c.conversationAnalytics, '{}'), 'outcome'))) AS sms_outcome_qualified`;
+
+// Per-variant tail of the sms_by_conv select list (c is in scope there in both bodies).
+const A_SMS_TAIL = "               AND hia.lead_id IS NOT NULL, 1, 0)) AS qualified_via_sms";
+const B_SMS_TAIL = "               AND ifNull(co.opt_out_sms, 0) = 0, 1, 0)) AS sms_engaged";
 
 const countOf = (s, sub) => s.split(sub).length - 1;
 
@@ -163,7 +207,7 @@ const countOf = (s, sub) => s.split(sub).length - 1;
  * vocabulary to a spine SQL body. SQL with no conversation spine (the voucher queries) is returned
  * untouched. Throws if any anchor is missing or ambiguous.
  */
-export function applyQualifiedOutboundRule(sql, label = "sql") {
+export function applyQualifiedRules(sql, label = "sql") {
   if (sql.includes("ob_campaign_outcome")) return sql; // already applied
   if (!sql.includes("conversation_spine AS (")) return sql; // not a spine body (vouchers)
 
@@ -174,11 +218,15 @@ export function applyQualifiedOutboundRule(sql, label = "sql") {
       `— upstream SQL changed, fix needs review`
     );
   }
+  const smsTail = variant === "B" ? B_SMS_TAIL : A_SMS_TAIL;
   for (const [name, anchor] of [
     ["LIST", LIST_OLD],
     ["CTE", CTE_ANCHOR],
     ["SMS", SMS_ANCHOR],
     ["JOIN", JOIN_ANCHOR],
+    ["IB_ECR", IB_ECR_ANCHOR],
+    ["IB_AGG", IB_AGG_ANCHOR],
+    ["IB_SMS_TAIL", smsTail],
   ]) {
     const n = countOf(sql, anchor);
     if (n !== 1) {
@@ -197,5 +245,8 @@ export function applyQualifiedOutboundRule(sql, label = "sql") {
     .replace(CTE_ANCHOR, CTE_BLOCK + CTE_ANCHOR)
     .replace(SMS_ANCHOR, SMS_BLOCK)
     .replace(JOIN_ANCHOR, JOIN_BLOCK + JOIN_ANCHOR)
+    .replace(IB_ECR_ANCHOR, IB_ECR_BLOCK)
+    .replace(IB_AGG_ANCHOR, IB_AGG_BLOCK)
+    .replace(smsTail, smsTail + IB_SMS_AGG)
     .replace(variant === "B" ? B_OLD : A_OLD, variant === "B" ? B_NEW : A_NEW);
 }
