@@ -94,13 +94,27 @@ export function abrColor(ratio: number | null, agent: AgentCol): { bg: string; f
   return { bg, fg: "#fff" };
 }
 // ─── ABR denominator policy ─────────────────────────────────────────────────
-// Single source of truth, mirroring the control tower
-// (controlTower/server/agentsSource.js). The appointment booking rate is
-// measured against QUALIFIED leads for Sales Outbound + Service Inbound — their
-// raw touched-lead lists are huge / pre-filtered, so touched over-counts the
-// denominator and crushes the rate. The other agent types (and the all-agent
-// Total rollup) measure against all touched leads.
+// MUST stay in lockstep with controlTower/server/agentsSource.js ABR_USES_QUALIFIED.
+// These are TWO independent implementations of one policy: this drives the dashboard at
+// vini-daily-calls.vercel.app, that one drives the control-tower email + Slack report.
+// Change one without the other and the two disagree on the same metric.
+//
+// The appointment booking rate is measured against QUALIFIED leads for Sales Inbound,
+// Sales Outbound and Service Inbound — their raw touched-lead lists are huge /
+// pre-filtered, so touched over-counts the denominator and crushes the rate. Only
+// Service Outbound (and the all-agent Total rollup) measure against all touched leads.
+//
+// Sales Inbound moved from touched to qualified on 2026-08-18, alongside its new qualified
+// rule (report.qualified / conversationAnalytics.outcome — see server/qualifiedRules.js).
+// Measured 30d: 319 appts, 13,531 touched, 3,104 qualified → ABR 2.36% → 10.28%. That sits
+// right on the green edge of this agent's existing ABR_BANDS ({ green: 0.10 }), so the heat
+// cell flips amber → green with nothing having improved — those bands were already written
+// for a qualified-style rate while the agent was still on touched. Revisit if that reads wrong.
+//
+// The policy also drives the call-only and SMS-only booking rates below, so all three of
+// Sales Inbound's ABR rows move together (intended — they should agree).
 export const ABR_USES_QUALIFIED: Partial<Record<AgentCol, boolean>> = {
+  "Sales Inbound": true,
   "Sales Outbound": true,
   "Service Inbound": true,
 };
