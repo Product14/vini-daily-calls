@@ -169,6 +169,9 @@ appt_agg AS (
     WHERE __deleted = 0
       AND is_active = 1
       AND (source = 'spyne' OR source IS NULL)
+      -- meta.source='warm_transfer' = the customer's EXISTING appointment, pulled in around a transfer;
+      -- not a booking. Direct signal for the same defect the 30s rule above works around.
+      AND lower(JSONExtractString(ifNull(meta,''),'source')) != 'warm_transfer'
       AND conversation_id IS NOT NULL
       AND conversation_id != ''
     GROUP BY conversation_id

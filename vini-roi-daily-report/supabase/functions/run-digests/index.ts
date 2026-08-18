@@ -62,7 +62,9 @@ async function metrics(teamId: string, dept: Dept, s: string, e: string) {
   const agent = dept; // 'sales' | 'service'
   const rows = await ch(`
     SELECT
-      (SELECT count() FROM dealer_leads.meetings WHERE team_id='${teamId}' AND service_type='${dept}' AND source='spyne' AND is_active=1 AND __deleted=0 AND created_at BETWEEN '${s}' AND '${e}') AS appts,
+      -- canonical: source='spyne' says we OWN the booking; meta.source='warm_transfer' rows are the
+      -- customer's EXISTING appointments pulled in around a transfer — never counted as ours.
+      (SELECT count() FROM dealer_leads.meetings WHERE team_id='${teamId}' AND service_type='${dept}' AND source='spyne' AND is_active=1 AND __deleted=0 AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer' AND created_at BETWEEN '${s}' AND '${e}') AS appts,
       (SELECT count(DISTINCT leadId) FROM dealer_leads.endcallreports WHERE teamId='${teamId}' AND isActive=1 AND isTestCall=0 AND lower(callDetails_agentInfo_agentType)='${agent}' AND callDetails_callType='inboundPhoneCall' AND __deleted=0 AND createdAt BETWEEN '${s}' AND '${e}') AS leads,
       (SELECT count() FROM dealer_leads.actionItems WHERE team_id='${teamId}' AND service_type='${dept}' AND is_active=1 AND __deleted=0 AND createdAt BETWEEN '${s}' AND '${e}') AS action,
       (SELECT countIf(c.type='call') FROM dealer_leads.conversations c INNER JOIN dealer_leads.teamAgentMappings tam ON tam.teamAgentMappingId=c.teamAgentMappingId INNER JOIN dealer_leads.agentTypes at ON at.agentTypeId=tam.agentTypeId WHERE c.teamId='${teamId}' AND lower(at.agentType)='${agent}' AND ifNull(c.isTest,0)=0 AND c.__deleted=0 AND c.createdAt BETWEEN '${s}' AND '${e}') AS call,

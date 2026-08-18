@@ -6,14 +6,17 @@
 --   start, end (DateTime, dealer-local "yesterday" window in UTC),
 --   month_start (DateTime, 1st of month 00:00 local in UTC — for MTD).
 -- Returns ONE row: appts, inbound_appts, outbound_appts, leads, action, call, sms, chat, appts_mtd, leads_mtd.
+-- ★ CANONICAL (2026-08-18): source='spyne' says we OWN the booking; meta.source says HOW the row
+-- came to exist. meta.source='warm_transfer' rows are the customer's EXISTING appointments pulled in
+-- around a transfer — records we did NOT create — so every meetings read below excludes them.
 SELECT
   -- daily appointments (all Spyne-booked, active)
   (SELECT count() FROM dealer_leads.meetings
-     WHERE team_id={team_id:String} AND service_type={dept:String} AND source='spyne' AND is_active=1 AND __deleted=0
+     WHERE team_id={team_id:String} AND service_type={dept:String} AND source='spyne' AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer' AND is_active=1 AND __deleted=0
        AND created_at BETWEEN {start:DateTime} AND {end:DateTime}) AS appts,
   -- inbound-attributed (call_id ties to a non-spam, non-test inbound/web call)
   (SELECT count() FROM dealer_leads.meetings m
-     WHERE m.team_id={team_id:String} AND m.service_type={dept:String} AND m.source='spyne' AND m.is_active=1 AND m.__deleted=0
+     WHERE m.team_id={team_id:String} AND m.service_type={dept:String} AND m.source='spyne' AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer' AND m.is_active=1 AND m.__deleted=0
        AND m.created_at BETWEEN {start:DateTime} AND {end:DateTime}
        AND m.call_id != '' AND m.call_id IN (
          SELECT callId FROM dealer_leads.endcallreports
@@ -21,7 +24,7 @@ SELECT
            AND callDetails_callType IN ('webCall','inboundPhoneCall'))) AS inbound_appts,
   -- outbound-attributed
   (SELECT count() FROM dealer_leads.meetings m
-     WHERE m.team_id={team_id:String} AND m.service_type={dept:String} AND m.source='spyne' AND m.is_active=1 AND m.__deleted=0
+     WHERE m.team_id={team_id:String} AND m.service_type={dept:String} AND m.source='spyne' AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer' AND m.is_active=1 AND m.__deleted=0
        AND m.created_at BETWEEN {start:DateTime} AND {end:DateTime}
        AND m.call_id != '' AND m.call_id IN (
          SELECT callId FROM dealer_leads.endcallreports
@@ -54,7 +57,7 @@ SELECT
        AND c.createdAt BETWEEN {start:DateTime} AND {end:DateTime}) AS chat,
   -- month-to-date (month_start → end)
   (SELECT count() FROM dealer_leads.meetings
-     WHERE team_id={team_id:String} AND service_type={dept:String} AND source='spyne' AND is_active=1 AND __deleted=0
+     WHERE team_id={team_id:String} AND service_type={dept:String} AND source='spyne' AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer' AND is_active=1 AND __deleted=0
        AND created_at BETWEEN {month_start:DateTime} AND {end:DateTime}) AS appts_mtd,
   (SELECT count(DISTINCT leadId) FROM dealer_leads.endcallreports
      WHERE teamId={team_id:String} AND isActive=1 AND isTestCall=0 AND callDetails_callType='inboundPhoneCall' AND __deleted=0

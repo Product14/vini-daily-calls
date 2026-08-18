@@ -90,12 +90,18 @@ team_dim AS (SELECT enterprise_id, team_id, coalesce(nullIf(dealer_name,''),team
 lead_dim AS (SELECT lead_id, team_id, argMax(lower(ifNull(service_type,'')),created_at) AS lst
              FROM dealer_leads.leads FINAL WHERE is_deleted=0 AND __deleted=0 AND lead_id IS NOT NULL
              GROUP BY lead_id, team_id),
+-- meta.source='warm_transfer' is the DIRECT signal for one arm of the upstream defect noted above
+-- (source='spyne' stamped on appointments no AI booked): those rows are the customer's EXISTING
+-- appointments, pulled in around a transfer. Excluded on both branches. COMPLEMENTARY to the
+-- booking-tool test, not a replacement — the equity-mining cohort carries no meta.source at all.
 appt AS (SELECT conversation_id AS cid, groupArray(created_at) AS mt FROM dealer_leads.meetings FINAL
          WHERE __deleted=0 AND is_active=1 AND (source='spyne' OR source IS NULL)
+           AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer'
            AND conversation_id IS NOT NULL AND conversation_id!='' GROUP BY conversation_id),
 -- call bookings arrive via meetings.call_id -> conversations.callId
 appt_call AS (SELECT call_id AS cid, groupArray(created_at) AS mt FROM dealer_leads.meetings FINAL
          WHERE __deleted=0 AND is_active=1 AND (source='spyne' OR source IS NULL)
+           AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer'
            AND call_id IS NOT NULL AND call_id!='' GROUP BY call_id),
 
 -- ---------- SMS branch ----------

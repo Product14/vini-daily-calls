@@ -1,6 +1,9 @@
 -- ROI Daily Digest · ACTIVE CAMPAIGNS card (Metabase). Params: {{team_id}} {{start}} {{end}} {{dept}}.
 -- Faithful to campaign-query.js (running campaigns of the dept's type + dials + appts in window).
 -- Uses CTEs + LEFT JOINs (NOT correlated subqueries — ClickHouse doesn't support those).
+-- ★ CANONICAL (2026-08-18): source='spyne' says we OWN the booking; meta.source says HOW the row
+-- came to exist. meta.source='warm_transfer' rows are the customer's EXISTING appointments pulled in
+-- around a transfer — records we did NOT create — so every meetings read below excludes them.
 WITH
   running AS (
     SELECT campaignId, name, createdAt
@@ -27,7 +30,7 @@ WITH
   win_meetings AS (
     SELECT meeting_id, call_id
     FROM dealer_leads.meetings
-    WHERE team_id = {{team_id}} AND service_type = {{dept}} AND source = 'spyne'
+    WHERE team_id = {{team_id}} AND service_type = {{dept}} AND source = 'spyne' AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer'
       AND is_active = 1 AND __deleted = 0 AND created_at BETWEEN {{start}} AND {{end}}
       AND call_id != ''
   ),

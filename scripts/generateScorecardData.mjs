@@ -185,6 +185,9 @@ async function apptMetric(serviceType, teamIds, startExpr, endExpr) {
 SELECT team_id AS teamId, count() AS n
 FROM dealer_leads.meetings FINAL
 WHERE __deleted=0 AND is_active=1 AND source='spyne' AND service_type='${serviceType}'
+  -- canonical: source='spyne' says we OWN the booking; meta.source='warm_transfer' rows are the
+  -- customer's EXISTING appointments pulled in around a transfer — records we did not create.
+  AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer'
   AND status IN ('scheduled','completed')
   AND team_id IN (${teamList(teamIds)})
   AND created_at >= ${startExpr} AND created_at < ${endExpr}

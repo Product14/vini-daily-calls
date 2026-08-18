@@ -4,6 +4,7 @@ const {
     fmt,
     parseConversationCountRows,
     meetingsSpyneSourceClause,
+    meetingsNotWarmTransferClause,
     conversationInboundWhereClause,
 } = require('../utils/common');
 
@@ -165,6 +166,9 @@ const SalesInboundQuery = {
                AND m.team_id       = {tid:String}
                AND m.service_type  = 'sales'
                AND m.source       != 'spyne'            -- canonical: CRM-booked, not AI-booked
+               -- …but a warm_transfer row isn't a CRM BOOKING either: it's the customer's existing
+               -- appointment pulled in around a transfer (see meetingsNotWarmTransferClause).
+               AND ${meetingsNotWarmTransferClause('m')}
                AND m.created_at BETWEEN {start:DateTime} AND {end:DateTime}
                AND m.__deleted     = 0
                AND m.lead_id != ''

@@ -4,6 +4,9 @@
 -- Faithful to notification-service/queries/{sales,service}-inbound-outbound.query.js
 --   (enterprise_id dropped — team_id is globally unique; agentType title-cased for the
 --    conversations join). Returns ONE row. MTD = call this same card with start = month 1st.
+-- ★ CANONICAL (2026-08-18): source='spyne' says we OWN the booking; meta.source says HOW the row
+-- came to exist. meta.source='warm_transfer' rows are the customer's EXISTING appointments pulled in
+-- around a transfer — records we did NOT create — so every meetings read below excludes them.
 SELECT
   -- inbound unique leads  (countInboundUniqueLeads)
   (SELECT count(DISTINCT leadId) FROM dealer_leads.endcallreports
@@ -12,11 +15,11 @@ SELECT
        AND createdAt BETWEEN {{start}} AND {{end}} AND __deleted=0) AS inbound_unique_leads,
   -- all appointments  (countAll{Sales,Service}Appointments)
   (SELECT count() FROM dealer_leads.meetings
-     WHERE team_id={{team_id}} AND service_type={{dept}} AND source='spyne' AND is_active=1 AND __deleted=0
+     WHERE team_id={{team_id}} AND service_type={{dept}} AND source='spyne' AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer' AND is_active=1 AND __deleted=0
        AND created_at BETWEEN {{start}} AND {{end}}) AS appts_all,
   -- inbound-attributed appointments  (countInbound{Sales,Service}Appointments)
   (SELECT count() FROM dealer_leads.meetings m
-     WHERE m.team_id={{team_id}} AND m.service_type={{dept}} AND m.source='spyne' AND m.is_active=1 AND m.__deleted=0
+     WHERE m.team_id={{team_id}} AND m.service_type={{dept}} AND m.source='spyne' AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer' AND m.is_active=1 AND m.__deleted=0
        AND m.created_at BETWEEN {{start}} AND {{end}} AND m.lead_id != '' AND m.call_id != ''
        AND EXISTS (SELECT 1 FROM dealer_leads.endcallreports e
          WHERE e.callId=m.call_id AND e.teamId={{team_id}} AND e.isActive=1 AND e.isTestCall=0
@@ -35,7 +38,7 @@ SELECT
        AND lower(callDetails_agentInfo_agentType)={{dept}} AND createdAt BETWEEN {{start}} AND {{end}} AND __deleted=0) AS ob_connected,
   -- outbound-attributed appointments  (countOutbound{Sales,Service}Appointments)
   (SELECT count() FROM dealer_leads.meetings m
-     WHERE m.team_id={{team_id}} AND m.service_type={{dept}} AND m.source='spyne' AND m.is_active=1 AND m.__deleted=0
+     WHERE m.team_id={{team_id}} AND m.service_type={{dept}} AND m.source='spyne' AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer' AND m.is_active=1 AND m.__deleted=0
        AND m.created_at BETWEEN {{start}} AND {{end}} AND m.lead_id != '' AND m.call_id != ''
        AND EXISTS (SELECT 1 FROM dealer_leads.endcallreports e
          WHERE e.callId=m.call_id AND e.teamId={{team_id}} AND e.isTestCall=0

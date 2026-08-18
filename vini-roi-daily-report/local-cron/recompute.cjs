@@ -97,6 +97,9 @@ WITH
       AND campaignId!='' AND createdAt BETWEEN '${start}' AND '${end}' GROUP BY campaignId),
   win_meetings AS (SELECT meeting_id, call_id FROM dealer_leads.meetings
     WHERE team_id='${team}' AND service_type='${dept}' AND source='spyne' AND is_active=1 AND __deleted=0
+      -- canonical: meta.source='warm_transfer' rows are the customer's EXISTING appointments pulled in
+      -- around a transfer — records we did not create, never an appointment this campaign booked.
+      AND lower(JSONExtractString(ifNull(meta,''),'source'))!='warm_transfer'
       AND created_at BETWEEN '${start}' AND '${end}' AND call_id!=''),
   appts AS (SELECT ot.campaignId AS campaignId, count(DISTINCT m.meeting_id) AS appts
     FROM dealer_leads.outboundTasks ot INNER JOIN win_meetings m ON m.call_id=ot.callId

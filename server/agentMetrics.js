@@ -10,6 +10,7 @@
 // back to the bundled snapshot (public/agent-overall-snapshot.json).
 import { createRequire } from "node:module";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
+import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
 
 const require = createRequire(import.meta.url);
 // Inbound callbacks driven by an outbound touch are re-attributed to the
@@ -19,9 +20,12 @@ const QUERIES_RAW = require("./agentMetricsQueries.json");
 // no conversation-spine callback/direction logic to patch, so they're exempt
 // from the anchor-based rewrite (which throws when its CTE/JOIN/DIR anchors
 // are absent from the SQL).
+// meta.source='warm_transfer' meetings are appointments we did not create and
+// must not be counted — see warmTransferExclusion.js (same rule the event-email
+// send path applies, so the dashboard and the emails agree).
 const QUERIES = Object.fromEntries(
   Object.entries(QUERIES_RAW).map(([k, sql]) =>
-    [k, k.endsWith("_vouchers") ? sql : applyCallbackOutboundAttribution(sql, k)])
+    [k, k.endsWith("_vouchers") ? sql : applyWarmTransferExclusion(applyCallbackOutboundAttribution(sql, k), k)])
 );
 
 export function hasClickhouseCreds() {

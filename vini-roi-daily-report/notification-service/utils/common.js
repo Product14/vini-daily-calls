@@ -169,9 +169,35 @@ function parseConversationCountRows(rows) {
  * Inbound-only predicate for digest channel breakdown (requires {dept:String} = sales|service).
  * Call: linked endcallreports inboundPhoneCall. SMS/chat: non-campaign threads.
  */
-/** Digest meetings: only rows created through Spyne (excludes DMS / integration imports). */
+/**
+ * ★ CANONICAL (2026-08-18): meta.source='warm_transfer' rows are NOT appointments we created.
+ *
+ * `meetings.source` says who OWNS a booking ('spyne' = us, 'bdc'/'eleads' = the dealer's CRM);
+ * `meta.source` says HOW the row came to exist. 'warm_transfer' rows are the customer's EXISTING
+ * appointments, pulled in around a transfer — records nobody just booked (their start times are often
+ * the customer's own PAST visits). So source='spyne' alone is NOT proof the AI booked it, and such a
+ * row must never be counted as an appointment on EITHER side (AI-booked or AI-assisted/CRM).
+ *
+ * Caught on Honda of Downtown Los Angeles 2026-08-14: a manager got 7 "New appointment" emails for ONE
+ * customer in 6 seconds, all 7 warm_transfer (start times Jul-2024 → Jan-2026). Prod all-time has only
+ * three meta.source values — '' , 'warm_transfer' (4,975 / 48 teams), 'callback' (1,050) — so one
+ * equality test covers the rule. 'callback' rows are deliberately left alone.
+ *
+ * Applied identically in reporting-vini (agentBaseFact.sql appt_attribution, detailQueries.ts
+ * notWarmTransfer, push_metrics.py) and vini-daily-calls (server/warmTransferExclusion.js).
+ */
+function meetingsNotWarmTransferClause(tableAlias) {
+    const p = tableAlias ? `${tableAlias}.meta` : 'meta';
+    return `lower(JSONExtractString(ifNull(${p}, ''), 'source')) != 'warm_transfer'`;
+}
+
+/**
+ * Digest meetings: only rows created through Spyne (excludes DMS / integration imports), and never a
+ * warm_transfer row (see meetingsNotWarmTransferClause — 'spyne' ownership is not proof we booked it).
+ */
 function meetingsSpyneSourceClause(tableAlias) {
-    return tableAlias ? `${tableAlias}.source = 'spyne'` : `source = 'spyne'`;
+    const own = tableAlias ? `${tableAlias}.source = 'spyne'` : `source = 'spyne'`;
+    return `${own} AND ${meetingsNotWarmTransferClause(tableAlias)}`;
 }
 
 function conversationInboundWhereClause() {
@@ -209,5 +235,6 @@ module.exports = {
     toPeriodLabel,
     parseConversationCountRows,
     meetingsSpyneSourceClause,
+    meetingsNotWarmTransferClause,   // canonical: exclude appointments we did not create
     conversationInboundWhereClause,
 };

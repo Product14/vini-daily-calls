@@ -56,7 +56,10 @@ WITH
     LEFT JOIN dealer_leads.customer       c    ON c.customer_id = l.customer_id
     LEFT JOIN dealer_leads.conversations  conv ON conv.leadId   = l.lead_id AND conv.teamId = l.team_id
     LEFT JOIN dealer_leads.endcallreports ecr  ON ecr.leadId    = l.lead_id AND ecr.teamId  = l.team_id
+    -- meta.source='warm_transfer' rows are the customer's EXISTING appointments pulled in around a
+    -- transfer — records we did not create. Excluded so a lead isn't treated as having a meeting.
     LEFT JOIN dealer_leads.meetings       m    ON m.lead_id     = l.lead_id AND m.team_id   = l.team_id
+                                              AND lower(JSONExtractString(ifNull(m.meta,''),'source')) != 'warm_transfer'
     LEFT JOIN dealer_leads.actionItems    ai   ON ai.lead_id    = l.lead_id AND ai.team_id  = l.team_id
     WHERE l.team_id IN ('7607d0e6f5','6730ea9132','3d3deabc98')
       AND l.service_type = 'sales'

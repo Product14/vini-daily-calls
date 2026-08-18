@@ -12,12 +12,19 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runClickhouse, hasClickhouseCreds } from "./agentMetrics.js";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
+import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
 import { injectDealerWebsite, classifyOemBrands } from "./oemBrands.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+// applyWarmTransferExclusion: meta.source='warm_transfer' meetings are appointment
+// rows we did not create — never counted here. Same rule as the Overall view
+// (agentMetrics.js) and the event emails, so all three reconcile.
 const BASE_FACT = injectDealerWebsite(
-  applyCallbackOutboundAttribution(
-    readFileSync(join(here, "agentBaseFact.sql"), "utf8"),
+  applyWarmTransferExclusion(
+    applyCallbackOutboundAttribution(
+      readFileSync(join(here, "agentBaseFact.sql"), "utf8"),
+      "agentBaseFact.sql"
+    ),
     "agentBaseFact.sql"
   ),
   "agentBaseFact.sql"

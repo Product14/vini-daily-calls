@@ -93,6 +93,14 @@ const LEAD_DEPT_MAP =
 // (the same underlying table). SharedReplacingMergeTree keeps duplicate physical rows, so every
 // query collapses to the latest _version per _id BEFORE gating on open/overdue.
 const AI_DEPT = "if(service_type='service','service','sales')"; // mirror meetings' dept split
+// `m.source='spyne'` says Vini OWNS the booking; `meta.source` says HOW the row came to exist.
+// 'warm_transfer' rows are the customer's EXISTING appointments pulled in around a transfer —
+// records Vini did not create (start times are often the customer's own PAST visits). The send path
+// drops them (eventRunner.cjs → leadCaptureCH.fetchMeetingMetaSource), so the tracker's candidate
+// lists, volumes and funnel must drop them too — otherwise the tracker shows appointment emails that
+// will never go out, and previews render an appointment nobody booked. Appended to every meetings
+// WHERE in this file (alias `m`).
+const APPT_NOT_WARM_TRANSFER = " AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer'";
 // "2021 Honda Odyssey EX-L" from meta.vehicle_details (year/make/model); '' when the task has none.
 const aiVehicle = (col) =>
   "trimBoth(concat(JSONExtractString(" + col + ",'vehicle_details','year'),' '," +
@@ -324,7 +332,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       " FROM dealer_leads.meetings m" +
       " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
       " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
-      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'";
+      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER;
     const order = " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT 1";
     let row = eventKey ? await one(base + " AND (m.meeting_id=" + lit(eventKey) + " OR m._id=" + lit(eventKey) + ")" + order) : null;
     if (!row && !(eventKey && strict)) row = await one(base + order); // strict send path: don't substitute another appointment
@@ -434,7 +442,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " FROM dealer_leads.meetings m" + APPT_DIR_JOIN +
       " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
       " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
-      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne' AND m.created_at >= " + since + dfilt(dx) +
+      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER + " AND m.created_at >= " + since + dfilt(dx) +
       " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT " + lim + " OFFSET " + off;
     return (await runClickhouse(sql)).map((r) => {
       const who = displayName(r);
@@ -543,7 +551,7 @@ export async function countEventsCH({ sinceDays = 120 } = {}) {
     "SELECT m.team_id team_id, if(m.service_type='service','service','sales') department," +
     " " + CALL_DIR("ecr.dir") + " direction, uniqExact(m.meeting_id) total, toString(max(m.created_at)) last_at" +
     " FROM dealer_leads.meetings m" + APPT_DIR_JOIN +
-    " WHERE m.is_active=1 AND m.source='spyne' AND m.created_at >= " + since +
+    " WHERE m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER + " AND m.created_at >= " + since +
     " GROUP BY team_id, department, direction"), "post_appointment", "total");
   // post_conversation = calls (endcallreports) + SMS conversations, merged per team×dept×direction.
   const convAgg = new Map(); // `${team}::${dept}::${dir}` → { total, last_at }
@@ -626,7 +634,7 @@ export async function countEventsByDayCH({ teamId, department, emailType, tz = "
     const rows = await runClickhouse(
       "SELECT " + day("m.created_at") + " day, uniqExact(m.meeting_id) n" +
       " FROM dealer_leads.meetings m" +
-      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" +
+      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER +
       " AND if(m.service_type='service','service','sales')=" + lit(dept) +
       " AND m.created_at >= " + since + " GROUP BY day");
     bump(rows, "created"); bump(rows, "eligible");
