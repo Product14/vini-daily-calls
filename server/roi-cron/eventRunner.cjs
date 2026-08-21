@@ -261,6 +261,28 @@ async function fetchAllActionItems(qs) {
   }
   return { actionItems: all, total: all.length, capped: true };
 }
+
+// Fetch + shape the ROOFTOP-WIDE overdue digest payload (one email per team·dept·slot, not per
+// lead). Shared by runOnce and previewEvent so the scheduled email and the tracker's re-render
+// can never drift apart.
+async function overdueDigestPayload(teamId, dept) {
+  const [ov, open] = await Promise.all([
+    fetchAllActionItems(`team_id=${teamId}&serviceType=${dept}&scope=overdue`),
+    fetchAllActionItems(`team_id=${teamId}&serviceType=${dept}&scope=open`),
+  ]);
+  const overdue = ov.actionItems || [];
+  // Oldest-due-first = most overdue, so the top-10 list always keeps the most urgent items visible.
+  const topItems = overdue.slice().sort((a, b) => {
+    const adue = a.dueAt ? new Date(a.dueAt).getTime() : Infinity;
+    const bdue = b.dueAt ? new Date(b.dueAt).getTime() : Infinity;
+    return adue - bdue;
+  }).slice(0, 10);
+  return {
+    topItems, totalOverdueCount: overdue.length, totalPendingAllLeads: open.total,
+    capped: !!(ov.capped || open.capped),
+  };
+}
+
 function links(team, ent, dept) {
   const q = `?enterprise_id=${encodeURIComponent(ent || "")}&team_id=${encodeURIComponent(team)}&serviceType=${dept}`;
   return { appointment: `${CONSOLE_BASE}/appointments${q}`, conversations: `${CONSOLE_BASE}/conversations${q}`, actionItems: `${CONSOLE_BASE}/action-items${q}`, console: CONSOLE_BASE };
@@ -518,28 +540,14 @@ async function runOnce() {
       // to 9k+/day). The SLA is already breached, so a digest on the dealer's own rhythm is more useful than
       // per-item spam. Outside the two slots, this whole block is skipped: no fetch, no build.
       if (c.action_item_overdue_enabled && overdueSlot && !leadCapture) {
-        const [j, openForStat] = await Promise.all([
-          fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=overdue`),
-          fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`),
-        ]);
-        const overdue = j.actionItems || [];
-        if (j.capped || openForStat.capped) {
+        const { topItems, totalOverdueCount, totalPendingAllLeads, capped } = await overdueDigestPayload(L.team_id, dept);
+        if (capped) {
           out.action_items_feed_capped++;
           console.warn(`  ⚠ ${name} [${dept}] overdue feed hit cap — some items may be invisible`);
         }
-        const totalOverdueCount = overdue.length;
-        const totalPendingAllLeads = openForStat.total;
         if (totalOverdueCount > 0) {
           // ONE digest per team·dept·slot (not per lead) — shows count + top ~10 most-urgent items
           const dayKey = localDateISO(tz);
-          // Sort by dueAt (oldest first = most overdue) and take top items for the list
-          const topItems = overdue
-            .sort((a, b) => {
-              const adue = a.dueAt ? new Date(a.dueAt).getTime() : Infinity;
-              const bdue = b.dueAt ? new Date(b.dueAt).getTime() : Infinity;
-              return adue - bdue;
-            })
-            .slice(0, 10); // Show 10 most urgent per digest
           jobs.push({ type: "action_item_overdue", key: `rooftop:${L.team_id}:${dept}:overdue:${dayKey}:${overdueSlot}`,
             subject: `Overdue items — ${totalOverdueCount} pending · ${name}`,
             html: T.renderOverdueActionItemsDigest({ rooftopName: name, dept, tz, topItems, totalOverdueCount, totalPendingAllLeads, links: L_ }),
@@ -817,10 +825,17 @@ async function runOnce() {
       }
     } catch (e) { out.errors++; feedFailures.push({ rooftop: name, dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); console.log(`  ✗ ${name} [${dept}] feed error: ${String(e).slice(0, 140)}`); continue; }
 
-    // action_item / action_item_overdue are BATCHED across leads below — the same reasoning as
-    // the SMS channel (a large backlog otherwise means one full email per lead, back-to-back).
-    // post_appointment / post_conversation stay on this unchanged one-email-per-job path.
-    const BATCH_EMAIL_TYPES = new Set(["action_item", "action_item_overdue"]);
+    // action_item is BATCHED across leads below — a large backlog otherwise means one full email
+    // per lead, back-to-back. post_appointment / post_conversation stay on this unchanged
+    // one-email-per-job path.
+    //
+    // action_item_overdue must NOT be listed here. It became a rooftop-wide digest (ONE job per
+    // team·dept·slot, carrying its own pre-rendered `html`) and has no `emailLead`. Batching it
+    // discarded that html and re-rendered from `leads = [undefined]`, which the N<=1 branch of
+    // renderActionItemOverdueBatch turns into a "0 overdue action items" body — no-value-marked,
+    // so the anti-churn gate refused every single one. Landers DCJR's BDC manager went from ~700
+    // overdue alerts/day to zero while the subject line still read "1015 pending" (Aug 2026).
+    const BATCH_EMAIL_TYPES = new Set(["action_item"]);
 
     // ── 1) unchanged path — one email per job ──
     for (const job of jobs) {
@@ -941,12 +956,17 @@ async function runOnce() {
       // (emails may be deliberately held in dry-run while SMS is live). Per-dealer dry_run still
       // holds both channels for that rooftop.
       const smsDry = SMS_DRY_RUN || L.dry_run === true;
-      // action_item / action_item_overdue are BATCHED across leads below (one text can otherwise
-      // become 40+ near-simultaneous texts to the same phone when a rooftop's backlog is large —
-      // see the Jones Chrysler Dodge Jeep Ram incident). post_appointment / post_conversation stay
-      // on this unchanged one-SMS-per-job path — they're lower volume and each already reads as its
-      // own distinct event.
-      const BATCH_SMS_TYPES = new Set(["action_item", "action_item_overdue"]);
+      // action_item is BATCHED across leads below (one text can otherwise become 40+
+      // near-simultaneous texts to the same phone when a rooftop's backlog is large — see the
+      // Jones Chrysler Dodge Jeep Ram incident). post_appointment / post_conversation stay on this
+      // unchanged one-SMS-per-job path — they're lower volume and each already reads as its own
+      // distinct event.
+      //
+      // action_item_overdue is excluded for the same reason as BATCH_EMAIL_TYPES above: it is now
+      // one rooftop-wide digest job carrying its own `smsBody`, with no `smsLead` for the batch
+      // renderer to read. It is already a single send per team·dept·slot, so there is nothing to
+      // batch. (Latent until now only because no overdue-subscribed recipient had SMS enabled.)
+      const BATCH_SMS_TYPES = new Set(["action_item"]);
 
       // ── 1) unchanged path — one SMS per job ──
       for (const job of jobs) {
@@ -1106,7 +1126,17 @@ async function previewEvent(opts) {
     return T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ });
   }
 
-  // action_item / action_item_overdue → eventKey is `lead:<leadKey>:…`
+  // action_item_overdue is a ROOFTOP-WIDE digest keyed `rooftop:<team>:<dept>:overdue:<date>:<slot>`.
+  // Rebuild it exactly as runOnce does. Without this the per-lead path below parses "rooftop" as the
+  // lead key, matches no items, and returns null — so the tracker showed a blank preview and could
+  // not resend the digest. Pre-Aug-2026 rows are still keyed `lead:…` and keep the per-lead path.
+  if (emailType === "action_item_overdue" && eventKey.startsWith("rooftop:")) {
+    const { topItems, totalOverdueCount, totalPendingAllLeads } = await overdueDigestPayload(teamId, dept);
+    if (!totalOverdueCount) return null;
+    return T.renderOverdueActionItemsDigest({ rooftopName: name, dept, tz, topItems, totalOverdueCount, totalPendingAllLeads, links: L_ });
+  }
+
+  // action_item / legacy per-lead action_item_overdue → eventKey is `lead:<leadKey>:…`
   const leadKey = eventKey.replace(/^lead:/, "").split(":")[0];
   const scope = emailType === "action_item_overdue" ? "overdue" : "open";
   const j = await apiJson(`/api/action-items?team_id=${teamId}&serviceType=${dept}&scope=${scope}&limit=200`);
