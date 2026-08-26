@@ -92,7 +92,8 @@ export const setRecipientPhoneNow = (opts: { teamId?: string; dept?: DeptKind; e
 export const updateRecipientNow = (opts: { teamId?: string; id: string; email?: string; phone?: string; name?: string }) =>
   postJson("/api/recipients/update", { teamId: opts.teamId, id: opts.id, email: opts.email, phone: opts.phone, name: opts.name });
 
-/** Set (or clear) a recipient's role (salesperson|bdc|gm|null) for role-tiered transactional routing. */
+/** Set (or clear) a recipient's role (salesperson|bdc|gm|null). Descriptive label only — it does
+ *  NOT decide who gets emailed (see pickTieredRecipients in server/roi-cron/subscriptions.cjs). */
 export const setRecipientRoleNow = (opts: { teamId?: string; dept?: DeptKind; email: string; role: "salesperson" | "bdc" | "gm" | null }) =>
   addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, role: opts.role });
 
