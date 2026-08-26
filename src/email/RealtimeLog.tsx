@@ -1,240 +1,292 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { trackerAuthHeaders } from "./dataSource";
 
-interface SendLog {
+/* Realtime send feed — "what email just went out, anywhere in the fleet".
+ *
+ * Reads /api/tracker/realtime-feed, which merges the TWO tables a send can land in:
+ *   roi_event_emails  — transactional (action items, overdue, post-conversation). ~6.4k/day.
+ *   roi_digest_runs   — daily/weekly/monthly digests. ~60/day, in a burst at each rooftop's
+ *                       local send hour, so a digest-only view reads as "dead" all afternoon.
+ * Both are status='sent' only — held/not_sent/suppressed rows never count as "went out".
+ * Rooftop names are resolved server-side from roi_rooftop_config (neither send table carries
+ * a name column), so nothing here has to join. */
+
+type FeedRow = {
   id: string;
-  timestamp: Date;
+  kind: "transactional" | "digest";
+  type: string;
+  teamId: string;
   rooftop: string;
-  team_name: string;
-  team_id: string;
+  csm: string;
   department: string;
-  cadence: string;
-  status: string;
-  recipients_count: number;
-  opened_count?: number;
+  subject: string;
+  sentAt: string;
+  recipients: number;
+  opens: number;
+  /** How many stored event rows this ONE delivery covers (rollup emails fan in on message_id). */
+  events: number;
+};
+
+const WINDOWS = [
+  { label: "1h", minutes: 60 },
+  { label: "4h", minutes: 240 },
+  { label: "24h", minutes: 1440 },
+] as const;
+
+const TYPE_LABEL: Record<string, string> = {
+  action_item: "Action item",
+  action_item_overdue: "Overdue",
+  post_conversation: "Post-conversation",
+  post_appointment: "Post-appointment",
+  lead_capture: "Lead capture",
+  daily: "Daily digest",
+  weekly: "Weekly digest",
+  monthly: "Monthly digest",
+};
+
+const DEPT_LABEL: Record<string, string> = {
+  sales: "Sales",
+  service: "Service",
+  sales_ib: "Sales IB",
+  sales_ob: "Sales OB",
+  service_ib: "Service IB",
+  service_ob: "Service OB",
+};
+
+function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+/** "just now" / "3m ago" — relative to the SERVER's clock, so a skewed laptop clock can't
+ * render every row as hours old (or in the future). */
+function fmtAgo(iso: string, nowMs: number): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.round((nowMs - t) / 1000));
+  if (s < 45) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
 }
 
 export function RealtimeLog() {
-  const [logs, setLogs] = useState<SendLog[]>([]);
-  const [isPolling, setIsPolling] = useState(true);
-  const [stats, setStats] = useState({
-    totalSent: 0,
-    todaySent: 0,
-    lastUpdateTime: new Date(),
-  });
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
-  const lastCheckRef = useRef<string>("");
+  const [rows, setRows] = useState<FeedRow[]>([]);
+  const [windowMinutes, setWindowMinutes] = useState<number>(240);
+  const [live, setLive] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lastFetch, setLastFetch] = useState<Date | null>(null);
+  const [serverNowMs, setServerNowMs] = useState<number>(() => Date.now());
+  const [truncated, setTruncated] = useState(false);
+  // Ids seen on the PREVIOUS poll — anything outside this set is genuinely new and gets flashed.
+  const seenRef = useRef<Set<string> | null>(null);
+  const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
 
-  const fetchRecentSends = async () => {
+  const fetchFeed = useCallback(async (minutes: number) => {
     try {
-      const headers = trackerAuthHeaders();
-      if (!headers) {
-        console.warn("No auth headers available");
-        return;
-      }
-
-      const response = await fetch("/api/tracker/rooftops-data", {
-        headers,
+      const res = await fetch(`/api/tracker/realtime-feed?minutes=${minutes}&limit=200`, {
+        headers: trackerAuthHeaders(),
       });
-
-      if (!response.ok) {
-        console.error("Failed to fetch rooftop data:", response.statusText);
-        return;
+      if (!res.ok) {
+        // Surface the failure instead of leaving an empty list that reads as "nothing is sending".
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `${res.status} ${res.statusText}`);
       }
+      const data = await res.json();
+      const next: FeedRow[] = data.rows ?? [];
 
-      const data = await response.json();
+      const prevSeen = seenRef.current;
+      seenRef.current = new Set(next.map((r) => r.id));
+      // First load shouldn't flash every row — only mark new arrivals after a baseline exists.
+      setFreshIds(prevSeen ? new Set(next.filter((r) => !prevSeen.has(r.id)).map((r) => r.id)) : new Set());
 
-      if (!data.ok || !data.runs) {
-        return;
-      }
-
-      // Parse runs and filter for recent sends (last 24 hours)
-      const now = new Date();
-      const last24hAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-      const newLogs: SendLog[] = [];
-      const seenIds = new Set<string>();
-
-      // Process runs in reverse chronological order (newest first)
-      (data.runs || []).forEach((run: any) => {
-        const sentAt = run.sent_at ? new Date(run.sent_at) : null;
-        if (!sentAt) return;
-
-        // Only include last 24 hours of sends
-        if (sentAt < last24hAgo) return;
-
-        const logId = `${run.team_id}-${run.department}-${run.cadence}-${run.local_date}-${run.sent_at}`;
-        if (seenIds.has(logId)) return;
-        seenIds.add(logId);
-
-        newLogs.push({
-          id: logId,
-          timestamp: sentAt,
-          rooftop: run.rooftop_name || run.team_id.slice(0, 8),
-          team_name: run.team_name || run.enterprise_name || "",
-          team_id: run.team_id,
-          department: run.department,
-          cadence: run.cadence,
-          status: run.status,
-          recipients_count: run.recipients ? (Array.isArray(run.recipients) ? run.recipients.length : 0) : 0,
-          opened_count: run.open_count,
-        });
-      });
-
-      // Sort by timestamp descending
-      newLogs.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-
-      setLogs(newLogs);
-      setStats({
-        totalSent: newLogs.length,
-        todaySent: newLogs.length,
-        lastUpdateTime: new Date(),
-      });
-
-      lastCheckRef.current = new Date().toISOString();
-    } catch (error) {
-      console.error("Error fetching recent sends:", error);
+      setRows(next);
+      setTruncated(Boolean(data.truncated?.transactional || data.truncated?.digest));
+      setServerNowMs(data.serverNow ? new Date(data.serverNow).getTime() : Date.now());
+      setLastFetch(new Date());
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
     }
-  };
+  }, []);
 
+  // Refetch on window change; poll every 5s while live. Changing the window resets the
+  // new-row baseline so a wider window doesn't flash its whole backlog as "new".
   useEffect(() => {
-    // Initial fetch
-    fetchRecentSends();
+    seenRef.current = null;
+    setLoading(true);
+    fetchFeed(windowMinutes);
+    if (!live) return;
+    const id = setInterval(() => fetchFeed(windowMinutes), 5000);
+    return () => clearInterval(id);
+  }, [windowMinutes, live, fetchFeed]);
 
-    // Poll every 5 seconds
-    pollingRef.current = setInterval(() => {
-      if (isPolling) {
-        fetchRecentSends();
-      }
-    }, 5000);
-
-    return () => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-      }
+  const stats = useMemo(() => {
+    const hourAgo = serverNowMs - 3600_000;
+    const inHour = rows.filter((r) => new Date(r.sentAt).getTime() >= hourAgo);
+    const sum = (rs: FeedRow[]) => rs.reduce((n, r) => n + (r.recipients || 0), 0);
+    return {
+      total: rows.length,
+      transactional: rows.filter((r) => r.kind === "transactional").length,
+      digest: rows.filter((r) => r.kind === "digest").length,
+      lastHour: inHour.length,
+      recipients: sum(rows),
     };
-  }, [isPolling]);
+  }, [rows, serverNowMs]);
 
-  const formatTime = (date: Date) => {
-    return date.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: true,
-    });
-  };
-
-  const formatDepartment = (dept: string) => {
-    const deptMap: Record<string, string> = {
-      sales_ib: "Sales IB",
-      sales_ob: "Sales OB",
-      service_ib: "Service IB",
-      service_ob: "Service OB",
-    };
-    return deptMap[dept] || dept;
-  };
+  const windowLabel = WINDOWS.find((w) => w.minutes === windowMinutes)?.label ?? `${windowMinutes}m`;
 
   return (
-    <div style={{ height: "100vh", display: "flex", flexDirection: "column", backgroundColor: "#0f172a", color: "#e2e8f0", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+    <div className="flex h-full flex-col bg-surface-background">
       {/* Header */}
-      <div style={{ padding: "20px", borderBottom: "1px solid #1e293b", backgroundColor: "#0f172a" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-          <h1 style={{ margin: 0, fontSize: "24px", fontWeight: "600" }}>📧 Email Sends (Realtime)</h1>
-          <button
-            onClick={() => setIsPolling(!isPolling)}
-            style={{
-              padding: "8px 16px",
-              backgroundColor: isPolling ? "#ef4444" : "#22c55e",
-              color: "#fff",
-              border: "none",
-              borderRadius: "6px",
-              cursor: "pointer",
-              fontSize: "14px",
-              fontWeight: "500",
-            }}
-          >
-            {isPolling ? "Pause" : "Resume"}
-          </button>
+      <div className="border-b border-border-subtle bg-surface-card px-5 py-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-[15px] font-bold text-text-primary">Realtime send feed</h1>
+            <p className="text-[12px] text-text-secondary">
+              Every email that left the system — transactional and digests, newest first.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex overflow-hidden rounded-md border border-border-subtle">
+              {WINDOWS.map((w) => (
+                <button
+                  key={w.minutes}
+                  onClick={() => setWindowMinutes(w.minutes)}
+                  className={`px-2.5 py-1.5 text-[12px] font-semibold ${
+                    w.minutes === windowMinutes
+                      ? "bg-brand-primary text-brand-foreground"
+                      : "bg-surface-card text-text-secondary hover:bg-surface-subtle"
+                  }`}
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setLive((v) => !v)}
+              className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-semibold ${
+                live
+                  ? "border-positive-ring bg-positive-soft text-positive"
+                  : "border-border-subtle bg-surface-card text-text-secondary"
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${live ? "animate-pulse bg-positive" : "bg-text-tertiary"}`} />
+              {live ? "Live" : "Paused"}
+            </button>
+          </div>
         </div>
 
-        {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px" }}>
-          <div style={{ padding: "12px", backgroundColor: "#1e293b", borderRadius: "8px", border: "1px solid #334155" }}>
-            <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "4px" }}>EMAILS SENT (24H)</div>
-            <div style={{ fontSize: "32px", fontWeight: "700", color: "#4ade80" }}>{stats.todaySent}</div>
-          </div>
-          <div style={{ padding: "12px", backgroundColor: "#1e293b", borderRadius: "8px", border: "1px solid #334155" }}>
-            <div style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "4px" }}>LAST UPDATE</div>
-            <div style={{ fontSize: "14px", color: "#cbd5e1" }}>{formatTime(stats.lastUpdateTime)}</div>
-          </div>
+        {/* KPI row */}
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            { label: `Sent · last ${windowLabel}`, value: stats.total, tone: "text-text-primary" },
+            { label: "Sent · last hour", value: stats.lastHour, tone: "text-positive" },
+            { label: "Transactional", value: stats.transactional, tone: "text-text-primary" },
+            { label: "Digests", value: stats.digest, tone: "text-text-primary" },
+          ].map((k) => (
+            <div key={k.label} className="rounded-lg border border-border-subtle bg-surface-card px-3 py-2 shadow-card">
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">{k.label}</div>
+              <div className={`text-[22px] font-bold tabular-nums ${k.tone}`}>{k.value.toLocaleString()}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-2 text-[11px] text-text-tertiary">
+          {error ? (
+            <span className="font-semibold text-negative">Feed error — {error}</span>
+          ) : lastFetch ? (
+            <>
+              Updated {fmtClock(lastFetch.toISOString())} · refreshes every 5s ·{" "}
+              {stats.recipients.toLocaleString()} recipients addressed
+              {truncated ? (
+                <span className="font-semibold text-warning"> · capped at the newest 200 — widen nothing, this window sent more</span>
+              ) : null}
+            </>
+          ) : (
+            "Loading…"
+          )}
         </div>
       </div>
 
-      {/* Log Container */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column" }}>
-        {logs.length === 0 ? (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "#64748b" }}>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: "18px", marginBottom: "8px" }}>No emails sent in last 24 hours</div>
-              <div style={{ fontSize: "14px" }}>Check if digest cron is running • Updates every 5 seconds</div>
+      {/* Feed */}
+      <div className="flex-1 overflow-y-auto px-5 py-4">
+        {loading && rows.length === 0 ? (
+          <div className="flex min-h-[40vh] flex-col items-center justify-center gap-3">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-border-subtle border-t-brand-primary" />
+            <div className="text-[13px] font-semibold text-text-secondary">Loading feed…</div>
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="flex min-h-[40vh] flex-col items-center justify-center gap-2 text-center">
+            <div className="text-[14px] font-bold text-text-primary">No sends in the last {windowLabel}</div>
+            <div className="max-w-md text-[12px] text-text-secondary">
+              Digests go out in a burst at each rooftop's local send hour, so a quiet afternoon is
+              normal. Widen to 24h before treating this as an outage.
             </div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-            {logs.map((log, idx) => (
-              <div
-                key={log.id}
-                style={{
-                  padding: "12px 16px",
-                  backgroundColor: "#1e293b",
-                  borderRadius: "6px",
-                  border: "1px solid #334155",
-                  display: "grid",
-                  gridTemplateColumns: "80px 120px 140px 100px 100px 100px 1fr",
-                  gap: "12px",
-                  alignItems: "center",
-                  fontSize: "13px",
-                  animation: idx === 0 ? "slideIn 0.3s ease-out" : "none",
-                }}
-              >
-                <div style={{ color: "#4ade80", fontWeight: "600" }}>{formatTime(log.timestamp)}</div>
-                <div style={{ color: "#cbd5e1", maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={log.rooftop}>
-                  {log.rooftop}
-                </div>
-                <div style={{ color: "#a78bfa", maxWidth: "140px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={log.team_name}>
-                  {log.team_name || "—"}
-                </div>
-                <div style={{ color: "#94a3b8" }}>{formatDepartment(log.department)}</div>
-                <div style={{ color: "#94a3b8", textTransform: "capitalize" }}>{log.cadence}</div>
-                <div style={{ color: log.status === "sent" ? "#4ade80" : log.status === "held" ? "#f59e0b" : "#ef4444" }}>
-                  {log.status.toUpperCase()}
-                </div>
-                <div style={{ color: "#cbd5e1", textAlign: "right" }}>
-                  {log.recipients_count} recipient{log.recipients_count !== 1 ? "s" : ""}
-                  {log.opened_count !== undefined && log.opened_count > 0 && (
-                    <span style={{ color: "#60a5fa", marginLeft: "8px" }}>
-                      • {log.opened_count} opened
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
+          <div className="overflow-hidden rounded-lg border border-border-subtle bg-surface-card shadow-card">
+            <table className="w-full border-collapse text-[12px]">
+              <thead>
+                <tr className="border-b border-border-subtle bg-surface-subtle text-left text-[11px] uppercase tracking-wide text-text-muted">
+                  <th className="px-3 py-2 font-semibold">Time</th>
+                  <th className="px-3 py-2 font-semibold">Rooftop</th>
+                  <th className="px-3 py-2 font-semibold">Dept</th>
+                  <th className="px-3 py-2 font-semibold">Email</th>
+                  <th className="px-3 py-2 font-semibold">Subject</th>
+                  <th className="px-3 py-2 text-right font-semibold">To</th>
+                  <th className="px-3 py-2 text-right font-semibold">Opens</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr
+                    key={r.id}
+                    className={`border-b border-border-muted last:border-0 ${
+                      freshIds.has(r.id) ? "bg-brand-soft" : "hover:bg-surface-subtle"
+                    }`}
+                  >
+                    <td className="whitespace-nowrap px-3 py-2 tabular-nums text-text-primary">
+                      <span className="font-semibold">{fmtClock(r.sentAt)}</span>
+                      <span className="ml-1.5 text-text-tertiary">{fmtAgo(r.sentAt, serverNowMs)}</span>
+                    </td>
+                    <td className="max-w-[200px] truncate px-3 py-2 font-semibold text-text-primary" title={r.rooftop || r.teamId}>
+                      {r.rooftop || r.teamId}
+                      {r.csm ? <span className="ml-1.5 font-normal text-text-tertiary">· {r.csm}</span> : null}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2 text-text-secondary">
+                      {DEPT_LABEL[r.department] ?? r.department ?? "—"}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[11px] font-semibold ${
+                          r.kind === "digest" ? "bg-info-soft text-info" : "bg-warning-soft text-warning"
+                        }`}
+                      >
+                        {TYPE_LABEL[r.type] ?? r.type}
+                      </span>
+                    </td>
+                    <td className="max-w-[320px] truncate px-3 py-2 text-text-secondary" title={r.subject}>
+                      {r.subject || "—"}
+                      {r.events > 1 ? (
+                        <span className="ml-1.5 whitespace-nowrap text-text-tertiary" title="One email covering this many leads">
+                          ({r.events} leads)
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-text-primary">{r.recipients || "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-text-secondary">{r.opens || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
-
-      <style>{`
-        @keyframes slideIn {
-          from {
-            opacity: 0;
-            transform: translateY(-10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-      `}</style>
     </div>
   );
 }

@@ -40,11 +40,15 @@ function Router() {
   if (path === "/dream" || path.startsWith("/dream/")) {
     return <DreamDashboard />;
   }
-  if (path === "/email-tracker/realtime") {
+  // Must be matched BEFORE the generic "/email-tracker" prefix below, which would otherwise
+  // parse "realtime" as a lifecycle-stage segment and fall through to the grid.
+  if (path === "/email-tracker/realtime" || path === "/email-tracker/realtime/") {
     return (
-      <TrackerAuthGate>
-        <RealtimeLog />
-      </TrackerAuthGate>
+      <div style={{ height: "100vh", width: "100%" }}>
+        <TrackerAuthGate>
+          <RealtimeLog />
+        </TrackerAuthGate>
+      </div>
     );
   }
   if (path === "/email-tracker" || path.startsWith("/email-tracker/")) {
