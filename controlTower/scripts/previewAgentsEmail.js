@@ -18,13 +18,7 @@ import { snapshotAndCommentate } from "../server/dailySnapshot.js";
 import { fetchAgentsTotals, fetchAgentsDaily } from "../server/agentsSource.js";
 import { joinAppointments, computeRoiAndRag, summarizeVini,
          COST_PER_APPT, RAG_THRESHOLDS } from "../server/viniAgentTracker.js";
-import {
-  fetchContractedAgents, summarizeContracted,
-  fetchInOb,              summarizeInOb,
-  fetchLiveAndChurned,    summarizeLiveChurned,
-  fetchBlockedReasons,    topBlockerReasons,
-  fetchAgeing,            summarizeAgeing,
-} from "../server/viniMasterSheet.js";
+import { fetchCreditSources } from "../server/creditFunnel.js";   // ledger source (replaces the Google Sheet)
 import { fetchAllQuality } from "../server/superbrynQuality.js";
 import { buildHistoricalMetrics } from "../server/historicalAggregates.js";
 import { writeFileSync, readFileSync, existsSync, readdirSync } from "fs";
@@ -52,16 +46,11 @@ import { fileURLToPath } from "url";
 
 const DASHBOARD_URL = "https://vini-daily-calls.vercel.app/agents";
 
-console.log("→ Fetching Vini Master sheet (4 tabs) + agent spine (ClickHouse) + Superbryn quality…");
+console.log("→ Fetching Vini funnel (credit ledger) + agent spine (ClickHouse) + Superbryn quality…");
 const [
-  contractedRows, inObRows, liveChurnRows, blockerRows, ageingRows,
-  totals, daily, quality,
+  credit, totals, daily, quality,
 ] = await Promise.all([
-  fetchContractedAgents(),
-  fetchInOb(),
-  fetchLiveAndChurned(),
-  fetchBlockedReasons(),
-  fetchAgeing(),
+  fetchCreditSources(),
   fetchAgentsTotals(),
   fetchAgentsDaily(),
   fetchAllQuality({ lookbackHours: 24 }).catch(e => {
@@ -79,12 +68,10 @@ if (quality) {
 // Ageing is summarised below (after we have the churn cohort) so churned
 // enterprises can be filtered out before bucketing.
 
-const contracted   = summarizeContracted(contractedRows);
-const obSummary    = summarizeInOb(inObRows);
-const liveAndChurn = summarizeLiveChurned(liveChurnRows);
-const topBlockers5 = topBlockerReasons(blockerRows, 5);
+const { contracted, contractedRows, obSummary, liveChurn: liveAndChurn } = credit;
+const topBlockers5 = [];   // blocker-reasons retired with the sheet (no ledger equivalent)
 
-console.log(`✓ Master: ${contractedRows.length} contracted · ${inObRows.length} In_Ob · ${liveChurnRows.length} Live+Churn (${liveAndChurn.live.count} Live / ${liveAndChurn.churn.count} Churn) · ${blockerRows.length} blocker rows`);
+console.log(`✓ Credit ledger: ${contracted.count} contracted · ${obSummary.totalCount} OB · ${liveAndChurn.live.count} Live / ${liveAndChurn.churn.count} Churn`);
 console.log(`  Agent spine totals: ${totals.length} rows · daily ${daily.asOfDate} (${daily.rowCount} rows)`);
 
 // Live cohort → join Metabase appointments → score RAG.
@@ -169,18 +156,8 @@ const churnLumped = {
 };
 console.log(`  Churn (Live & Churned tab): ${churnLumped.count} agents · $${churnLumped.arr.toLocaleString()}`);
 
-// Filter Ageing — drop any row whose enterpriseId is a churned account, so
-// the "Contracting age · N accounts not yet fully live" card doesn't count
-// accounts that have already exited.
-const churnedEnterpriseIds = new Set(
-  liveAndChurn.churn.rows.map(r => r.enterpriseId).filter(Boolean)
-);
-const ageingFiltered = (() => {
-  const before = ageingRows.length;
-  const kept = ageingRows.filter(r => !churnedEnterpriseIds.has(r.enterpriseId));
-  console.log(`  Ageing: ${before} → ${kept.length} (removed ${before - kept.length} churned)`);
-  return summarizeAgeing(kept);
-})();
+// Ageing (contracting-age card) retired with the sheet — no ledger equivalent.
+const ageingFiltered = null;
 
 const payload = {
   header: {
@@ -323,8 +300,6 @@ writeFileSync(HTML_OUT, html);
 
 console.log(`✓ ${HTML_OUT} written`);
 console.log(`  Funnel: Contracted ${contracted.count}/$${contracted.arr.toLocaleString()} → OB ${obSummary.totalCount}/$${obSummary.totalArr.toLocaleString()} → Live ${vini.live.count}/$${vini.live.arr.toLocaleString()} → Churn ${churnLumped.count}/$${churnLumped.arr.toLocaleString()}`);
-console.log(`  Top blocker reasons (top 5 by ARR):`);
-topBlockers5.forEach(t => console.log(`    ${t.key.padEnd(20)} ${t.count} rows · $${t.arr.toLocaleString()}`));
 console.log(`  RAG by agent:`);
 vini.byAgentType.forEach(b => console.log(`    ${b.label.padEnd(11)} Live=${b.live}  G=${b.green}  A=${b.amber}  R=${b.red}  Churn=${b.churn}`));
 
