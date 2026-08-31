@@ -57,7 +57,20 @@ FROM tpa
 LEFT JOIN aggregated_data.aggregated_product_details apd
   ON tpa.teamId = apd.team_id AND apd.product_line_registry_id='${REGISTRY}' AND apd._peerdb_is_deleted=0
 LEFT JOIN product_curr pc ON apd.product_detail_id = pc.product_id
-WHERE apd.product_name IN ('inboundSales','outboundSales','inboundService','outboundService')`;
+-- Drop test/demo accounts (the ledger includes them; the sheet was hand-curated
+-- so it didn't). Mirrors the spine's enterprise filter (agentBaseFact.sql) so the
+-- funnel and the operating metrics share one universe. Without this, ~95 test
+-- products inflate OB by ~$7M (gibberish teams carrying fake $1.2M CARR).
+INNER JOIN eventila.enterprise_details ed FINAL ON apd.enterprise_id = ed.enterprise_id
+WHERE apd.product_name IN ('inboundSales','outboundSales','inboundService','outboundService')
+  AND ed.is_test_account = 0
+  AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%testing%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%test %'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '% test%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%spyne motors%'`;
 
 const distinct = (list, key) => new Set(list.map(r => r[key]).filter(Boolean)).size;
 const sum = (list, key) => list.reduce((s, r) => s + (Number(r[key]) || 0), 0);
