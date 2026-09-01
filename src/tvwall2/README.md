@@ -1,6 +1,8 @@
 # TV wall 2 — agent health by CSM
 
-Route: **`/tv-wall-2`**. Sales on the left (Inbound, Outbound), service on the right
+Route: **`/tv-wall-2`**, reachable from the **TV wall 2** entry in the View pill on `/`,
+beside **TV wall**. It is a link rather than a view toggle, so right-click and open-in-new-tab
+work: one wall per screen is the actual use case. Sales on the left (Inbound, Outbound), service on the right
 (Inbound, Outbound). Each product shows a live summary, a proportional RAG bar, and a
 per-CSM table. Nothing is clickable: it hangs on a wall.
 

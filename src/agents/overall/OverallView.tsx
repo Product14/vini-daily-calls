@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
+import { Tv } from "lucide-react";
 import {
   AGENTS, COLS, AGENT_COLOR, GRAINS, TREND_LIMITS, TV_LIMITS, SECTIONS, TV_METRICS,
   periodLabel, colLabel, periodEnd, swing, fmtInt, fmtPct, fmtMoneyCompact, abrColor,
@@ -37,22 +38,37 @@ const BORDER = "#e5e7eb";
 const GRAIN_LABEL: Record<Grain, string> = { day: "Day", week: "Week", month: "Month" };
 
 type ViewKind = "snapshot" | "trend" | "tv";
-const VIEWS: { key: ViewKind; label: string }[] = [
+const VIEWS: { key: ViewKind; label: string; icon?: boolean }[] = [
   { key: "snapshot", label: "Period snapshot" },
   { key: "trend", label: "Trend matrix" },
-  { key: "tv", label: "📺 TV wall" },
+  { key: "tv", label: "TV wall", icon: true },
+];
+
+/* The second wall is its own route, not a view of this one: different question, different
+   data source (the vini-success snapshot rather than /api/metrics), and no shared state to
+   drag in here. It sits in the same pill as a LINK rather than a button, so right-click and
+   open-in-new-tab work: putting one wall on each screen is the actual use case. */
+const VIEW_LINKS: { label: string; href: string }[] = [
+  { label: "TV wall 2", href: "/tv-wall-2" },
 ];
 
 const IMMERSIVE_IDLE_MS = 10_000; // go full-screen after 10s of no interaction
 const ROTATE_MS = 60_000;         // cycle Day → Week → Month every minute
 
 // ── Segmented control ─────────────────────────────────────────────────────────
-function Seg<T extends string>({ options, value, onChange, big }: {
-  options: { key: T; label: string }[];
+function Seg<T extends string>({ options, value, onChange, big, links }: {
+  options: { key: T; label: string; icon?: boolean }[];
   value: T;
   onChange: (v: T) => void;
   big?: boolean;
+  /** Rendered inside the same pill, but they navigate away rather than switch a view. */
+  links?: { label: string; href: string }[];
 }) {
+  const cell: CSSProperties = {
+    display: "inline-flex", alignItems: "center", gap: 6,
+    padding: big ? "8px 16px" : "6px 13px", border: "none", borderRadius: 8, cursor: "pointer",
+    fontSize: big ? 13.5 : 13, fontWeight: 600, transition: "all .15s",
+  };
   return (
     <div style={{ display: "inline-flex", background: "#f3f4f6", border: `1px solid ${BORDER}`, borderRadius: 10, padding: 3, gap: 2 }}>
       {options.map((o) => {
@@ -62,17 +78,27 @@ function Seg<T extends string>({ options, value, onChange, big }: {
             key={o.key}
             onClick={() => onChange(o.key)}
             style={{
-              padding: big ? "8px 16px" : "6px 13px", border: "none", borderRadius: 8, cursor: "pointer",
-              fontSize: big ? 13.5 : 13, fontWeight: 600, transition: "all .15s",
+              ...cell,
               background: active ? "#fff" : "transparent",
               color: active ? ACCENT : "#6b7280",
               boxShadow: active ? "0 1px 3px rgba(0,0,0,.12)" : "none",
             }}
           >
+            {o.icon && <Tv size={14} strokeWidth={2} aria-hidden="true" />}
             {o.label}
           </button>
         );
       })}
+      {(links ?? []).map((l) => (
+        <a
+          key={l.href}
+          href={l.href}
+          style={{ ...cell, background: "transparent", color: "#6b7280", textDecoration: "none" }}
+        >
+          <Tv size={14} strokeWidth={2} aria-hidden="true" />
+          {l.label}
+        </a>
+      ))}
     </div>
   );
 }
@@ -282,7 +308,8 @@ export function OverallView() {
           padding: "11px 16px", marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,.05)",
         }}>
           <div style={{ ...group, paddingRight: 18 }}>
-            <span style={lbl}>View</span><Seg options={VIEWS} value={view} onChange={setView} big />
+            <span style={lbl}>View</span>
+            <Seg options={VIEWS} value={view} onChange={setView} big links={VIEW_LINKS} />
           </div>
           <div style={{ ...group, paddingLeft: 18, borderLeft: `1px solid ${BORDER}`, paddingRight: 18 }}>
             <span style={lbl}>Granularity</span>
