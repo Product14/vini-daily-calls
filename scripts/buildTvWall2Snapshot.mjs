@@ -21,6 +21,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -200,6 +201,84 @@ for (const p of PRODUCTS) {
   audit[p.key] = list;
 }
 
+/* ---- what changed since the last run -------------------------------------------------
+   The wall prints a note under each table saying what moved and WHY, because a percentage
+   that changes overnight with no explanation gets read as the dashboard being wrong. The
+   worked example that made this necessary: Sales OB went 20% Green to 14% overnight, and
+   two of the three rooftops that fell had not got worse at all, their pro-rata multiplier
+   just shrank as they aged another day.
+
+   To diff, the run needs yesterday's per-agent state, so it is committed to
+   scripts/tvwall2-state.json. That file is NOT in public/, so Vercel never serves it, and
+   agents are keyed by a hash of team_id rather than by name: enough to match an agent across
+   runs, not enough to identify a dealer. Causes are reported as COUNTS, never as names, for
+   the same reason the public snapshot carries no rooftop names. */
+const STATE_PATH = join(REPO, "scripts", "tvwall2-state.json");
+const aid = (teamId) => createHash("sha256").update(String(teamId)).digest("hex").slice(0, 12);
+
+const stateNew = {};
+for (const k of Object.keys(audit)) {
+  stateNew[k] = { asOf: products[k].asOf, pct: products[k].total.pct, agents: {} };
+  for (const a of audit[k]) {
+    stateNew[k].agents[aid(a.teamId)] = {
+      band: a.band, ratioBand: a.ratioBand, dormant: a.dormant,
+      apptsRaw: a.apptsRaw, factor: a.factor, ratio: a.ratio, mrr: a.mrr, reach7: a.reach7,
+    };
+  }
+}
+
+let statePrev = null;
+if (existsSync(STATE_PATH)) {
+  try { statePrev = JSON.parse(readFileSync(STATE_PATH, "utf8")); }
+  catch { statePrev = null; }   // a corrupt state file must not block a refresh
+}
+
+/* Why an agent's band moved, in the order that actually explains it. Dormancy is checked
+   first only when the ratio band did NOT move, because a dormancy flip alone can change the
+   shown band while the underlying ratio sits still. */
+const CAUSE = {
+  appts:   "the appointment count changed",
+  /* Worded to make the point, not just name the mechanism: this agent did not get worse. */
+  aged:    "aged a day, so the pro-rata multiplier shrank",
+  dormant: "crossed the dormancy line",
+  woke:    "came back above the dormancy line",
+  mrr:     "an MRR change",
+  other:   "a change in inputs",
+};
+function causeOf(o, n) {
+  if (o.ratioBand === n.ratioBand && o.dormant !== n.dormant) return n.dormant ? "dormant" : "woke";
+  if (o.apptsRaw !== n.apptsRaw) return "appts";
+  if (o.factor !== n.factor) return "aged";
+  if (o.mrr !== n.mrr) return "mrr";
+  if (o.dormant !== n.dormant) return n.dormant ? "dormant" : "woke";
+  return "other";
+}
+
+for (const k of Object.keys(products)) {
+  const prev = statePrev && statePrev.products && statePrev.products[k];
+  if (!prev) { products[k].changes = null; continue; }   // first run has nothing to compare
+  const pa = prev.agents || {};
+  const na = stateNew[k].agents;
+  const groups = new Map();
+  let added = 0, removed = 0;
+  for (const id of Object.keys(na)) {
+    if (!(id in pa)) { added++; continue; }
+    const o = pa[id], n = na[id];
+    if (o.band === n.band) continue;
+    const key = n.band + "<" + o.band + "<" + causeOf(o, n);
+    groups.set(key, (groups.get(key) || 0) + 1);
+  }
+  for (const id of Object.keys(pa)) if (!(id in na)) removed++;
+  products[k].changes = {
+    since: prev.asOf,
+    sincePct: prev.pct,
+    added, removed,
+    moved: [...groups.entries()]
+      .map(([key, n]) => { const [to, from, cause] = key.split("<"); return { from, to, cause: CAUSE[cause], n }; })
+      .sort((x, y) => y.n - x.n),
+  };
+}
+
 const snapshot = {
   generatedAt: new Date().toISOString(),
   source: "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
@@ -214,6 +293,8 @@ const snapshot = {
 };
 
 writeFileSync(join(REPO, "public", "tvwall2-snapshot.json"), JSON.stringify(snapshot, null, 1));
+writeFileSync(STATE_PATH, JSON.stringify(
+  { generatedAt: snapshot.generatedAt, products: stateNew }, null, 1));
 writeFileSync(
   join(REPO, "scripts", "tvwall2-agents.local.json"),
   JSON.stringify({ generatedAt: snapshot.generatedAt, rules: snapshot.rules, agents: audit }, null, 1)
@@ -222,6 +303,7 @@ writeFileSync(
 // ---- report, so a silent wrong build is impossible ---------------------------------------
 const nAgents = Object.values(audit).reduce((n, l) => n + l.length, 0);
 console.log(`\n  wrote public/tvwall2-snapshot.json          aggregates only, safe for an ungated route`);
+console.log(`  wrote scripts/tvwall2-state.json           per-agent state for tomorrow's diff, hashed ids`);
 console.log(`  wrote scripts/tvwall2-agents.local.json    ${nAgents} agent rows with dealer names, GITIGNORED`);
 for (const k of Object.keys(products)) {
   const p = products[k];
@@ -233,4 +315,13 @@ for (const k of Object.keys(products)) {
       `dormant ${String(t.dormant).padStart(2)}  unrateable ${t.unrateable}  ` +
       `asOf ${p.asOf}  proRata ${p.proRata ? "yes" : "NO (no go-live date)"}`
   );
+  const c = p.changes;
+  if (c && (c.moved.length || c.added || c.removed)) {
+    const g = (b) => Math.round(c.sincePct[b] * 100) + "% -> " + Math.round(p.total.pct[b] * 100) + "%";
+    console.log(`    since ${c.since}: red ${g("red")}, amber ${g("amber")}, green ${g("green")}` +
+      (c.added ? `, +${c.added} new` : "") + (c.removed ? `, -${c.removed} gone` : ""));
+    for (const m of c.moved) console.log(`      ${m.n} ${m.from} -> ${m.to}: ${m.cause}`);
+  } else if (c) {
+    console.log(`    since ${c.since}: no band changed`);
+  }
 }

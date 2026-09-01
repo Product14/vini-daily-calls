@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-01T13:13:34.584Z",
+ "generatedAt": "2026-09-01T13:20:40.230Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -193,7 +193,18 @@
       "green": 0
      }
     }
-   ]
+   ],
+   "changes": {
+    "since": "2026-08-31",
+    "sincePct": {
+     "red": 0.7741935483870968,
+     "amber": 0.11290322580645161,
+     "green": 0.11290322580645161
+    },
+    "added": 0,
+    "removed": 0,
+    "moved": []
+   }
   },
   "salesOb": {
    "key": "salesOb",
@@ -368,7 +379,31 @@
       "green": 0
      }
     }
-   ]
+   ],
+   "changes": {
+    "since": "2026-08-30",
+    "sincePct": {
+     "red": 0.56,
+     "amber": 0.24,
+     "green": 0.2
+    },
+    "added": 0,
+    "removed": 0,
+    "moved": [
+     {
+      "from": "green",
+      "to": "amber",
+      "cause": "aged a day, so the pro-rata multiplier shrank",
+      "n": 2
+     },
+     {
+      "from": "green",
+      "to": "amber",
+      "cause": "the appointment count changed",
+      "n": 1
+     }
+    ]
+   }
   },
   "serviceIb": {
    "key": "serviceIb",
@@ -558,7 +593,18 @@
       "green": 0
      }
     }
-   ]
+   ],
+   "changes": {
+    "since": "2026-08-31",
+    "sincePct": {
+     "red": 0.509090909090909,
+     "amber": 0.14545454545454545,
+     "green": 0.34545454545454546
+    },
+    "added": 0,
+    "removed": 0,
+    "moved": []
+   }
   },
   "serviceOb": {
    "key": "serviceOb",
@@ -718,7 +764,18 @@
       "green": 0
      }
     }
-   ]
+   ],
+   "changes": {
+    "since": "2026-08-31",
+    "sincePct": {
+     "red": 0.8918918918918919,
+     "amber": 0.02702702702702703,
+     "green": 0.08108108108108109
+    },
+    "added": 0,
+    "removed": 0,
+    "moved": []
+   }
   }
  }
 }

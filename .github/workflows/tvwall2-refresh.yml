@@ -1,0 +1,145 @@
+name: Refresh TV wall 2
+
+# 13:30 IST DAILY. GitHub cron is UTC only and IST is UTC+5:30, so 08:00 UTC. IST has no
+# daylight saving, so this stays at 13:30 local all year.
+#
+# WHY 90 MINUTES AFTER THE SOURCE. The numbers come from the vini-success dataset files, which
+# that repo's own "Refresh dashboard data" workflow rebuilds at 06:30 UTC (noon IST). Scheduled
+# GitHub runs are best-effort: they queue on shared infrastructure, can fire tens of minutes
+# late (measured at ~26 minutes on the vini-success repo), and can be dropped entirely at peak
+# times. 08:00 UTC leaves that job an hour and a half to finish and push.
+#
+# IF IT RUNS EARLY ANYWAY, NOTHING BREAKS. The generator reads whatever datasets are on
+# vini-success main. If they have not moved since yesterday, it produces an identical snapshot,
+# the commit step finds no diff and skips, and the wall keeps showing what it already had. The
+# job reports the data dates it saw so an early run is visible rather than silent.
+#
+# WHAT IT COMMITS. public/tvwall2-snapshot.json (the aggregates the wall reads) and
+# scripts/tvwall2-state.json (yesterday's per-agent state, hashed ids, so tomorrow's run can
+# say what changed and why). The per-agent file with real dealer names is gitignored and never
+# leaves the runner.
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and report what would change, commit nothing'
+        type: boolean
+        required: false
+        default: false
+
+# One publish at a time. Without this a manual run and the scheduled one can both read main,
+# both regenerate, and the second push clobbers the first. Queued rather than cancelled, so a
+# manual run never silently discards the scheduled one.
+concurrency:
+  group: tvwall2-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      # Read-only, and only the dataset files. A PAT (or fine-grained token) with Contents:Read
+      # on Product14/vini-success must be stored as the VINI_SUCCESS_READ_TOKEN secret. The
+      # default GITHUB_TOKEN cannot reach another private repo.
+      - name: Check out the vini-success datasets
+        uses: actions/checkout@v4
+        with:
+          repository: Product14/vini-success
+          token: ${{ secrets.VINI_SUCCESS_READ_TOKEN }}
+          path: vini-success
+          sparse-checkout: prototype
+          sparse-checkout-cone-mode: true
+
+      - name: Fail clearly if the datasets are missing
+        run: |
+          if [ ! -f vini-success/prototype/data-inbound.json ]; then
+            echo "::error::vini-success/prototype/data-inbound.json is not there. Either the"\
+                 "VINI_SUCCESS_READ_TOKEN secret is missing or expired, or that repo moved its"\
+                 "dataset files. The wall keeps its previous snapshot until this is fixed."
+            exit 1
+          fi
+          echo "### Source data" >> "$GITHUB_STEP_SUMMARY"
+          for f in data-inbound.json data-30d.json data-service-inbound.json data-service-outbound.json; do
+            d=$(node -e "console.log(require('./vini-success/prototype/$f').asOf)")
+            echo "- \`$f\` asOf **$d**" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # No npm install: the generator uses only node builtins, so there is nothing to install
+      # and nothing that can break on a transitive dependency.
+      - name: Build the snapshot
+        id: build
+        run: |
+          set -o pipefail
+          VINI_SUCCESS_DIR="$PWD/vini-success/prototype" \
+            node scripts/buildTvWall2Snapshot.mjs | tee /tmp/build.log
+          {
+            echo "### What the wall will say"
+            echo '```'
+            cat /tmp/build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit if anything moved
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/tvwall2-snapshot.json scripts/tvwall2-state.json
+          if git diff --cached --quiet; then
+            echo "Nothing changed: the source datasets have not moved since the last run." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # The changes the wall prints under each table are already in the snapshot, so the
+          # commit body carries them too: the git log becomes the record of why a band moved.
+          {
+            echo "tv-wall-2: daily refresh"
+            echo
+            sed -n '/^  Sales Inbound/,$p' /tmp/build.log
+          } > /tmp/msg
+          git commit -q -F /tmp/msg
+          git push
+          echo "Pushed. Vercel redeploys and the wall picks it up within 5 minutes." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # A silent failure on a wall display is the worst outcome: the screen keeps showing a
+      # confident number that stopped being refreshed. Same pattern the vini-success refresh
+      # uses, so a dropped run is a notification rather than something noticed weeks later.
+      - name: Open an issue if the refresh failed
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `TV wall 2 refresh failed (${new Date().toISOString().slice(0, 10)})`,
+              body: [
+                `The daily refresh for \`/tv-wall-2\` failed. The wall is still up and still`,
+                `showing its previous snapshot, so it is now quietly out of date rather than blank.`,
+                ``,
+                `Run: ${url}`,
+                ``,
+                `Most likely causes, in order:`,
+                `1. \`VINI_SUCCESS_READ_TOKEN\` expired or was revoked.`,
+                `2. \`Product14/vini-success\` moved or renamed its \`prototype/data-*.json\` files.`,
+                `3. That repo's own refresh failed, so there was nothing new to read.`,
+                ``,
+                `Manual fallback is in \`src/tvwall2/README.md\`.`,
+              ].join("\n"),
+            });

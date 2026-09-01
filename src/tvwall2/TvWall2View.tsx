@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Info, Maximize2, Minimize2, X } from "lucide-react";
 import {
   BAND_COLOR, SIDES, money, moneyShort, pct,
-  useSnapshot, type Band, type Product, type Snapshot,
+  useSnapshot, type Band, type Change, type Product, type Snapshot,
 } from "./tvWall2Data";
 
 /**
@@ -257,7 +257,52 @@ function ProductBlock({ p }: { p: Product }) {
           </tbody>
         </table>
       </div>
+      <ChangeNote c={p.changes} now={p.total.pct} />
     </div>
+  );
+}
+
+/**
+ * What moved since the last refresh, and why.
+ *
+ * This exists because Sales OB went 20% Green to 14% overnight and the only way to know
+ * whether that mattered was to diff two datasets by hand. Two of the three rooftops that
+ * fell had not got worse at all: their pro-rata multiplier shrank because they aged a day.
+ * A wall that moves without saying why gets read as broken.
+ *
+ * Always rendered, even when nothing changed. Partly so "nothing moved" is a stated fact
+ * rather than an absence, and partly because the fit routine levels all four tables to the
+ * smallest: a note on one block only would silently shrink the other three.
+ *
+ * Counts, never names. The public snapshot carries no rooftop names by design, so neither
+ * does this. Open the local audit file to find out which rooftop it was.
+ */
+function ChangeNote({ c, now }: { c: Change | null; now: Product["total"]["pct"] }) {
+  if (!c) return <p className="tv2-note tv2-note-quiet">First run: nothing to compare against yet.</p>;
+
+  const shifted = (["red", "amber", "green"] as Band[])
+    .filter((b) => Math.round(c.sincePct[b] * 100) !== Math.round(now[b] * 100));
+
+  const quiet = !shifted.length && !c.moved.length && !c.added && !c.removed;
+  if (quiet)
+    return <p className="tv2-note tv2-note-quiet">No band changed since {c.since}.</p>;
+
+  return (
+    <p className="tv2-note">
+      <span className="tv2-notelab">Since {c.since}</span>
+      {shifted.map((b) => (
+        <span key={b} className="tv2-delta" style={{ color: BAND_COLOR[b].ink }}>
+          {b} {pct(c.sincePct[b])} <span aria-hidden="true">&rarr;</span> {pct(now[b])}
+        </span>
+      ))}
+      {c.moved.map((m, i) => (
+        <span key={i} className="tv2-why">
+          {m.n} {m.from} <span aria-hidden="true">&rarr;</span> {m.to}, {m.cause}
+        </span>
+      ))}
+      {c.added ? <span className="tv2-why">{c.added} newly live</span> : null}
+      {c.removed ? <span className="tv2-why">{c.removed} no longer live</span> : null}
+    </p>
   );
 }
 
@@ -342,6 +387,17 @@ const CSS = `
 .tv2-bar span{display:block;height:100%}
 
 .tv2-wrap{flex:1 1 auto;min-height:0;overflow:hidden}
+
+/* The overnight-change line. Sits under the table, one or two lines, and is always present
+   so all four blocks keep the same shape for the fit routine. */
+.tv2-note{margin:0;flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:baseline;
+  gap:2px 10px;font-size:max(10.5px,0.82vh);line-height:1.35;color:#475467;
+  padding-top:6px;border-top:1px solid #F2F4F7}
+.tv2-note-quiet{color:#98A2B3}
+.tv2-notelab{font-weight:700;color:var(--ink)}
+.tv2-delta{font-weight:700}
+.tv2-why{color:var(--quiet)}
+.tv2-why::before{content:"·";margin-right:8px;color:#D0D5DD}
 /* Fixed layout with an explicit colgroup: "Deepanshu Agarwal" clipped to "Deepanshu Ag…"
    on a wall display, and a name nobody can read is a name nobody can act on. */
 .tv2-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:15px;

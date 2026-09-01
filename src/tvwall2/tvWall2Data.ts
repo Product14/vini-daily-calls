@@ -45,6 +45,16 @@ export type Summary = {
 
 export type CsmRow = Summary & { csm: string };
 
+export type Change = {
+  /** The previous run's data date for this product. */
+  since: string;
+  sincePct: { red: number; amber: number; green: number };
+  added: number;
+  removed: number;
+  /** Grouped by from-band, to-band and cause. Counts only: never a dealer name. */
+  moved: { from: Band; to: Band; cause: string; n: number }[];
+};
+
 export type Product = {
   key: "salesIb" | "salesOb" | "serviceIb" | "serviceOb";
   label: string;
@@ -57,6 +67,8 @@ export type Product = {
   proRata: boolean;
   total: Summary;
   csms: CsmRow[];
+  /** What moved since the last refresh, and why. Null on the very first run. */
+  changes: Change | null;
   /* No per-agent array on purpose: it would put 204 real dealer names on an ungated
      route to render nothing. The generator writes those to a gitignored local file. */
 };

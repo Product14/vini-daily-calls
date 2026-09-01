@@ -24,8 +24,8 @@ Measured type size, no scroll at any of them:
 
 | Screen | Table type |
 |---|---|
-| 3840x2160 | 35px |
-| 1920x1080 | 15px |
+| 3840x2160 | 34px |
+| 1920x1080 | 14px |
 | 1366x768 | 8px, too small to read across a room |
 
 1080p on a 55-inch panel is comfortable to about 3 metres. A laptop-sized viewport is not
@@ -65,16 +65,56 @@ roster are already defined and cross-checked there; re-deriving them from ClickH
 would create a second definition of "Red" to keep in step with the first, and they would
 drift the first time either side changed.
 
-To refresh:
+### It refreshes itself daily
+
+`.github/workflows/tvwall2-refresh.yml`, **08:00 UTC = 13:30 IST**, every day. That is 90
+minutes after the vini-success repo rebuilds its datasets at 06:30 UTC, which leaves slack
+because scheduled GitHub runs are best-effort and can fire tens of minutes late.
+
+**It needs one secret: `VINI_SUCCESS_READ_TOKEN`**, a token with Contents:Read on
+`Product14/vini-success`. The default `GITHUB_TOKEN` cannot reach another private repo, so
+until that secret exists the workflow fails on its third step with an explicit message, and
+the wall keeps its previous snapshot. Add it under Settings, Secrets and variables, Actions.
+
+If it runs before the source has moved, nothing breaks: the snapshot comes out identical,
+the commit step finds no diff and skips, and the wall keeps what it had. The job summary
+prints the data dates it saw, so an early run is visible rather than silent. A failed
+scheduled run opens an issue, because the bad outcome for a wall is not going blank, it is
+quietly showing a confident number that stopped being refreshed.
+
+`workflow_dispatch` runs it on demand, with a `dry_run` input that builds and reports
+without committing.
+
+Manual refresh, if you need it:
 
 ```bash
 VINI_SUCCESS_DIR=~/Desktop/repos/vini-success/prototype \
   node scripts/buildTvWall2Snapshot.mjs
 ```
 
-It prints agent counts, ARR and band counts per product, so a wrong build cannot pass
-quietly. Commit the regenerated JSON and deploy. The view refetches every 5 minutes while
-the tab is visible, so a deploy reaches the TV without anyone touching it.
+It prints agent counts, ARR, band counts and what changed per product, so a wrong build
+cannot pass quietly. Commit the two regenerated JSONs and push. The view refetches every 5
+minutes while the tab is visible, so a deploy reaches the TV without anyone touching it.
+
+### What changed, under each table
+
+Every table carries a line saying what moved since the last refresh and why. It exists
+because Sales OB went 20% Green to 14% overnight and the only way to find out whether that
+mattered was to diff two datasets by hand: two of the three rooftops that fell had not got
+worse at all, their pro-rata multiplier shrank because they aged a day.
+
+To diff, a run needs yesterday's per-agent state, so `scripts/tvwall2-state.json` is
+committed. It is not in `public/`, so Vercel never serves it, and agents are keyed by a
+hash of `team_id`: enough to match an agent across runs, not enough to identify a dealer.
+
+**The note gives counts and causes, never rooftop names**, for the same reason the public
+snapshot carries none. If you want the names on the wall, they have to either go on a
+public URL or the wall has to be gated first. Until then the names are in the local audit
+file.
+
+The note is always rendered, including when nothing moved. Partly so "nothing changed" is
+a stated fact rather than an absence, and partly because the fit routine levels all four
+tables to the smallest: a note on one block only would silently shrink the other three.
 
 ## Row order
 
