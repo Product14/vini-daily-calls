@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Maximize2, Minimize2 } from "lucide-react";
+import { Info, Maximize2, Minimize2, X } from "lucide-react";
 import {
   BAND_COLOR, SIDES, money, moneyShort, pct,
   useSnapshot, type Band, type Product, type Snapshot,
@@ -30,6 +30,9 @@ export default function TvWall2View() {
   const { snap, error } = useSnapshot();
   const [idleImmersive, setIdleImmersive] = useState(false);
   const [isFs, setIsFs] = useState(false);
+  /* The basis used to sit permanently across the bottom. It has to stay reachable, but on a
+     wall it was four lines nobody reads from across the room eating height the tables want. */
+  const [showInfo, setShowInfo] = useState(false);
   const immersive = idleImmersive || isFs;
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -43,7 +46,8 @@ export default function TvWall2View() {
     };
     const onActivity = (e: Event) => {
       const t = e.target as HTMLElement | null;
-      if (t && t.closest && t.closest("[data-tv-fs]")) return;
+      // Clicking the chrome must not drop the wall out of immersive mid-read.
+      if (t && t.closest && t.closest("[data-tv-keep]")) return;
       setIdleImmersive(false);
       schedule();
     };
@@ -55,6 +59,13 @@ export default function TvWall2View() {
       evs.forEach((e) => window.removeEventListener(e, onActivity));
     };
   }, []);
+
+  useEffect(() => {
+    if (!showInfo) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowInfo(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showInfo]);
 
   useEffect(() => {
     const onFs = () => setIsFs(Boolean(document.fullscreenElement));
@@ -127,7 +138,12 @@ export default function TvWall2View() {
             Sales through {snap.products.salesIb.asOf} · Service through {snap.products.serviceIb.asOf}
           </span>
         )}
-        <button type="button" className="tv2-fs" data-tv-fs onClick={toggleFullscreen}
+        <button type="button" className="tv2-fs" data-tv-keep aria-expanded={showInfo}
+                aria-controls="tv2-info" onClick={() => setShowInfo((v) => !v)}
+                aria-label="How each number is built">
+          <Info size={16} strokeWidth={1.75} />
+        </button>
+        <button type="button" className="tv2-fs" data-tv-keep onClick={toggleFullscreen}
                 aria-label={isFs ? "Exit full screen" : "Go full screen"}>
           {isFs ? <Minimize2 size={16} strokeWidth={1.75} /> : <Maximize2 size={16} strokeWidth={1.75} />}
         </button>
@@ -153,7 +169,12 @@ export default function TvWall2View() {
               </section>
             ))}
           </div>
-          <Footer snap={snap} />
+          {showInfo && (
+            <>
+              <div className="tv2-scrim" data-tv-keep onClick={() => setShowInfo(false)} />
+              <InfoPanel snap={snap} onClose={() => setShowInfo(false)} />
+            </>
+          )}
         </>
       )}
     </div>
@@ -240,11 +261,22 @@ function ProductBlock({ p }: { p: Product }) {
   );
 }
 
-function Footer({ snap }: { snap: Snapshot }) {
+function InfoPanel({ snap, onClose }: { snap: Snapshot; onClose: () => void }) {
   const r = snap.rules;
   const p = snap.products;
+  const ref = useRef<HTMLDivElement>(null);
+  // Focus the panel on open so Escape and a screen reader both land somewhere sensible.
+  useEffect(() => { ref.current?.focus(); }, []);
   return (
-    <footer className="tv2-foot">
+    <div className="tv2-info" id="tv2-info" role="dialog" aria-modal="false"
+         aria-label="How each number is built" tabIndex={-1} ref={ref} data-tv-keep>
+      <div className="tv2-infotop">
+        <h2>How each number is built</h2>
+        <button type="button" className="tv2-fs" data-tv-keep onClick={onClose} aria-label="Close">
+          <X size={15} strokeWidth={1.75} />
+        </button>
+      </div>
+      <div className="tv2-foot">
       <span>
         <b>RAG</b> = appointments in 30 days x appointment value, divided by MRR (ARR / 12).
         Green {r.rag.green}x and above, Amber {r.rag.amber}x to {r.rag.green}x, Red below {r.rag.amber}x.
@@ -264,7 +296,8 @@ function Footer({ snap }: { snap: Snapshot }) {
         service agent is scaled. And dormancy reads leads reached everywhere except Service Inbound,
         where nothing is reached, so it reads conversations held.
       </span>
-    </footer>
+      </div>
+    </div>
   );
 }
 
@@ -321,12 +354,28 @@ const CSS = `
 .tv2-csm{font-weight:600;overflow:hidden;text-overflow:ellipsis}
 .tv2-total td{border-bottom:none;border-top:2px solid var(--brand);font-weight:800;padding-top:.35em}
 
-/* Four columns, not two rows: the basis has to stay on the wall (a bare percentage on a
-   TV gets argued with and then ignored) but every pixel it takes is a pixel off the tables,
-   which are what people actually read from across the room. */
-.tv2-foot{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,1fr);gap:0 18px;
-  font-size:10px;line-height:1.4;color:var(--quiet)}
-.tv2-foot b{color:#475467}
+/* The basis lives behind the Info button rather than across the bottom. It still has to be
+   one click away (a bare percentage on a wall gets argued with and then ignored), but as a
+   permanent footer it was four lines nobody reads from across the room, eating height the
+   tables want. Off the wall, the type can also be a readable size instead of 10px. */
+/* Light, because this is a popover on a wall and not a modal on a form: at .28 it turned the
+   tables muddy, and the point of a wall is that the tables stay readable while someone at the
+   laptop checks the basis. Enough tint to signal "click anywhere to dismiss", no more. */
+.tv2-scrim{position:absolute;inset:0;z-index:40;background:rgba(16,24,40,.10)}
+.tv2-info{position:absolute;z-index:41;top:52px;right:16px;width:min(46vw,calc(100% - 32px));
+  min-width:min(680px,calc(100% - 32px));
+  max-height:calc(100% - 80px);overflow:auto;background:#fff;border:1px solid var(--line);
+  border-radius:14px;padding:14px 16px 16px;box-shadow:0 16px 44px rgba(70,0,242,.16)}
+.tv2-info:focus{outline:none}
+.tv2-info:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.tv2-infotop{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.tv2-infotop h2{margin:0;font-size:max(13px,0.95vh);font-weight:800;letter-spacing:.04em;
+  text-transform:uppercase;color:var(--brand)}
+.tv2-infotop .tv2-fs{margin-left:auto}
+/* Scales with the screen like the tables do: 13px on a laptop, ~18px on a 4K wall. A fixed
+   13px was legible at a desk and unreadable on the panel someone opens from across a room. */
+.tv2-foot{display:grid;gap:9px;font-size:max(13px,0.85vh);line-height:1.5;color:#475467}
+.tv2-foot b{color:var(--ink)}
 
 @media (prefers-reduced-motion:reduce){.tv2 *{transition:none!important;animation:none!important}}
 `;

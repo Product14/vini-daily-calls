@@ -13,14 +13,19 @@ Open `/tv-wall-2` and leave it. After 10 seconds of no input it goes immersive
 (full-viewport, chrome hidden). There is also a fullscreen button in the header for real
 browser fullscreen. Both are independent, so clicking one never cancels the other.
 
+The basis for every number sits behind the **Info** button in the header rather than across
+the bottom of the wall. It used to be a permanent four-line footer, which nobody reads from
+across a room and which cost the tables height. Escape or a click anywhere outside closes
+it, and clicking either header button does not drop the wall out of immersive.
+
 The tables size themselves by measurement: each block is fitted to its box, then all four
 are levelled to the smallest that fits, so the wall reads as one design rather than four.
 Measured type size, no scroll at any of them:
 
 | Screen | Table type |
 |---|---|
-| 3840x2160 | 34px |
-| 1920x1080 | 14px |
+| 3840x2160 | 35px |
+| 1920x1080 | 15px |
 | 1366x768 | 8px, too small to read across a room |
 
 1080p on a 55-inch panel is comfortable to about 3 metres. A laptop-sized viewport is not
