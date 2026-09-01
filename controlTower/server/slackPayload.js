@@ -4,11 +4,7 @@
 // uses to decide whether it's safe to send (never send on a broken/zero feed).
 
 import { fetchAgentsTotals } from "./agentsSource.js";
-import {
-  fetchContractedAgents, summarizeContracted,
-  fetchInOb,             summarizeInOb,
-  fetchLiveAndChurned,   summarizeLiveChurned,
-} from "./viniMasterSheet.js";
+import { fetchCreditSources } from "./creditFunnel.js";   // ledger source (replaces the Google Sheet)
 import { joinAppointments, computeRoiAndRag, summarizeVini } from "./viniAgentTracker.js";
 import { fetchAllQuality } from "./superbrynQuality.js";
 import { buildHistoricalMetrics, AGENT_ORDER } from "./historicalAggregates.js";
@@ -19,16 +15,12 @@ import { fileURLToPath } from "url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");   // controlTower/
 
 export async function assembleSlackPayload() {
-  const [contractedRows, obRows, liveChurnRows, totals, quality] = await Promise.all([
-    fetchContractedAgents(),
-    fetchInOb(),
-    fetchLiveAndChurned(),
+  const [credit, totals, quality] = await Promise.all([
+    fetchCreditSources(),
     fetchAgentsTotals(),
     fetchAllQuality({ lookbackHours: 24 }).catch(() => null),
   ]);
-  const contracted = summarizeContracted(contractedRows);
-  const obSummary  = summarizeInOb(obRows);
-  const liveChurn  = summarizeLiveChurned(liveChurnRows);
+  const { contracted, contractedRows, obSummary, liveChurn } = credit;
   const scored     = computeRoiAndRag(joinAppointments(liveChurn.live.rows, totals));
   const vini       = summarizeVini([
     ...scored,

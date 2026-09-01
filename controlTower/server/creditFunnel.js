@@ -1,30 +1,33 @@
-// ─── Vini funnel straight from the ARR ledger (credit_v2) ───────────────────
-// Replacement candidate for the hand-maintained Google Sheet. Pulls the
-// lifecycle funnel (Contracted / Onboarding / Live / Churned) + per-agent-type
-// ARR from credit_v2.arrChangeEvents, keyed on the Vini product-line registry.
+// ─── Vini funnel from the ARR ledger (credit_v2) — replaces the Google Sheet ─
+// Reproduces the canonical Vini bifurcation query EXACTLY (same population +
+// same ARR): teams with a Vini product-line CARR event → per-product current
+// CARR via argMax on arrChangeEvents → grouped by stage. Enriched with team /
+// enterprise NAMES and the live/ob go-live date from aggregated_product_details
+// (joined on product_detail_id), which the query's own base already LEFT JOINs.
 //
-// Two ARR types on the ledger: CARR (contracted) and LARR (live/realized). We
-// use CARR for the signed/onboarding stages and LARR for Live (matches the
-// realized ARR the report shows today). One ClickHouse scan via GROUPING SETS:
-// stage totals + per-(agent, stage) rows.
+// IMPORTANT: ARR = product_curr.curr_arr (the argMax CARR from arrChangeEvents),
+// NOT aggregated_product_details.contracted_arr. The two diverge at churn — the
+// event stream writes CARR down at churn ($303K) while the aggregated column
+// keeps the original contracted value ($2.21M). We use the event value to match
+// the canonical query.
 //
-// Verified 2026-08-31: no duplicate product rows (rows == distinct rooftops),
-// and the ledger shows MORE live rooftops than the sheet (which undercounts).
+// Exposes drop-in replacements for the three viniMasterSheet summaries:
+//   fetchCreditSources() → { contracted, contractedRows, obSummary, liveChurn }
+//
+// Definitions (user 31-Aug): EXCLUSIVE lifecycle stages (Contracted / Onboarding
+// / Live / Churned, 'New' dropped); CARR throughout (matches the query);
+// receptionWebChat excluded. Blocker-reasons + Ageing retired (no ledger data).
 
 import { runClickhouse } from "../../server/agentMetrics.js";
 
 const REGISTRY = "68ff7a65befb847b44b6d1b8";
 const AGENT_LABELS = {
-  inboundSales:    "Sales IB",
-  outboundSales:   "Sales OB",
-  inboundService:  "Service IB",
-  outboundService: "Service OB",
-  // receptionWebChat is a 5th product (tiny, no Live yet) — excluded from the
-  // 4-agent tower; still counted in stage totals below.
+  inboundSales: "Sales IB", outboundSales: "Sales OB",
+  inboundService: "Service IB", outboundService: "Service OB",
 };
 export const AGENT_ORDER = ["Sales IB", "Service IB", "Sales OB", "Service OB"];
 
-const SQL = `
+const ROWS_SQL = `
 WITH vini_teams AS (
   SELECT DISTINCT ace.teamId FROM credit_v2.arrChangeEvents ace
   INNER JOIN (
@@ -33,60 +36,82 @@ WITH vini_teams AS (
   ) ids ON ace.entityId = ids.product_line_details_id
   WHERE ace.entityType='product-line' AND ace.arrType='CARR' AND ace.__deleted=0
 ),
-carr AS (
-  SELECT ace.teamId, ace.entityId AS product_id, argMax(toFloat64OrNull(ace.newArr), ace.eventAt) AS v
+product_curr AS (
+  SELECT ace.teamId, ace.enterpriseId, ace.entityId AS product_id,
+    argMax(toFloat64OrNull(ace.newArr), ace.eventAt) AS curr_arr
   FROM credit_v2.arrChangeEvents ace INNER JOIN vini_teams vt ON ace.teamId=vt.teamId
   WHERE ace.entityType='product' AND ace.arrType='CARR' AND ace.__deleted=0
-  GROUP BY ace.teamId, ace.entityId
+  GROUP BY ace.teamId, ace.enterpriseId, ace.entityId
 ),
-larr AS (
-  SELECT ace.teamId, ace.entityId AS product_id, argMax(toFloat64OrNull(ace.newArr), ace.eventAt) AS v
-  FROM credit_v2.arrChangeEvents ace INNER JOIN vini_teams vt ON ace.teamId=vt.teamId
-  WHERE ace.entityType='product' AND ace.arrType='LARR' AND ace.__deleted=0
-  GROUP BY ace.teamId, ace.entityId
-),
-base AS (
-  SELECT apd.product_name, apd.stage AS product_stage, apd.team_id AS rooftop_id, apd.enterprise_id,
-    coalesce(c.v,0) AS carr, coalesce(l.v,0) AS larr
-  FROM aggregated_data.aggregated_product_details apd
-  INNER JOIN vini_teams vt ON apd.team_id=vt.teamId
-  LEFT JOIN carr c ON apd.product_detail_id=c.product_id
-  LEFT JOIN larr l ON apd.product_detail_id=l.product_id
-  WHERE apd.product_line_registry_id='${REGISTRY}' AND apd._peerdb_is_deleted=0
-)
+tpa AS ( SELECT teamId, any(enterpriseId) AS enterpriseId FROM product_curr GROUP BY teamId )
 SELECT
-  ifNull(product_name,'')                 AS product_name,
-  product_stage,
-  GROUPING(product_name)                  AS is_stage_total,
-  count(*)                                AS agents,
-  uniqExact(rooftop_id)                   AS rooftops,
-  uniqExact(enterprise_id)                AS enterprises,
-  round(sum(carr))                        AS carr,
-  round(sum(larr))                        AS larr
-FROM base
-GROUP BY GROUPING SETS ( (product_stage), (product_name, product_stage) )`;
+  tpa.teamId                               AS teamId,
+  tpa.enterpriseId                         AS enterpriseId,
+  apd.team_name                            AS rooftop,
+  apd.enterprise_name                      AS account,
+  apd.product_name                         AS product_name,
+  ifNull(apd.stage,'')                     AS stage,
+  ifNull(pc.curr_arr, 0)                   AS arr,
+  toString(ifNull(apd.live_date, apd.ob_live_date)) AS go_live_date
+FROM tpa
+LEFT JOIN aggregated_data.aggregated_product_details apd
+  ON tpa.teamId = apd.team_id AND apd.product_line_registry_id='${REGISTRY}' AND apd._peerdb_is_deleted=0
+LEFT JOIN product_curr pc ON apd.product_detail_id = pc.product_id
+-- Drop test/demo accounts (the ledger includes them; the sheet was hand-curated
+-- so it didn't). Mirrors the spine's enterprise filter (agentBaseFact.sql) so the
+-- funnel and the operating metrics share one universe. Without this, ~95 test
+-- products inflate OB by ~$7M (gibberish teams carrying fake $1.2M CARR).
+INNER JOIN eventila.enterprise_details ed FINAL ON apd.enterprise_id = ed.enterprise_id
+WHERE apd.product_name IN ('inboundSales','outboundSales','inboundService','outboundService')
+  AND ed.is_test_account = 0
+  AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%testing%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%test %'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '% test%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%demo%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%sandbox%'
+  AND lower(ifNull(ed.name,'')) NOT LIKE '%spyne motors%'`;
 
-// Returns { byStage: {Stage: {agents,rooftops,enterprises,carr,larr}},
-//           byAgentStage: {agent: {Stage: {agents,carr,larr}}} }
-export async function fetchCreditFunnel() {
-  const rows = await runClickhouse(SQL);
-  const byStage = {};
-  const byAgentStage = {};
-  for (const r of rows) {
-    const stage = r.product_stage;
-    if (!stage || stage === "New") continue;
-    if (Number(r.is_stage_total) === 1) {
-      byStage[stage] = {
-        agents: Number(r.agents), rooftops: Number(r.rooftops), enterprises: Number(r.enterprises),
-        carr: Number(r.carr), larr: Number(r.larr),
-      };
-    } else {
-      const agent = AGENT_LABELS[r.product_name];
-      if (!agent) continue;
-      (byAgentStage[agent] ||= {})[stage] = {
-        agents: Number(r.agents), carr: Number(r.carr), larr: Number(r.larr),
-      };
-    }
-  }
-  return { byStage, byAgentStage };
+const distinct = (list, key) => new Set(list.map(r => r[key]).filter(Boolean)).size;
+const sum = (list, key) => list.reduce((s, r) => s + (Number(r[key]) || 0), 0);
+
+export async function fetchCreditSources() {
+  const raw = await runClickhouse(ROWS_SQL);
+  const rows = raw.map(r => ({
+    teamId: r.teamId, rooftop: r.rooftop, enterpriseId: r.enterpriseId, account: r.account,
+    agentShort: AGENT_LABELS[r.product_name] || r.product_name,
+    stage: r.stage, arr: Number(r.arr) || 0,
+    goLiveDate: (r.go_live_date && !r.go_live_date.startsWith("1970") && !r.go_live_date.startsWith("0000")) ? r.go_live_date.slice(0, 10) : "",
+  }));
+  const byStage = (s) => rows.filter(r => r.stage === s);
+
+  // ── Contracted (exclusive stage) ──────────────────────────────────────────
+  const cRows = byStage("Contracted");
+  const contractedRows = cRows.map(r => ({ agentShort: r.agentShort, arr: r.arr, teamId: r.teamId, rooftop: r.rooftop, account: r.account }));
+  const contracted = { count: cRows.length, arr: sum(cRows, "arr"), rooftops: distinct(cRows, "teamId"), accounts: distinct(cRows, "enterpriseId") };
+
+  // ── Onboarding (→ the report's "In OB") ───────────────────────────────────
+  const oRows = byStage("Onboarding");
+  const obSummary = {
+    totalCount: oRows.length, totalArr: sum(oRows, "arr"),
+    rooftops: distinct(oRows, "teamId"), accounts: distinct(oRows, "enterpriseId"),
+    byAgentType: AGENT_ORDER.map(label => ({ label, arr: sum(oRows.filter(r => r.agentShort === label), "arr") })),
+    confirmedCount: oRows.length, confirmedArr: sum(oRows, "arr"), upsideCount: 0, upsideArr: 0,
+    exitCount: 0, exitArr: 0, exitsByStatus: {}, exitRows: [],   // churn comes from liveChurn, not here
+  };
+
+  // ── Live + Churned (per-rooftop rows feed ROI/RAG + the lists) ────────────
+  const mkRow = (r) => ({
+    teamId: r.teamId, account: r.account, rooftop: r.rooftop, enterpriseId: r.enterpriseId,
+    agentRaw: r.agentShort, agentShort: r.agentShort, goLiveDate: r.goLiveDate,
+    arr: r.arr, mrr: r.arr / 12, stage: r.stage,
+  });
+  const lRows = byStage("Live").map(mkRow);
+  const chRows = byStage("Churned").map(mkRow);
+  const liveChurn = {
+    live:  { count: lRows.length,  arr: sum(lRows, "arr"),  rooftops: distinct(lRows, "teamId"),  accounts: distinct(lRows, "enterpriseId"),  rows: lRows },
+    churn: { count: chRows.length, arr: sum(chRows, "arr"), rooftops: distinct(chRows, "teamId"), accounts: distinct(chRows, "enterpriseId"), rows: chRows },
+  };
+
+  return { contracted, contractedRows, obSummary, liveChurn };
 }
