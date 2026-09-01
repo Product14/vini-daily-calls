@@ -31,16 +31,22 @@ const SRC = process.env.VINI_SUCCESS_DIR
   : resolve(REPO, "../vini-success/prototype");
 
 /* Appointment value per product, in dollars. Deliberately explicit and in ONE place,
-   because these do not agree across sources and the wall has to name the one it used:
-   data-overall.json prices outboundSales at 250 and the service pair at 100/200, while
-   the Sales OB tab and both service datasets use 300/225/225. These are the figures the
-   dashboard tabs themselves show, so the wall ties to what a CSM sees when they drill in.
-   All four are Spyne planning assumptions, not audited industry figures. */
+   because these have never agreed across sources and the wall has to name the one it used.
+   All four are Spyne planning assumptions, not audited industry figures.
+
+   SERVICE SETTLED ON data-overall.json's FIGURES (2026-09-01, Mehul): 100 and 200, not the
+   225 the service datasets publish. That is a real cut, 56% on Service Inbound, so bands
+   move: a service rooftop needs more than twice the appointments it used to for the same
+   band. The service TABS in vini-success still read 225 from their own datasets, so this
+   wall and those tabs now disagree until the service builders are changed.
+
+   SALES OUTBOUND IS STILL OPEN at 300, which is what its tab shows; data-overall.json
+   prices it at 250. Left as it was because only the service pair was decided. */
 const APPT_VALUE = {
   salesIb: 200,
   salesOb: 300,
-  serviceIb: 225,
-  serviceOb: 225,
+  serviceIb: 100,
+  serviceOb: 200,
 };
 
 const RAG = { green: 3, amber: 1 };

@@ -84,11 +84,20 @@ the tab is visible, so a deploy reaches the TV without anyone touching it.
 
 ## Four things to know before quoting this wall
 
-1. **Appointment values do not agree across sources, and the wall names the ones it used.**
-   Sales IB $200, Sales OB $300, Service IB $225, Service OB $225: these are what the
-   dashboard tabs themselves show. `data-overall.json` prices outboundSales at $250 and the
-   service pair at $100/$200. All of them are Spyne planning assumptions, not audited
-   industry figures. Change them in one place, `APPT_VALUE` in the generator.
+1. **Appointment values: the service pair is settled, Sales Outbound is not.**
+   Sales IB $200, Sales OB $300, Service IB $100, Service OB $200. All are Spyne planning
+   assumptions, not audited industry figures. Change them in one place, `APPT_VALUE` in the
+   generator.
+
+   Service went to `data-overall.json`'s figures on 2026-09-01 (Mehul), down from the $225
+   both service datasets publish. On Service Inbound that is a 56% cut and it moved the
+   board from 22/8/24 red/amber/green to 28/8/19: six rooftops left Green. Service Outbound
+   did not move at all, because 31 of its 37 agents are dormant and therefore Red whatever
+   the appointment is worth.
+
+   **This wall and the vini-success service tabs now disagree.** Those tabs read $225 from
+   their own datasets. Aligning them means changing the service builders so the datasets
+   publish $100/$200, which is a change in that repo, not here.
 
 2. **No service agent is pro-rated, because service datasets carry no go-live date.** The
    sales datasets carry `live_date` on every row; `data-service-inbound.json` and

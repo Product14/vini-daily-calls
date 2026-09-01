@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-01T12:47:49.516Z",
+ "generatedAt": "2026-09-01T12:59:17.961Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -11,8 +11,8 @@
   "apptValue": {
    "salesIb": 200,
    "salesOb": 300,
-   "serviceIb": 225,
-   "serviceOb": 225
+   "serviceIb": 100,
+   "serviceOb": 200
   },
   "redAbsorbs": [
    "dormant",
@@ -374,22 +374,22 @@
    "key": "serviceIb",
    "label": "Service Inbound",
    "side": "service",
-   "apptValue": 225,
+   "apptValue": 100,
    "reachLabel": "Conversations held",
    "asOf": "2026-08-31",
    "proRata": false,
    "total": {
     "agents": 55,
     "arr": 470765,
-    "red": 22,
-    "amber": 9,
-    "green": 24,
+    "red": 28,
+    "amber": 8,
+    "green": 19,
     "dormant": 19,
     "unrateable": 1,
     "pct": {
-     "red": 0.4,
-     "amber": 0.16363636363636364,
-     "green": 0.43636363636363634
+     "red": 0.509090909090909,
+     "amber": 0.14545454545454545,
+     "green": 0.34545454545454546
     }
    },
    "csms": [
@@ -397,29 +397,29 @@
      "csm": "Deepanshu Agarwal",
      "agents": 13,
      "arr": 125988,
-     "red": 3,
-     "amber": 2,
-     "green": 8,
+     "red": 4,
+     "amber": 5,
+     "green": 4,
      "dormant": 3,
      "unrateable": 0,
      "pct": {
-      "red": 0.23076923076923078,
-      "amber": 0.15384615384615385,
-      "green": 0.6153846153846154
+      "red": 0.3076923076923077,
+      "amber": 0.38461538461538464,
+      "green": 0.3076923076923077
      }
     },
     {
      "csm": "Aditya Kaul",
      "agents": 8,
      "arr": 90588,
-     "red": 5,
-     "amber": 2,
+     "red": 7,
+     "amber": 0,
      "green": 1,
      "dormant": 3,
      "unrateable": 0,
      "pct": {
-      "red": 0.625,
-      "amber": 0.25,
+      "red": 0.875,
+      "amber": 0,
       "green": 0.125
      }
     },
@@ -427,14 +427,14 @@
      "csm": "Ritika Agarwal",
      "agents": 8,
      "arr": 67200,
-     "red": 4,
-     "amber": 1,
+     "red": 5,
+     "amber": 0,
      "green": 3,
      "dormant": 4,
      "unrateable": 0,
      "pct": {
-      "red": 0.5,
-      "amber": 0.125,
+      "red": 0.625,
+      "amber": 0,
       "green": 0.375
      }
     },
@@ -457,15 +457,15 @@
      "csm": "Tushar Srivastava",
      "agents": 6,
      "arr": 46500,
-     "red": 0,
+     "red": 1,
      "amber": 1,
-     "green": 5,
+     "green": 4,
      "dormant": 0,
      "unrateable": 0,
      "pct": {
-      "red": 0,
+      "red": 0.16666666666666666,
       "amber": 0.16666666666666666,
-      "green": 0.8333333333333334
+      "green": 0.6666666666666666
      }
     },
     {
@@ -517,14 +517,14 @@
      "csm": "Ishika Arora",
      "agents": 1,
      "arr": 12000,
-     "red": 0,
-     "amber": 1,
+     "red": 1,
+     "amber": 0,
      "green": 0,
      "dormant": 0,
      "unrateable": 0,
      "pct": {
-      "red": 0,
-      "amber": 1,
+      "red": 1,
+      "amber": 0,
       "green": 0
      }
     },
@@ -564,7 +564,7 @@
    "key": "serviceOb",
    "label": "Service Outbound",
    "side": "service",
-   "apptValue": 225,
+   "apptValue": 200,
    "reachLabel": "Leads reached",
    "asOf": "2026-08-31",
    "proRata": false,
