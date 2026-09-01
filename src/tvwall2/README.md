@@ -20,18 +20,48 @@ the bottom of the wall. It used to be a permanent four-line footer, which nobody
 across a room and which cost the tables height. Escape or a click anywhere outside closes
 it, and clicking either header button does not drop the wall out of immersive.
 
-The tables size themselves by measurement: each block is fitted to its box, then all four
-are levelled to the smallest that fits, so the wall reads as one design rather than four.
-Measured type size, no scroll at any of them:
+ONE TABLE PER SIDE, BOTH PRODUCTS ON EACH ROW. This started as four tables, two stacked per
+side, and settled at 14px on a 1080p screen: unreadable across a room. The chrome was only
+290px of 1080, so tightening padding could not fix it. With 13 rows in a half-height block,
+zero chrome still caps out near 19px. **The row count was the constraint, not the spacing**,
+so the two products of a side were merged onto one row per CSM. Same data, half the rows,
+and each side gets the full column height.
 
-| Screen | Table type |
-|---|---|
-| 3840x2160 | 34px |
-| 1920x1080 | 14px |
-| 1366x768 | 8px, too small to read across a room |
+The table then sizes itself by measurement, on both axes: it grows until either the height
+runs out or a CSM name starts to ellipse. Height alone was not enough. At 32px every name
+longer than "Aditya Kaul" was silently clipped, on a wall whose whole job is naming who owns
+what. Whatever height is left over after the name column caps the type is spent on row
+padding, so the table fills its box instead of leaving a 300px gap under the totals.
 
-1080p on a 55-inch panel is comfortable to about 3 metres. A laptop-sized viewport is not
-a usable wall: there are 44 CSM rows on screen and no amount of fitting fixes that.
+| Screen | Table type | Was (four tables) |
+|---|---|---|
+| 3840x2160 | 47px | 34px |
+| 2560x1440 | 31px | - |
+| 1920x1080 | **22px** | 14px |
+| 1600x900 | 19px | - |
+| 1366x768 | 16px | 8px |
+
+No vertical or horizontal overflow and no clipped name at any of them. 22px on a 55-inch
+1080p panel is roughly 14mm of cap height, comfortable to about 4 metres.
+
+## Conditional formatting
+
+The RAG cells deepen with the percentage, so a 100% Red block and a 100% Green block are
+what the eye lands on from across the room. Four steps, not a continuous gradient, because
+every step is a contrast-checked pair: continuous alpha would drift the text through the
+4.5:1 floor somewhere in the middle with nothing to catch it.
+
+| Share | Fill | Text | Measured contrast |
+|---|---|---|---|
+| no agents | none | `#D0D5DD` | decorative dash only |
+| 0% | white | `#667085` | 4.97 |
+| under 34% | light wash | dark band ink | 6.6 to 7.2 |
+| 34 to 66% | mid fill | dark band ink | 5.8 to 6.1 |
+| 67% and over | strong fill | white | 4.8 to 6.6 |
+
+The strong green and amber are `#027A48` and `#B54708`, not the brand `#12B76A` and
+`#D97706`. White on those two is 2.62 and 3.19, which fails AA. Same meaning, passing
+contrast. Nothing is encoded by colour alone: every cell prints its percentage.
 
 ## Where the numbers come from
 
