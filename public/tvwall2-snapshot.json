@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-01T12:28:25.660Z",
+ "generatedAt": "2026-09-01T12:47:49.516Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,7 +26,7 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-08-31",
+   "asOf": "2026-09-01",
    "proRata": true,
    "total": {
     "agents": 62,
@@ -201,20 +201,20 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-08-30",
+   "asOf": "2026-08-31",
    "proRata": true,
    "total": {
     "agents": 50,
     "arr": 484526.5,
     "red": 28,
-    "amber": 12,
-    "green": 10,
-    "dormant": 15,
+    "amber": 15,
+    "green": 7,
+    "dormant": 17,
     "unrateable": 1,
     "pct": {
      "red": 0.56,
-     "amber": 0.24,
-     "green": 0.2
+     "amber": 0.3,
+     "green": 0.14
     }
    },
    "csms": [
@@ -240,7 +240,7 @@
      "red": 4,
      "amber": 2,
      "green": 1,
-     "dormant": 0,
+     "dormant": 2,
      "unrateable": 0,
      "pct": {
       "red": 0.5714285714285714,
@@ -253,14 +253,14 @@
      "agents": 9,
      "arr": 75588,
      "red": 3,
-     "amber": 3,
-     "green": 3,
+     "amber": 4,
+     "green": 2,
      "dormant": 1,
      "unrateable": 0,
      "pct": {
       "red": 0.3333333333333333,
-      "amber": 0.3333333333333333,
-      "green": 0.3333333333333333
+      "amber": 0.4444444444444444,
+      "green": 0.2222222222222222
      }
     },
     {
@@ -283,14 +283,14 @@
      "agents": 5,
      "arr": 48000,
      "red": 2,
-     "amber": 2,
-     "green": 1,
+     "amber": 3,
+     "green": 0,
      "dormant": 0,
      "unrateable": 0,
      "pct": {
       "red": 0.4,
-      "amber": 0.4,
-      "green": 0.2
+      "amber": 0.6,
+      "green": 0
      }
     },
     {
@@ -298,14 +298,14 @@
      "agents": 4,
      "arr": 45600,
      "red": 1,
-     "amber": 0,
-     "green": 3,
+     "amber": 1,
+     "green": 2,
      "dormant": 1,
      "unrateable": 0,
      "pct": {
       "red": 0.25,
-      "amber": 0,
-      "green": 0.75
+      "amber": 0.25,
+      "green": 0.5
      }
     },
     {
@@ -376,20 +376,20 @@
    "side": "service",
    "apptValue": 225,
    "reachLabel": "Conversations held",
-   "asOf": "2026-08-30",
+   "asOf": "2026-08-31",
    "proRata": false,
    "total": {
     "agents": 55,
     "arr": 470765,
-    "red": 26,
-    "amber": 6,
-    "green": 23,
-    "dormant": 21,
+    "red": 22,
+    "amber": 9,
+    "green": 24,
+    "dormant": 19,
     "unrateable": 1,
     "pct": {
-     "red": 0.4727272727272727,
-     "amber": 0.10909090909090909,
-     "green": 0.41818181818181815
+     "red": 0.4,
+     "amber": 0.16363636363636364,
+     "green": 0.43636363636363634
     }
    },
    "csms": [
@@ -397,29 +397,29 @@
      "csm": "Deepanshu Agarwal",
      "agents": 13,
      "arr": 125988,
-     "red": 4,
+     "red": 3,
      "amber": 2,
-     "green": 7,
-     "dormant": 4,
+     "green": 8,
+     "dormant": 3,
      "unrateable": 0,
      "pct": {
-      "red": 0.3076923076923077,
+      "red": 0.23076923076923078,
       "amber": 0.15384615384615385,
-      "green": 0.5384615384615384
+      "green": 0.6153846153846154
      }
     },
     {
      "csm": "Aditya Kaul",
      "agents": 8,
      "arr": 90588,
-     "red": 6,
-     "amber": 1,
+     "red": 5,
+     "amber": 2,
      "green": 1,
      "dormant": 3,
      "unrateable": 0,
      "pct": {
-      "red": 0.75,
-      "amber": 0.125,
+      "red": 0.625,
+      "amber": 0.25,
       "green": 0.125
      }
     },
@@ -427,14 +427,14 @@
      "csm": "Ritika Agarwal",
      "agents": 8,
      "arr": 67200,
-     "red": 5,
-     "amber": 0,
+     "red": 4,
+     "amber": 1,
      "green": 3,
      "dormant": 4,
      "unrateable": 0,
      "pct": {
-      "red": 0.625,
-      "amber": 0,
+      "red": 0.5,
+      "amber": 0.125,
       "green": 0.375
      }
     },
@@ -517,14 +517,14 @@
      "csm": "Ishika Arora",
      "agents": 1,
      "arr": 12000,
-     "red": 1,
-     "amber": 0,
+     "red": 0,
+     "amber": 1,
      "green": 0,
-     "dormant": 1,
+     "dormant": 0,
      "unrateable": 0,
      "pct": {
-      "red": 1,
-      "amber": 0,
+      "red": 0,
+      "amber": 1,
       "green": 0
      }
     },
@@ -566,7 +566,7 @@
    "side": "service",
    "apptValue": 225,
    "reachLabel": "Leads reached",
-   "asOf": "2026-08-30",
+   "asOf": "2026-08-31",
    "proRata": false,
    "total": {
     "agents": 37,
