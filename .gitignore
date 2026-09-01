@@ -19,3 +19,6 @@ controlTower/slack-report.png
 /agents-preview-2.html
 # Control Tower raw data caches (regenerated from ClickHouse/Sheets each run — not source)
 controlTower/data/
+
+# TV wall 2 audit detail: real dealer names + ARR + MRR, never deployed
+scripts/tvwall2-agents.local.json

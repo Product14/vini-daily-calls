@@ -8,6 +8,7 @@ import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
 import { EmailerTracker } from "./email/EmailerTracker.tsx";
 import { RealtimeLog } from "./email/RealtimeLog.tsx";
 import { TrackerAuthGate } from "./email/TrackerAuthGate.tsx";
+import TvWall2View from "./tvwall2/TvWall2View.tsx";
 import { Analytics } from "@vercel/analytics/react";
 
 function Router() {
@@ -39,6 +40,12 @@ function Router() {
   }
   if (path === "/dream" || path.startsWith("/dream/")) {
     return <DreamDashboard />;
+  }
+  // Second TV wall: the RAG board, sales on the left and service on the right.
+  // Separate route rather than a tab inside AgentsDashboard because it is a wall
+  // display with no chrome, not a view someone drills into.
+  if (path === "/tv-wall-2" || path.startsWith("/tv-wall-2/")) {
+    return <TvWall2View />;
   }
   if (path === "/email-tracker/realtime") {
     return (
