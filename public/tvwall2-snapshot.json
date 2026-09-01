@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-01T12:59:17.961Z",
+ "generatedAt": "2026-09-01T13:13:34.584Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -44,21 +44,6 @@
    },
    "csms": [
     {
-     "csm": "Aditya Kaul",
-     "agents": 10,
-     "arr": 149400,
-     "red": 7,
-     "amber": 2,
-     "green": 1,
-     "dormant": 4,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.7,
-      "amber": 0.2,
-      "green": 0.1
-     }
-    },
-    {
      "csm": "Deepanshu Agarwal",
      "agents": 13,
      "arr": 125976,
@@ -74,18 +59,18 @@
      }
     },
     {
-     "csm": "Sudansh Tiruwa",
-     "agents": 6,
-     "arr": 68388,
-     "red": 4,
-     "amber": 1,
+     "csm": "Aditya Kaul",
+     "agents": 10,
+     "arr": 149400,
+     "red": 7,
+     "amber": 2,
      "green": 1,
-     "dormant": 3,
+     "dormant": 4,
      "unrateable": 0,
      "pct": {
-      "red": 0.6666666666666666,
-      "amber": 0.16666666666666666,
-      "green": 0.16666666666666666
+      "red": 0.7,
+      "amber": 0.2,
+      "green": 0.1
      }
     },
     {
@@ -119,6 +104,21 @@
      }
     },
     {
+     "csm": "Sudansh Tiruwa",
+     "agents": 6,
+     "arr": 68388,
+     "red": 4,
+     "amber": 1,
+     "green": 1,
+     "dormant": 3,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.6666666666666666,
+      "amber": 0.16666666666666666,
+      "green": 0.16666666666666666
+     }
+    },
+    {
      "csm": "Zeeshana Aijaz",
      "agents": 4,
      "arr": 39964,
@@ -149,21 +149,6 @@
      }
     },
     {
-     "csm": "Tushar Srivastava",
-     "agents": 2,
-     "arr": 18588,
-     "red": 1,
-     "amber": 1,
-     "green": 0,
-     "dormant": 1,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.5,
-      "amber": 0.5,
-      "green": 0
-     }
-    },
-    {
      "csm": "Jagrit",
      "agents": 3,
      "arr": 11988,
@@ -175,6 +160,21 @@
      "pct": {
       "red": 1,
       "amber": 0,
+      "green": 0
+     }
+    },
+    {
+     "csm": "Tushar Srivastava",
+     "agents": 2,
+     "arr": 18588,
+     "red": 1,
+     "amber": 1,
+     "green": 0,
+     "dormant": 1,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.5,
+      "amber": 0.5,
       "green": 0
      }
     },
@@ -234,21 +234,6 @@
      }
     },
     {
-     "csm": "Aditya Kaul",
-     "agents": 7,
-     "arr": 75600,
-     "red": 4,
-     "amber": 2,
-     "green": 1,
-     "dormant": 2,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.5714285714285714,
-      "amber": 0.2857142857142857,
-      "green": 0.14285714285714285
-     }
-    },
-    {
      "csm": "Deepanshu Agarwal",
      "agents": 9,
      "arr": 75588,
@@ -261,6 +246,21 @@
       "red": 0.3333333333333333,
       "amber": 0.4444444444444444,
       "green": 0.2222222222222222
+     }
+    },
+    {
+     "csm": "Aditya Kaul",
+     "agents": 7,
+     "arr": 75600,
+     "red": 4,
+     "amber": 2,
+     "green": 1,
+     "dormant": 2,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.5714285714285714,
+      "amber": 0.2857142857142857,
+      "green": 0.14285714285714285
      }
     },
     {
@@ -409,6 +409,21 @@
      }
     },
     {
+     "csm": "Prabha Kumari",
+     "agents": 10,
+     "arr": 51138,
+     "red": 4,
+     "amber": 1,
+     "green": 5,
+     "dormant": 3,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.4,
+      "amber": 0.1,
+      "green": 0.5
+     }
+    },
+    {
      "csm": "Aditya Kaul",
      "agents": 8,
      "arr": 90588,
@@ -436,21 +451,6 @@
       "red": 0.625,
       "amber": 0,
       "green": 0.375
-     }
-    },
-    {
-     "csm": "Prabha Kumari",
-     "agents": 10,
-     "arr": 51138,
-     "red": 4,
-     "amber": 1,
-     "green": 5,
-     "dormant": 3,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.4,
-      "amber": 0.1,
-      "green": 0.5
      }
     },
     {
@@ -514,21 +514,6 @@
      }
     },
     {
-     "csm": "Ishika Arora",
-     "agents": 1,
-     "arr": 12000,
-     "red": 1,
-     "amber": 0,
-     "green": 0,
-     "dormant": 0,
-     "unrateable": 0,
-     "pct": {
-      "red": 1,
-      "amber": 0,
-      "green": 0
-     }
-    },
-    {
      "csm": "Zeeshana Aijaz",
      "agents": 2,
      "arr": 11988,
@@ -537,6 +522,21 @@
      "green": 0,
      "dormant": 2,
      "unrateable": 1,
+     "pct": {
+      "red": 1,
+      "amber": 0,
+      "green": 0
+     }
+    },
+    {
+     "csm": "Ishika Arora",
+     "agents": 1,
+     "arr": 12000,
+     "red": 1,
+     "amber": 0,
+     "green": 0,
+     "dormant": 0,
+     "unrateable": 0,
      "pct": {
       "red": 1,
       "amber": 0,
@@ -599,21 +599,6 @@
      }
     },
     {
-     "csm": "Tushar Srivastava",
-     "agents": 4,
-     "arr": 72900,
-     "red": 4,
-     "amber": 0,
-     "green": 0,
-     "dormant": 4,
-     "unrateable": 0,
-     "pct": {
-      "red": 1,
-      "amber": 0,
-      "green": 0
-     }
-    },
-    {
      "csm": "Prabha Kumari",
      "agents": 8,
      "arr": 67938,
@@ -640,6 +625,21 @@
      "pct": {
       "red": 0.875,
       "amber": 0.125,
+      "green": 0
+     }
+    },
+    {
+     "csm": "Tushar Srivastava",
+     "agents": 4,
+     "arr": 72900,
+     "red": 4,
+     "amber": 0,
+     "green": 0,
+     "dormant": 4,
+     "unrateable": 0,
+     "pct": {
+      "red": 1,
+      "amber": 0,
       "green": 0
      }
     },

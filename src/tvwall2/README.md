@@ -76,6 +76,13 @@ It prints agent counts, ARR and band counts per product, so a wrong build cannot
 quietly. Commit the regenerated JSON and deploy. The view refetches every 5 minutes while
 the tab is visible, so a deploy reaches the TV without anyone touching it.
 
+## Row order
+
+CSM rows are sorted by **agents assigned, descending, with ARR breaking ties**. The wall is
+read as "who is carrying the most, and how much of it is Red", so the size of the book is
+the ordering question and the money settles ties. This matches the CSM tab in vini-success,
+which already sorts on rooftops assigned with ARR breaking ties.
+
 ## The rules on screen
 
 - **RAG** = appointments in 30 days x appointment value, divided by MRR (ARR / 12).

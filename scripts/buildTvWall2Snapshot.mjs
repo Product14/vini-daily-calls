@@ -145,9 +145,13 @@ function byCsm(list) {
     if (!g.has(a.csm)) g.set(a.csm, []);
     g.get(a.csm).push(a);
   }
+  /* Biggest book first, by agents assigned, ARR breaking the tie. The wall is read as
+     "who is carrying the most, and how much of it is Red", so the size of the book is the
+     ordering question and the money is the tiebreaker. This also matches the CSM tab in
+     vini-success, which already sorts on rooftops assigned with ARR breaking ties. */
   return [...g.entries()]
     .map(([csm, rows]) => ({ csm, ...summarise(rows) }))
-    .sort((x, y) => y.arr - x.arr || y.agents - x.agents);
+    .sort((x, y) => y.agents - x.agents || y.arr - x.arr);
 }
 
 // ---- build ------------------------------------------------------------------------------
