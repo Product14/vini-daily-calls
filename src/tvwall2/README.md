@@ -132,10 +132,16 @@ tables to the smallest: a note on one block only would silently shrink the other
 
 ## Row order
 
-CSM rows are sorted by **agents assigned, descending, with ARR breaking ties**. The wall is
-read as "who is carrying the most, and how much of it is Red", so the size of the book is
-the ordering question and the money settles ties. This matches the CSM tab in vini-success,
-which already sorts on rooftops assigned with ARR breaking ties.
+**Worst first: share of Red descending, ARR breaking ties.** The wall is read as "who needs
+attention", so the problem leads and the money decides between equally bad books.
+
+Ties are common, because a CSM with two agents both Red is 100% just like one with eight.
+ARR rather than agent count is the tiebreaker on purpose: it puts the expensive 100% above
+the cheap one. On Service Outbound that means Tushar Srivastava's $73k over four agents
+leads Puneet Sharma's $10k over one, though both read 100%.
+
+This deliberately no longer matches the CSM tab in vini-success, which sorts on rooftops
+assigned. That tab is a working list; this is a wall.
 
 ## The rules on screen
 

@@ -146,13 +146,17 @@ function byCsm(list) {
     if (!g.has(a.csm)) g.set(a.csm, []);
     g.get(a.csm).push(a);
   }
-  /* Biggest book first, by agents assigned, ARR breaking the tie. The wall is read as
-     "who is carrying the most, and how much of it is Red", so the size of the book is the
-     ordering question and the money is the tiebreaker. This also matches the CSM tab in
-     vini-success, which already sorts on rooftops assigned with ARR breaking ties. */
+  /* WORST FIRST: share of Red descending, ARR breaking the tie. The wall is read as "who
+     needs attention", so the problem leads and the money decides between equally bad books.
+     Ties are common here because a CSM with two agents both Red is 100%, same as one with
+     eight, which is exactly why ARR is the tiebreaker rather than the agent count: it puts
+     the expensive 100% above the cheap one.
+
+     NOTE this no longer matches the CSM tab in vini-success, which sorts on rooftops
+     assigned. Deliberate: that tab is a working list, this is a wall. */
   return [...g.entries()]
     .map(([csm, rows]) => ({ csm, ...summarise(rows) }))
-    .sort((x, y) => y.agents - x.agents || y.arr - x.arr);
+    .sort((x, y) => y.pct.red - x.pct.red || y.arr - x.arr);
 }
 
 // ---- build ------------------------------------------------------------------------------

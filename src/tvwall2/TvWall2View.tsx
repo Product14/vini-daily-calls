@@ -380,10 +380,11 @@ const CSS = `
 .tv2-immersive{position:fixed;inset:0;z-index:9999}
 
 .tv2-top{display:flex;align-items:center;gap:12px;flex:0 0 auto}
-.tv2-brand{font-weight:800;font-size:13px;letter-spacing:.12em;text-transform:uppercase;
-  color:#fff;background:var(--brand);padding:4px 9px;border-radius:6px}
-.tv2-top h1{margin:0;font-size:17px;font-weight:800;letter-spacing:-.01em;line-height:1.1}
-.tv2-asof{margin-left:auto;font-size:12px;font-weight:600;color:var(--quiet)}
+.tv2-brand{font-weight:800;font-size:max(13px,1.05vh);letter-spacing:.12em;
+  text-transform:uppercase;color:#fff;background:var(--brand);padding:4px 9px;border-radius:6px}
+.tv2-top h1{margin:0;font-size:max(18px,1.6vh);font-weight:800;letter-spacing:-.01em;
+  line-height:1.1}
+.tv2-asof{margin-left:auto;font-size:max(12px,0.95vh);font-weight:600;color:var(--quiet)}
 .tv2-fs{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;
   border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--quiet);cursor:pointer;
   transition:color .18s ease,border-color .18s ease}
@@ -398,16 +399,20 @@ const CSS = `
 
 .tv2-grid{flex:1 1 auto;display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:0}
 .tv2-side{display:grid;grid-template-rows:auto 1fr 1fr;gap:7px;min-height:0}
-.tv2-sidehead{font-size:10.5px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
-  color:var(--brand);flex:0 0 auto;line-height:1.05}
+.tv2-sidehead{font-size:max(11px,0.95vh);font-weight:800;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--brand);flex:0 0 auto;line-height:1.05}
 
 .tv2-block{display:flex;flex-direction:column;gap:3px;min-height:0;background:#fff;
   border:1px solid var(--line);border-radius:10px;padding:6px 9px 7px}
+/* THE STRIP SCALES WITH THE SCREEN, the table did already. Fixed pixel chrome looked fine
+   on a laptop and disappeared next to 52px table type on a 4K panel, which is where this is
+   actually read from. vh keeps the ratio: on 1080p the max() floors hold, above that the
+   whole strip grows with the wall. */
 .tv2-head{display:flex;align-items:baseline;gap:11px;flex-wrap:nowrap;flex:0 0 auto;
   line-height:1.1;overflow:hidden}
-.tv2-name{font-size:15px;font-weight:800;letter-spacing:-.01em;white-space:nowrap}
-.tv2-kpi{font-size:11px;font-weight:600;color:var(--quiet);white-space:nowrap}
-.tv2-kpi b{font-size:17px;font-weight:800;color:var(--ink);margin-right:3px}
+.tv2-name{font-size:max(20px,1.55vh);font-weight:800;letter-spacing:-.01em;white-space:nowrap}
+.tv2-kpi{font-size:max(11.5px,0.92vh);font-weight:600;color:var(--quiet);white-space:nowrap}
+.tv2-kpi b{font-size:max(17px,1.3vh);font-weight:800;color:var(--ink);margin-right:3px}
 .tv2-kpi-band b{color:inherit}
 
 .tv2-bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:#EEF0F3;flex:0 0 auto}
