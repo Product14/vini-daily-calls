@@ -20,18 +20,30 @@ the bottom of the wall. It used to be a permanent four-line footer, which nobody
 across a room and which cost the tables height. Escape or a click anywhere outside closes
 it, and clicking either header button does not drop the wall out of immersive.
 
-The tables size themselves by measurement: each block is fitted to its box, then all four
-are levelled to the smallest that fits, so the wall reads as one design rather than four.
-Measured type size, no scroll at any of them:
+The tables size themselves by measurement on BOTH axes: each block grows until either the
+height runs out or a CSM name starts to ellipse, all four are then levelled to the smallest
+that fits so the wall reads as one design, and whatever height is left over goes back into
+row padding so no table stops short of its box.
 
-| Screen | Table type |
-|---|---|
-| 3840x2160 | 34px |
-| 1920x1080 | 14px |
-| 1366x768 | 8px, too small to read across a room |
+Height alone was not enough. Past about 20px a CSM column is too narrow for "Deepanshu
+Agarwal", and it was silently clipping on a wall whose whole job is naming who owns what.
+The name column therefore gets 40% of the table and the numeric columns share the rest.
 
-1080p on a 55-inch panel is comfortable to about 3 metres. A laptop-sized viewport is not
-a usable wall: there are 44 CSM rows on screen and no amount of fitting fixes that.
+| Screen | Table type | Before the tightening |
+|---|---|---|
+| 3840x2160 | 52px | 34px |
+| 2560x1440 | 33px | - |
+| 1920x1080 | **23px** | 14px |
+| 1600x900 | 18px | - |
+| 1366x768 | 14px | 8px |
+
+**What actually bought that: row height, not padding.** A row used to be 2.2x the font size,
+0.6em of cell padding on top of a default 1.4 line-height. At 1.6x the same box holds the
+same 13 rows a third larger. The block chrome came down too (padding, gaps, the bar, the
+change note) but that is worth only a few pixels of type: the rows dominate. Everything is
+expressed in em so it all scales with whatever size the fit routine lands on.
+
+23px on a 55-inch 1080p panel is roughly 15mm of cap height, comfortable to about 4 metres.
 
 ## Where the numbers come from
 

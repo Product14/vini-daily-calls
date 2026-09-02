@@ -73,27 +73,49 @@ export default function TvWall2View() {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // Fit each table to its box: shrink until it clears, then grow to fill.
+  /* Fit each table to its box on BOTH axes, then spend anything left on row padding.
+     Height alone is not enough once the type grows: a CSM column is about a third of a
+     half-width table, so past a certain size "Deepanshu Agarwal" silently becomes
+     "Deepanshu Ag…" on a wall whose whole job is naming who owns what. A size only counts
+     as fitting when no name is clipped either, so the ceiling is the real constraint rather
+     than an arbitrary number. */
   useEffect(() => {
+    const clips = (tbl: HTMLElement) =>
+      [...tbl.querySelectorAll<HTMLElement>(".tv2-csm")].some((c) => c.scrollWidth > c.clientWidth + 1);
     const fitOne = (wrap: HTMLElement, tbl: HTMLElement) => {
       const avail = wrap.clientHeight;
       if (!avail) return;
+      tbl.style.setProperty("--rowpad", "0px");
+      const tooBig = () => tbl.offsetHeight > avail || clips(tbl);
       let fs = 15;
-      let guard = 90;
+      let guard = 140;
       tbl.style.fontSize = fs + "px";
-      while (tbl.offsetHeight > avail && fs > 7 && guard-- > 0) {
+      while (tooBig() && fs > 7 && guard-- > 0) {
         fs -= 1;
         tbl.style.fontSize = fs + "px";
       }
-      while (tbl.offsetHeight < avail - 2 && fs < 40 && guard-- > 0) {
+      // High enough that content, not this number, decides the size on a 4K panel.
+      while (tbl.offsetHeight < avail - 2 && fs < 96 && guard-- > 0) {
         fs += 1;
         tbl.style.fontSize = fs + "px";
-        if (tbl.offsetHeight > avail) {
+        if (tooBig()) {
           fs -= 1;
           tbl.style.fontSize = fs + "px";
           break;
         }
       }
+    };
+    /* Once names cap the type, height stops binding and the table stops short of its box.
+       Give the slack back as row padding: the table fills the block instead of leaving a
+       gap, and taller rows are easier to track across six columns from a distance. */
+    const padOut = (wrap: HTMLElement, tbl: HTMLElement) => {
+      const avail = wrap.clientHeight;
+      const rows = tbl.querySelectorAll("tr").length;
+      const leftover = avail - tbl.offsetHeight;
+      if (!avail || !rows || leftover <= 4) return;
+      const px = parseFloat(tbl.style.fontSize) || 15;
+      tbl.style.setProperty("--rowpad", Math.min(leftover / rows / 2, px * 0.7).toFixed(2) + "px");
+      if (tbl.offsetHeight > avail) tbl.style.setProperty("--rowpad", "0px");
     };
     /* Fit each block, then level them all to the smallest that fits. Four tables at
        14/15/15/16px on one wall reads as an accident rather than a design, and the
@@ -108,6 +130,8 @@ export default function TvWall2View() {
       pairs.forEach(([wrap, tbl]) => fitOne(wrap, tbl));
       const smallest = Math.min(...pairs.map(([, tbl]) => parseFloat(tbl.style.fontSize) || 15));
       if (Number.isFinite(smallest)) pairs.forEach(([, tbl]) => { tbl.style.fontSize = smallest + "px"; });
+      // Padding is per block: levelling the font first means each one fills its own box.
+      pairs.forEach(([wrap, tbl]) => padOut(wrap, tbl));
     };
     const raf = requestAnimationFrame(fit);
     const settle = setTimeout(fit, 300);
@@ -213,12 +237,14 @@ function ProductBlock({ p }: { p: Product }) {
       <div className="tv2-wrap">
         <table className="tv2-table">
           <colgroup>
-            <col style={{ width: "35%" }} />
+            {/* The name column caps the type in this layout, so it gets the width the
+                numeric columns do not need. Sums to 100: 40 + 11 + 13 + 12 + 12 + 12. */}
+            <col style={{ width: "40%" }} />
+            <col style={{ width: "11%" }} />
+            <col style={{ width: "13%" }} />
             <col style={{ width: "12%" }} />
-            <col style={{ width: "14%" }} />
-            <col style={{ width: "13%" }} />
-            <col style={{ width: "13%" }} />
-            <col style={{ width: "13%" }} />
+            <col style={{ width: "12%" }} />
+            <col style={{ width: "12%" }} />
           </colgroup>
           <thead>
             <tr>
@@ -348,15 +374,15 @@ function InfoPanel({ snap, onClose }: { snap: Snapshot; onClose: () => void }) {
 
 const CSS = `
 .tv2{--brand:#4600F2;--ink:#101828;--quiet:#667085;--line:#E4E7EC;--bg:#F6F7F9;
-  position:relative;display:flex;flex-direction:column;gap:10px;height:100vh;width:100%;
-  padding:12px 16px;box-sizing:border-box;background:var(--bg);color:var(--ink);
+  position:relative;display:flex;flex-direction:column;gap:6px;height:100vh;width:100%;
+  padding:7px 11px;box-sizing:border-box;background:var(--bg);color:var(--ink);
   font-family:"Plus Jakarta Sans",system-ui,sans-serif;overflow:hidden}
 .tv2-immersive{position:fixed;inset:0;z-index:9999}
 
 .tv2-top{display:flex;align-items:center;gap:12px;flex:0 0 auto}
 .tv2-brand{font-weight:800;font-size:13px;letter-spacing:.12em;text-transform:uppercase;
   color:#fff;background:var(--brand);padding:4px 9px;border-radius:6px}
-.tv2-top h1{margin:0;font-size:19px;font-weight:800;letter-spacing:-.01em}
+.tv2-top h1{margin:0;font-size:17px;font-weight:800;letter-spacing:-.01em;line-height:1.1}
 .tv2-asof{margin-left:auto;font-size:12px;font-weight:600;color:var(--quiet)}
 .tv2-fs{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;
   border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--quiet);cursor:pointer;
@@ -370,20 +396,21 @@ const CSS = `
 .tv2-err{color:#B42318}
 .tv2-err code{background:#fff;border:1px solid var(--line);border-radius:4px;padding:1px 4px}
 
-.tv2-grid{flex:1 1 auto;display:grid;grid-template-columns:1fr 1fr;gap:14px;min-height:0}
-.tv2-side{display:grid;grid-template-rows:auto 1fr 1fr;gap:10px;min-height:0}
-.tv2-sidehead{font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
-  color:var(--brand);flex:0 0 auto}
+.tv2-grid{flex:1 1 auto;display:grid;grid-template-columns:1fr 1fr;gap:10px;min-height:0}
+.tv2-side{display:grid;grid-template-rows:auto 1fr 1fr;gap:7px;min-height:0}
+.tv2-sidehead{font-size:10.5px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--brand);flex:0 0 auto;line-height:1.05}
 
-.tv2-block{display:flex;flex-direction:column;gap:6px;min-height:0;background:#fff;
-  border:1px solid var(--line);border-radius:12px;padding:10px 12px 12px}
-.tv2-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;flex:0 0 auto}
-.tv2-name{font-size:14px;font-weight:800;letter-spacing:-.01em}
-.tv2-kpi{font-size:11.5px;font-weight:600;color:var(--quiet)}
-.tv2-kpi b{font-size:15px;font-weight:800;color:var(--ink);margin-right:3px}
+.tv2-block{display:flex;flex-direction:column;gap:3px;min-height:0;background:#fff;
+  border:1px solid var(--line);border-radius:10px;padding:6px 9px 7px}
+.tv2-head{display:flex;align-items:baseline;gap:11px;flex-wrap:nowrap;flex:0 0 auto;
+  line-height:1.1;overflow:hidden}
+.tv2-name{font-size:15px;font-weight:800;letter-spacing:-.01em;white-space:nowrap}
+.tv2-kpi{font-size:11px;font-weight:600;color:var(--quiet);white-space:nowrap}
+.tv2-kpi b{font-size:17px;font-weight:800;color:var(--ink);margin-right:3px}
 .tv2-kpi-band b{color:inherit}
 
-.tv2-bar{display:flex;height:9px;border-radius:5px;overflow:hidden;background:#EEF0F3;flex:0 0 auto}
+.tv2-bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:#EEF0F3;flex:0 0 auto}
 .tv2-bar span{display:block;height:100%}
 
 .tv2-wrap{flex:1 1 auto;min-height:0;overflow:hidden}
@@ -391,21 +418,27 @@ const CSS = `
 /* The overnight-change line. Sits under the table, one or two lines, and is always present
    so all four blocks keep the same shape for the fit routine. */
 .tv2-note{margin:0;flex:0 0 auto;display:flex;flex-wrap:wrap;align-items:baseline;
-  gap:2px 10px;font-size:max(10.5px,0.82vh);line-height:1.35;color:#475467;
-  padding-top:6px;border-top:1px solid #F2F4F7}
+  gap:0 9px;font-size:max(10px,0.72vh);line-height:1.18;color:#475467;
+  padding-top:3px;border-top:1px solid #F2F4F7}
 .tv2-note-quiet{color:#98A2B3}
 .tv2-notelab{font-weight:700;color:var(--ink)}
 .tv2-delta{font-weight:700}
 .tv2-why{color:var(--quiet)}
 .tv2-why::before{content:"·";margin-right:8px;color:#D0D5DD}
 /* Fixed layout with an explicit colgroup: "Deepanshu Agarwal" clipped to "Deepanshu Ag…"
-   on a wall display, and a name nobody can read is a name nobody can act on. */
+   on a wall display, and a name nobody can read is a name nobody can act on.
+
+   ROW HEIGHT IS WHAT CAPS THE TYPE HERE, not the padding around the edges. A row was 2.2x
+   the font size: 0.6em of cell padding on top of a default 1.4 line-height. At ~1.5x the
+   same box holds the same 13 rows a third larger. Everything is in em so it scales with
+   whatever size the fit routine lands on, and leftover height goes back into --rowpad. */
 .tv2-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:15px;
-  font-variant-numeric:tabular-nums}
-.tv2-table th{font-size:.72em;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
-  color:var(--quiet);text-align:left;padding:.3em .5em;border-bottom:2px solid var(--line);
+  line-height:1.2;font-variant-numeric:tabular-nums}
+.tv2-table th{font-size:.6em;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--quiet);text-align:left;padding:.16em .3em;border-bottom:2px solid var(--line);
   white-space:nowrap}
-.tv2-table td{padding:.3em .5em;border-bottom:1px solid #F2F4F7;white-space:nowrap}
+.tv2-table td{padding:calc(.11em + var(--rowpad,0px)) .3em;border-bottom:1px solid #F2F4F7;
+  white-space:nowrap}
 .tv2-table .r{text-align:right}
 .tv2-csm{font-weight:600;overflow:hidden;text-overflow:ellipsis}
 .tv2-total td{border-bottom:none;border-top:2px solid var(--brand);font-weight:800;padding-top:.35em}
