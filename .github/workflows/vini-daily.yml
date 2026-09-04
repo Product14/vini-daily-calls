@@ -33,6 +33,7 @@ jobs:
       - name: Generate + send daily report (guardrailed)
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+          SEND_EMAIL: "0"   # email report OFF for now (Slack still posts). Set "1" to re-enable.
           CLICKHOUSE_HOST:     ${{ secrets.CLICKHOUSE_HOST }}
           CLICKHOUSE_PORT:     ${{ secrets.CLICKHOUSE_PORT }}
           CLICKHOUSE_USER:     ${{ secrets.CLICKHOUSE_USER }}

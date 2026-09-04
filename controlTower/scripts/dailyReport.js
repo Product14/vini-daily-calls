@@ -43,6 +43,8 @@ const REPO    = join(CT, "..");
 
 const DRY          = process.env.DRY_RUN === "1" || process.argv.includes("--dry-run");
 const FORCE_RESEND = process.env.FORCE_RESEND === "1" || process.argv.includes("--force");
+// Email can be turned off independently of Slack (SEND_EMAIL=0). Default: on.
+const SEND_EMAIL   = process.env.SEND_EMAIL !== "0";
 const SLACK_TOKEN     = process.env.SLACK_BOT_TOKEN;
 const REPORT_CHANNEL  = process.env.SLACK_CHANNEL;
 const ALERT_CHANNEL   = process.env.SLACK_ALERT_CHANNEL;
@@ -164,8 +166,8 @@ async function main() {
 
   // 2. Generate artifacts (NO sends here — a build failure hits the top-level
   //    catch, alerts, and claims nothing, so it's safe to retry).
-  log("→ generate email HTML + Slack PNG");
-  execFileSync(process.execPath, [join(SCRIPTS, "previewAgentsEmail.js")], { cwd: CT, stdio: "inherit" });
+  log(`→ generate ${SEND_EMAIL ? "email HTML + " : ""}Slack PNG`);
+  if (SEND_EMAIL) execFileSync(process.execPath, [join(SCRIPTS, "previewAgentsEmail.js")], { cwd: CT, stdio: "inherit" });
   const pngPath = await renderSlackPng(payload);
 
   // 3. FORCE_RESEND — clear today's ledger so the claims below win fresh.
@@ -175,9 +177,11 @@ async function main() {
   }
 
   // 4. Send, each claimed independently and at-most-once.
-  const emailRes = await sendChannel(date, "email", () => {
-    execFileSync(process.execPath, [join(SCRIPTS, "sendVinniReport.js"), date], { cwd: CT, stdio: "inherit" });
-  });
+  const emailRes = SEND_EMAIL
+    ? await sendChannel(date, "email", () => {
+        execFileSync(process.execPath, [join(SCRIPTS, "sendVinniReport.js"), date], { cwd: CT, stdio: "inherit" });
+      })
+    : (log("· email OFF (SEND_EMAIL=0) — skipping"), "off");
   const slackRes = await sendChannel(date, "slack", () =>
     postSlackReportPng(pngPath, `Vini Control Tower · ${payload.asOfDate}`, `Vini Daily Snapshot — ${payload.asOfDate}`));
 
