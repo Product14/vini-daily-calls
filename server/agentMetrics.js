@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
 import { applyQualifiedRules } from "./qualifiedRules.js";
+import { applyResellerAllowlist } from "./resellerAllowlist.js";
 
 const require = createRequire(import.meta.url);
 // Inbound callbacks driven by an outbound touch are re-attributed to the
@@ -24,9 +25,11 @@ const QUERIES_RAW = require("./agentMetricsQueries.json");
 // meta.source='warm_transfer' meetings are appointments we did not create and
 // must not be counted — see warmTransferExclusion.js (same rule the event-email
 // send path applies, so the dashboard and the emails agree).
+// resellerAllowlist widens the enterprise screen so partner-sold rooftops that are real paying
+// customers stop being filtered out of every metric — see resellerAllowlist.js.
 const QUERIES = Object.fromEntries(
   Object.entries(QUERIES_RAW).map(([k, sql]) =>
-    [k, k.endsWith("_vouchers") ? sql : applyQualifiedRules(applyWarmTransferExclusion(applyCallbackOutboundAttribution(sql, k), k), k)])
+    [k, k.endsWith("_vouchers") ? sql : applyResellerAllowlist(applyQualifiedRules(applyWarmTransferExclusion(applyCallbackOutboundAttribution(sql, k), k), k), k)])
 );
 
 export function hasClickhouseCreds() {

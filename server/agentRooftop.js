@@ -14,6 +14,7 @@ import { runClickhouse, hasClickhouseCreds } from "./agentMetrics.js";
 import { applyCallbackOutboundAttribution } from "./callbackAttribution.js";
 import { applyWarmTransferExclusion } from "./warmTransferExclusion.js";
 import { applyQualifiedRules } from "./qualifiedRules.js";
+import { applyResellerAllowlist } from "./resellerAllowlist.js";
 import { injectDealerWebsite, classifyOemBrands } from "./oemBrands.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -21,13 +22,17 @@ const here = dirname(fileURLToPath(import.meta.url));
 //   callbackOutboundAttribution — credit outbound-driven callbacks to the Outbound agent
 //   warmTransferExclusion       — meta.source='warm_transfer' meetings aren't appointments we created
 //   qualifiedRules              — per-agent qualified: Sales OB = campaign outcome, Sales IB = AI verdict
+//   resellerAllowlist           — partner-sold rooftops that are real customers aren't filtered out
 //   injectDealerWebsite         — dealer_website column for OEM-brand classification
 // Identical to the Overall view's chain (agentMetrics.js), so the two views reconcile.
 const SPINE = "agentBaseFact.sql";
 const BASE_FACT = injectDealerWebsite(
-  applyQualifiedRules(
-    applyWarmTransferExclusion(
-      applyCallbackOutboundAttribution(readFileSync(join(here, SPINE), "utf8"), SPINE),
+  applyResellerAllowlist(
+    applyQualifiedRules(
+      applyWarmTransferExclusion(
+        applyCallbackOutboundAttribution(readFileSync(join(here, SPINE), "utf8"), SPINE),
+        SPINE
+      ),
       SPINE
     ),
     SPINE

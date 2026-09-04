@@ -114,7 +114,12 @@ lc AS (
            ON l.enterprise_id = etd.enterprise_id AND l.team_id = etd.team_id
     WHERE l.is_deleted = 0 AND l.__deleted = 0
       AND l.service_type = 'sales'
-      AND ed.is_test_account = 0 AND (ed.reseller_id IS NULL OR ed.reseller_id = '')
+      AND ed.is_test_account = 0
+      -- Reseller screen + allowlist. Hardcoded because this file is a standalone extract run
+      -- straight through `ch`/`ch-pack`, so it cannot use the load-time injection the server
+      -- uses. Source of truth: server/resellerAllowlist.js (RESELLER_ALLOWLIST) — keep in step.
+      AND (ed.reseller_id IS NULL OR ed.reseller_id = ''
+           OR ed.enterprise_id IN ('62f962c8e'))  -- CallSource Auto
       AND lower(ifNull(ed.name,''))         NOT LIKE '%pevej%'
       AND lower(ifNull(ed.name,''))         NOT LIKE '%testing%'
       AND lower(ifNull(ed.name,''))         NOT LIKE '%test %'
