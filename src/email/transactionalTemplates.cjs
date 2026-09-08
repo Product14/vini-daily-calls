@@ -118,7 +118,10 @@ function detail(label, value) {
  * opts: { rooftopName, dept, tz, mtdCount, links, pixelUrl, appointment:{
  *   customer,phone, when(preformatted), relDay('Today'|'Tomorrow'|'Fri, Sep 27'), time,
  *   type('Sales'|'Service'), intent, vehicle, transportation, status, byVini(bool),
- *   recordingUrl } }
+ *   recordingUrl,
+ *   services[] + serviceIntent + serviceVehicle — the REASON FOR SERVICE, from
+ *   leadCaptureCH.fetchServiceReasonsByLead; `services` drives the "For" row and serviceVehicle
+ *   backfills "Vehicle" when the meetings feed carries none } }
  */
 function renderPostAppointment(opts) {
   opts = opts || {};
@@ -126,6 +129,7 @@ function renderPostAppointment(opts) {
   var L = opts.links || {};
   var apptUrl = L.appointment || L.console || "https://console.spyne.ai/converse-ai";
   var whenBig = a.relDay ? (a.relDay + (a.time ? " · " + a.time : "")) : (a.when || "");
+  var serviceReason = fmtServiceReason(a.services, a.serviceIntent);
   var statusOk = String(a.status || "scheduled").toLowerCase();
   var statusPill = statusOk === "scheduled" || statusOk === "" ? "" : pill(esc(a.status), statusOk.indexOf("cancel") >= 0 || statusOk.indexOf("noshow") >= 0 || statusOk.indexOf("no_show") >= 0 ? NEG : MUTE, statusOk.indexOf("cancel") >= 0 ? NEG_BG : SLATE_BG);
 
@@ -144,8 +148,10 @@ function renderPostAppointment(opts) {
       (whenBig ? '<div style="margin-top:14px;font-size:20px;font-weight:900;color:' + GREEN_BIG + ';line-height:1.2;">&#128197; ' + esc(whenBig) + "</div>" : "") +
       '<div style="margin-top:12px;">' + chips + "</div>" +
       '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;border-top:1px solid #C7F0D8;">' +
-        detail("For", a.intent ? humanizeIntent(a.intent) : "") +
-        detail("Vehicle", a.vehicle && a.vehicle !== "—" ? a.vehicle : "") +
+        // WHAT they are coming in for. The captured work wins; the booking intent
+        // ('schedule_appointment') is only the fallback — on its own it tells the manager nothing.
+        detail("For", serviceReason || (a.intent ? humanizeIntent(a.intent) : "")) +
+        detail("Vehicle", a.vehicle && a.vehicle !== "—" ? a.vehicle : (a.serviceVehicle || "")) +
         detail("Transport", a.transportation) +
         (a.bookedAt ? detail("Booked at", formatDateTime(a.bookedAt, opts.tz)) : "") +
         (a.assignedTo ? detail("Booked by", a.assignedTo) : "") +
@@ -156,7 +162,7 @@ function renderPostAppointment(opts) {
     '<div style="margin-top:16px;">' + btnPrimary("Confirm appointment", apptUrl) + "</div>";
 
   var title = (a.customer ? esc(a.customer) : "Appointment") + (a.relDay ? " — " + esc(a.relDay) + (a.time ? " " + esc(a.time) : "") : " is on the calendar");
-  var hasValue = !!(a.customer || whenBig || a.intent || a.vehicle);
+  var hasValue = !!(a.customer || whenBig || a.intent || a.vehicle || serviceReason);
   return stampValue(shell(opts, a.byVini ? "Vini booked an appointment" : "New appointment", title, card + mtdStrip(opts.mtdCount, "appointments booked by Vini this month", apptUrl)), hasValue);
 }
 
@@ -169,6 +175,46 @@ var INTENT_LABELS = {
   failed_booking: "Failed booking to review", specific_salesperson: "Asked for a salesperson", CUSTOM: "Action item",
 };
 function humanizeIntent(k) { return INTENT_LABELS[k] || String(k || "").toLowerCase().replace(/_/g, " ").replace(/^\w/, function (c) { return c.toUpperCase(); }); }
+
+/**
+ * REASON FOR SERVICE — the work the customer is actually coming in for. THE canonical formatter:
+ * the appointment email, the appointment SMS and the daily digest's appointment table all render
+ * through this one, so a service manager reads the same line everywhere.
+ *
+ * Booking intent is NOT a reason. `meetings.intent` is always 'schedule_appointment', so the
+ * appointment card used to read "For: Schedule appointment" — the one thing the manager already
+ * knew (Zeigler Hyundai of Racine, Aug-2026). The real work comes from the call report
+ * (leadCaptureCH.fetchServiceReasonsByLead) and arrives two ways:
+ *   · as a phrase the agent captured     ["Oil Change", "recall seat harness inspection"]
+ *   · as raw dealer op-code lines        ["PERFORM OIL AND FILTER CHANGE. W/MULTIPOINT INSP 5 QTS
+ *                                          (COURTESY VEHICLE WASH) SEMI SYNTHETIC OIL…"]
+ * Op-codes are SCREAMING and paragraph-long, so caps are folded and each item clipped — an email
+ * row has to read as one calm line. `intent` ("Check Recall Status") is the coarse fallback for a
+ * call that named no specific work; returns "" when there is nothing to say, so the caller's
+ * `detail()` omits the row rather than printing a label with no value.
+ */
+function fmtServiceReason(services, intent, max) {
+  var cap = Number(max) > 0 ? Number(max) : 3;
+  var list = (Array.isArray(services) ? services : [services])
+    .map(function (s) { return String(s == null ? "" : s).trim(); })
+    .filter(Boolean);
+  var seen = {}, clean = [];
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i].replace(/\s+/g, " ");
+    // a full-caps op-code becomes sentence case; a normally-cased phrase is left exactly as the
+    // agent captured it (the /[A-Z]{4}/ guard keeps short tokens like "AC" or "4WD" from tripping it)
+    if (t === t.toUpperCase() && /[A-Z]{4}/.test(t)) t = t.charAt(0) + t.slice(1).toLowerCase();
+    t = t.replace(/[\s.,;]+$/, "");
+    if (t.length > 64) t = t.slice(0, 63).replace(/[\s.,;-]+$/, "") + "…";
+    var k = t.toLowerCase();
+    if (!t || seen[k]) continue; // the same op-code often repeats across a lead's calls
+    seen[k] = 1;
+    clean.push(t);
+  }
+  if (!clean.length) return String(intent == null ? "" : intent).trim();
+  var shown = clean.slice(0, cap).join(" · ");
+  return clean.length > cap ? shown + " +" + (clean.length - cap) + " more" : shown;
+}
 
 var NEG = "#DC2626", NEG_BG = "#FEE2E2", WARM = "#D97706";
 
@@ -1068,8 +1114,11 @@ function renderPostAppointmentSms(opts) {
   lines.push((byVini ? "Vini booked an appointment" : "New appointment") + (opts.rooftopName ? " · " + opts.rooftopName : ""));
   lines.push(who + (a.type ? " — " + a.type : (opts.dept === "service" ? " — Service" : " — Sales")));
   if (a.when) lines.push(a.when);
-  if (a.vehicle) lines.push("Vehicle: " + a.vehicle);
-  if (a.intent) lines.push(humanizeIntent(a.intent));
+  if (a.vehicle || a.serviceVehicle) lines.push("Vehicle: " + (a.vehicle || a.serviceVehicle));
+  // capped at 2 items here — an SMS pays per segment, so the third op-code line isn't worth it
+  var smsReason = fmtServiceReason(a.services, a.serviceIntent, 2);
+  if (smsReason) lines.push("For: " + smsReason);
+  else if (a.intent) lines.push(humanizeIntent(a.intent));
   if (a.bookedAt) lines.push("Booked: " + formatDateTime(a.bookedAt, opts.tz));
   lines.push("Details: " + url);
   return lines.join("\n");
@@ -1383,6 +1432,9 @@ module.exports = {
   // shared with eventRunner so the send GATE and the RENDER can never disagree about
   // whether a conversation has a real summary / was a real conversation.
   cleanSummary, isNoConversation,
+  // THE canonical reason-for-service formatter — the daily digest renders through this same one
+  // (via digestEnrich) so the appointment alert and the digest can never word it differently.
+  fmtServiceReason,
   renderPostAppointment: renderPostAppointment,
   renderPostConversation: renderPostConversation,
   renderActionItem: renderActionItem,

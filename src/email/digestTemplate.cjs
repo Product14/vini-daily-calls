@@ -433,7 +433,9 @@ function renderDigestHtml(metrics, opts) {
   if (appointments.length) {
     var apptTotal = num(m.appointmentsUpcomingTotal) || apptAll.length;
     var rows = appointments.map(function (a) {
-      var why = a.intent ? humanize(a.intent) : "";
+      // the "reason" this column header promises: the work the customer actually asked for
+      // (digestEnrich → fmtServiceReason). Booking intent is the fallback, not the answer.
+      var why = a.reason ? a.reason : (a.intent ? humanize(a.intent) : "");
       var sub = [a.vehicle && a.vehicle !== "—" ? esc(a.vehicle) : "", a.phone ? esc(a.phone) : "", why ? esc(why) : ""].filter(Boolean).join(" · ");
       return '<tr>' +
         '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;color:' + INK + ';"><span style="font-weight:700;">' + esc(a.customer || "Customer") + "</span>" + (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:2px;">' + sub + "</div>" : "") + "</td>" +

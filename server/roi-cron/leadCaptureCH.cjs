@@ -466,6 +466,56 @@ async function fetchApptAsksByLead(teamId, leadIds) {
 }
 
 /**
+ * REASON FOR SERVICE per lead — the work the customer actually asked for, for the appointment
+ * alert. `meetings` carries only the coarse booking intent ('schedule_appointment'), so the
+ * appointment email told a service manager "For: Schedule appointment" — the one thing they
+ * already knew (Zeigler Hyundai of Racine via Prabha Kumari, 25-Aug-2026: "ensure the reason for
+ * service is included in the email"). The real work list lives in the call report:
+ *   report_service.serviceRequested.services  ["Oil Change", "recall seat harness inspection"]
+ *   report_service.serviceIntent              "Check Recall Status" — coarse, used as fallback
+ *   report_service.serviceRequested.vehicleName "2017 Hyundai Elantra"
+ *
+ * Ranks the lead's calls so one that NAMED the work beats a newer one that didn't, then takes the
+ * most recent of those. Map<leadId, {services[], intent, vehicleName, at}>; a lead whose calls
+ * never named service work simply isn't in the Map. Never throws into the send loop.
+ */
+async function fetchServiceReasonsByLead(teamId, leadIds) {
+  const ids = [...new Set((leadIds || []).filter(Boolean).map(String))];
+  if (!hasCreds() || !teamId || !ids.length) return new Map();
+  const sql =
+    "SELECT e.leadId leadId, toString(e.createdAt) at, ifNull(e.report_service,'') svc," +
+    " length(JSONExtractArrayRaw(JSONExtractRaw(ifNull(e.report_service,'{}'),'serviceRequested'),'services')) nsvc" +
+    " FROM dealer_leads.endcallreports e" +
+    // TEAM-SCOPED: a leadId that isn't this rooftop's returns nothing. Cross-rooftop isolation.
+    " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND e.leadId IN (" + ids.map(lit).join(",") + ")" +
+    " AND notEmpty(ifNull(e.report_service,''))" +
+    // a call that named the work outranks a NEWER call that didn't (a later "where are you"
+    // callback must not blank out the oil change the customer booked for)
+    " ORDER BY nsvc > 0 DESC, e.createdAt DESC" +
+    " LIMIT 1 BY e.leadId";
+  let rows;
+  try { rows = await chQuery(sql); }
+  catch (e) { console.warn("[service-reason] ClickHouse lookup failed:", String(e).slice(0, 160)); return new Map(); }
+  const out = new Map();
+  for (const r of rows) {
+    const svc = parseObj(r.svc);
+    const req = svc.serviceRequested || {};
+    const services = (Array.isArray(req.services) ? req.services : [])
+      .map((s) => String(s == null ? "" : s).trim()).filter(Boolean);
+    const intent = String(svc.serviceIntent || "").trim();
+    // report_service exists on every service call but is all-empty strings when the agent captured
+    // nothing — that row says nothing, so leave the lead out rather than render a blank row.
+    if (!services.length && !intent) continue;
+    out.set(String(r.leadId), {
+      services, intent,
+      vehicleName: String(req.vehicleName || "").trim(),
+      at: isoInstant(r.at),
+    });
+  }
+  return out;
+}
+
+/**
  * Same three fields keyed by CALL — for the standard post_conversation summary, where the ask
  * should come from THIS call (not "the lead's latest"). Dual-keyed on callId OR id for the same
  * reason as fetchLeadFields: the conversations feed's `cv.id` is one or the other per row.
@@ -585,6 +635,7 @@ function buildSmsLead(callLead, seed, msgs) {
 
 module.exports = {
   fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, fetchApptAsksByCall, fetchMeetingMetaSource,
+  fetchServiceReasonsByLead,
   leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
   extractZip, pickApptWhen, pickApptRequest, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };

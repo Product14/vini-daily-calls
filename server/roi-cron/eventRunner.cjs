@@ -445,6 +445,14 @@ async function runOnce() {
         // See NON_VINI_META_SOURCES for what it's for. Best-effort: no creds / lookup failure →
         // empty Map → nothing is gated, exactly as before.
         const metaSrc = await leadCaptureCH.fetchMeetingMetaSource(L.team_id, candidates.map((m) => m && m.id));
+        // REASON FOR SERVICE per lead — the meetings feed carries only the booking intent
+        // ('schedule_appointment'), never the work the customer asked for, so it comes from the
+        // lead's call report. Service only: `report_service` is empty on a sales call, so a sales
+        // rooftop would pay for a query that can only return nothing. Best-effort, same as above —
+        // a failure gives an empty Map and the email falls back to the booking intent.
+        const svcReasons = dept === "service"
+          ? await leadCaptureCH.fetchServiceReasonsByLead(L.team_id, candidates.map((m) => m && m.leadId))
+          : new Map();
         for (const m of candidates) {
           if (!m.id) continue;
           // Only surface VINI-booked appointments (source='spyne'). Skip known BDC/CRM bookings —
@@ -464,6 +472,7 @@ async function runOnce() {
             continue;
           }
           const byVini = m.source === "spyne";
+          const svc = svcReasons.get(String(m.leadId || "")) || null;
           const apptData = {
             customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
             type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
@@ -471,6 +480,10 @@ async function runOnce() {
             bookedAt: m.bookedAt,  // when the appointment was created
             assignedTo: m.assignedTo,  // who booked it
             leadId: m.leadId,  // link to the lead for context
+            // the reason for service — drives the card's "For" row (see fmtServiceReason)
+            services: svc ? svc.services : null,
+            serviceIntent: svc ? svc.intent : "",
+            serviceVehicle: svc ? svc.vehicleName : "",
           };
           jobs.push({ type: "post_appointment", key: m.id,
             subject: `${byVini ? "Vini booked an appointment" : "New appointment"} — ${name}`,
@@ -1111,10 +1124,15 @@ async function previewEvent(opts) {
     const m = list.find((x) => String(x.id) === eventKey) || (keyed ? null : list[0]);
     if (!m) return null;
     const mtd = await apptMTD(teamId, dept).catch(() => 0);
+    // Same reason-for-service lookup the send path does, so this preview matches what went out.
+    const svc = dept === "service"
+      ? (await leadCaptureCH.fetchServiceReasonsByLead(teamId, [m.leadId]).catch(() => new Map())).get(String(m.leadId || "")) || null
+      : null;
     return T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: {
       customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
       type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
       transportation: m.transportation || m.transportationOption, status: m.status, byVini: m.source === "spyne", recordingUrl: m.recordingUrl,
+      services: svc ? svc.services : null, serviceIntent: svc ? svc.intent : "", serviceVehicle: svc ? svc.vehicleName : "",
     } });
   }
 

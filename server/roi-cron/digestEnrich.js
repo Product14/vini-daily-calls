@@ -11,6 +11,16 @@
 // Best-effort: any failure (network, auth, empty) degrades to empty arrays and the
 // template simply omits those sections — identical to the old CH-creds-absent behavior.
 
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+// REASON FOR SERVICE. One exception to the "ClickHouse is no longer touched here" note above, and
+// it does not reopen the drift it warns about: nothing below is a COUNT. The captured service work
+// is a field the Reporting API does not carry at all — the same gap leadCaptureCH exists for — so
+// the appointments table can only get it from the call report. Every number in the digest still
+// comes from Reporting alone.
+const { fetchServiceReasonsByLead } = require("./leadCaptureCH.cjs");
+const { fmtServiceReason } = require("../../src/email/transactionalTemplates.cjs");
+
 const REPORTING_API_BASE = process.env.REPORTING_API_BASE || "https://reporting-vini.vercel.app";
 const N = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
@@ -89,14 +99,26 @@ export async function enrichRooftop(teamId, opts = {}) {
   if (apptsRes.status === "fulfilled") {
     // No cap here — the template displays the first 6 and uses the full length for its "view all (N)"
     // total, so every booked customer is represented in the count.
-    appointments = (apptsRes.value?.meetings || []).map((m) => ({
-      sched: fmtSched(m.when, m.tz || opts.tz),
-      customer: (m.customer || "").trim() || "Customer",
-      phone: m.phone || "",
-      vehicle: (m.vehicle || "").trim() || "—",
-      intent: m.intent || "",
-      estValue: rate || undefined,
-    }));
+    const raw = apptsRes.value?.meetings || [];
+    // The table header has always promised "Customer · vehicle · reason" while rendering the
+    // booking intent ('schedule_appointment'), which is not a reason — it's the one thing the
+    // service manager already knows. Service depts only: report_service is empty on sales calls.
+    const svcReasons = String(opts.dept || "") === "service"
+      ? await fetchServiceReasonsByLead(teamId, raw.map((m) => m && m.leadId)).catch(() => new Map())
+      : new Map();
+    appointments = raw.map((m) => {
+      const svc = svcReasons.get(String((m && m.leadId) || "")) || null;
+      return {
+        sched: fmtSched(m.when, m.tz || opts.tz),
+        customer: (m.customer || "").trim() || "Customer",
+        phone: m.phone || "",
+        vehicle: (m.vehicle || "").trim() || (svc && svc.vehicleName) || "—",
+        intent: m.intent || "",
+        // capped at 2 — this is a one-line sub-caption under the customer name, not the alert card
+        reason: svc ? fmtServiceReason(svc.services, svc.intent, 2) : "",
+        estValue: rate || undefined,
+      };
+    });
   } else {
     console.warn("[digest-enrich] upcoming appointments skipped:", String(apptsRes.reason).slice(0, 160));
   }

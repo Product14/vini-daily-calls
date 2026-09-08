@@ -16,7 +16,9 @@ const require = createRequire(import.meta.url);
 const T = require("../../src/email/transactionalTemplates.cjs");
 // Requested-visit-time extractor — SAME one the cron send path uses (fetchApptAsksByLead/ByCall),
 // so tracker previews can't drift from the real emails.
-const { pickApptRequest } = require("./leadCaptureCH.cjs");
+// Reason for service — the SAME lookup the cron send path uses, so a tracker preview can't word
+// the appointment's "For" row differently from the email the dealer actually received.
+const { pickApptRequest, fetchServiceReasonsByLead } = require("./leadCaptureCH.cjs");
 
 // SQL string literal escape (ClickHouse) — defends the team/key params.
 const lit = (s) => "'" + String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
@@ -341,10 +343,15 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
     // include the booking text thread when the appointment was set over SMS
     const cv = await smsConvByLead(teamId, row.leadId);
     const sms = cv ? await smsThread(cv.conversationId) : { messages: [], failed: 0 };
+    const isService = (row.serviceType || dept) === "service";
+    const svc = isService
+      ? (await fetchServiceReasonsByLead(teamId, [row.leadId]).catch(() => new Map())).get(String(row.leadId || "")) || null
+      : null;
     return T.renderPostAppointment({ rooftopName: name, dept, tz: row.mtz || tz, mtdCount: 0, links, sms: sms.messages, smsFailed: sms.failed, appointment: {
       customer: cleanName(row.customer, row.phone) || "Customer", phone: row.phone, when: w.when, relDay: w.relDay, time: w.time,
-      type: (row.serviceType || dept) === "service" ? "Service" : "Sales", intent: row.intent,
+      type: isService ? "Service" : "Sales", intent: row.intent,
       transportation: row.transportation, status: row.status, byVini: true,
+      services: svc ? svc.services : null, serviceIntent: svc ? svc.intent : "", serviceVehicle: svc ? svc.vehicleName : "",
     } });
   }
 
