@@ -1050,12 +1050,15 @@ async function runOnce() {
       // Deliberate business holds (no-value gate / v2 spyne-lock) are NOT failures — record as not_sent.
       // Anything else is a genuine send failure → status="error" so the tracker shows a red "Failed" and
       // it feeds the Slack breakage alert below.
-      const isHold = code === "BLOCKED_NO_VALUE" || code === "V2_SPYNE_ONLY";
+      // NO_DELIVERABLE_RECIPIENT is a hold too — the deliverability gate left nobody to mail. It is
+      // a backstop (subscribedEmails already filters, so the pass normally exits at
+      // recipients_missing first), but if it ever trips it must not page anyone as a send failure.
+      const isHold = code === "BLOCKED_NO_VALUE" || code === "V2_SPYNE_ONLY" || code === "NO_DELIVERABLE_RECIPIENT";
       const detail = String(e && e.message ? e.message : e).slice(0, 400);
       console.log(`  ✗ ${name} [${L.department}] ${isHold ? "held" : "FAILED"}: ${detail.slice(0, 160)}`);
       try {
         await upsert(isHold
-          ? { status: "not_sent", reason: code === "BLOCKED_NO_VALUE" ? "no_value" : "v2_spyne_only", reason_detail: detail }
+          ? { status: "not_sent", reason: { BLOCKED_NO_VALUE: "no_value", V2_SPYNE_ONLY: "v2_spyne_only", NO_DELIVERABLE_RECIPIENT: "recipients_missing" }[code], reason_detail: detail }
           : { status: "error", reason: "error", reason_detail: detail });
       } catch { /* swallow — one failure must not halt the pass */ }
       if (!isHold) failures.push({ rooftop: name, dept: L.department, error: detail.slice(0, 200) });

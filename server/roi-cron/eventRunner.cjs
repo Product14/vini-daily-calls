@@ -354,6 +354,26 @@ function sendMail(to, subject, html, opts) {
   return enqueueSendEvent(to, subject, html, opts);
 }
 
+/* A DELIBERATE BUSINESS HOLD, not a send failure — returns the roi_event_emails `reason` to record,
+ * or null for a genuine failure.
+ *
+ * runner.cjs has always drawn this line for digests (see its `isHold`); the transactional paths
+ * never did, so the anti-churn gate doing exactly its job was written as status='error' AND pushed
+ * into the Slack breakage alert — one entry PER LEAD, so a single batch of 109 leads cleared the
+ * crit threshold 20x over on its own. Measured over 30d: ~2,740 no-value holds produced 235 Slack
+ * warnings and 109 CRITICAL @channel pings, against 11 real failures.
+ *
+ * That channel is the dead-man's switch for this pipeline going silent — it once went dark for 13
+ * days unnoticed. 109 false @channel pings a month is how a team learns to mute it. */
+function holdReason(e) {
+  switch (e && e.code) {
+    case "BLOCKED_NO_VALUE": return "no_value";              // anti-churn gate (emailValue.cjs)
+    case "V2_SPYNE_ONLY": return "v2_spyne_only";            // v2 template @spyne.ai lock
+    case "NO_DELIVERABLE_RECIPIENT": return "recipients_missing"; // deliverability gate left nobody
+    default: return null;
+  }
+}
+
 // Insert the dedupe row FIRST (status 'queued') — the unique (team,type,event_key) guarantees
 // only one worker ever claims an event. If the insert conflicts, someone already handled it → skip.
 async function claim(base, eventKey) {
@@ -390,7 +410,9 @@ async function runOnce() {
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, suppressed: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0,
+  // `held` = deliberate business holds (no-value gate / v2 lock / nobody deliverable). Kept apart
+  // from `errors` so the pass summary and the Slack alert both mean what they say.
+  const out = { sent: 0, suppressed: 0, held: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0,
     // Appointment rows dropped because meta.source says Vini didn't book them. Counted (not silent)
     // so a rooftop whose feed is full of warm_transfer rows shows up in the pass summary.
     appt_skipped_not_ours: 0 };
@@ -904,7 +926,20 @@ async function runOnce() {
         const messageId = await sendMailAttributed(emails, job.subject, html);
         await finish(id, { status: "sent", subject: job.subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
         out.sent++;
-      } catch (e) { out.errors++; failures.push({ rooftop: name, dept: job.type || dept, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (id) { try { await finish(id, { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html }); } catch { /* ignore */ } } }
+      } catch (e) {
+        // A deliberate hold (no-value gate, v2 lock, nobody deliverable) is NOT a failure: record
+        // it as not_sent and keep it OUT of the Slack breakage alert. See holdReason().
+        const held = holdReason(e);
+        const detail = String(e && e.message ? e.message : e).slice(0, 200);
+        if (held) out.held++; else { out.errors++; failures.push({ rooftop: name, dept: job.type || dept, error: detail }); }
+        if (id) {
+          try {
+            await finish(id, held
+              ? { status: "not_sent", reason: held, subject: job.subject, rendered_html: job.html }
+              : { status: "error", reason: String(e).slice(0, 300), rendered_html: job.html });
+          } catch { /* ignore */ }
+        }
+      }
     }
 
     // ── 2) batched path — action_item / action_item_overdue, one email per TYPE covering every
@@ -969,17 +1004,23 @@ async function runOnce() {
       let messageId = null, sendErr = null;
       try { messageId = await sendMailAttributed(emails, subject, html); }
       catch (e) { sendErr = e; }
+      // A deliberate hold is not a failure. This path pushes one alert entry PER LEAD, so without
+      // this a single held batch was guaranteed to trip the crit threshold. See holdReason().
+      const heldReason = sendErr ? holdReason(sendErr) : null;
 
       // Fan the SAME outcome back to EVERY claimed lead row — none silently vanish. A row's
       // `rendered_html` is what ACTUALLY went out (the full batch), not a per-lead reconstruction.
       for (const { id } of claimed) {
         try {
-          if (sendErr) await finish(id, { status: "error", reason: String(sendErr).slice(0, 300), subject, rendered_html: html });
+          if (heldReason) await finish(id, { status: "not_sent", reason: heldReason, subject, rendered_html: html });
+          else if (sendErr) await finish(id, { status: "error", reason: String(sendErr).slice(0, 300), subject, rendered_html: html });
           else await finish(id, { status: "sent", subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
         } catch (e) { console.warn(`  ⚠ finish failed for a batched row (${type}): ${String(e).slice(0, 140)}`); }
       }
       out.email_batches++;
-      if (sendErr) {
+      if (heldReason) {
+        out.held += claimed.length;   // deliberate hold — counted, never alerted
+      } else if (sendErr) {
         out.errors += claimed.length;
         // One failure entry PER LEAD (not per batch) so the existing Slack alert's tiered
         // warn/crit thresholds scale with real blast radius.
@@ -1210,7 +1251,9 @@ async function previewEvent(opts) {
   return T.renderActionItem({ rooftopName: name, dept, tz, lead, items: use, totalOpen: use.length, justArrived: 0, mtdOpen: j.total, links: L_ });
 }
 
-module.exports = { runOnce, previewEvent, isUSActiveWindow };
+// holdReason is exported for its test — the hold/failure line is what keeps the Slack breakage
+// alert meaningful, so it gets pinned rather than left to a code reading.
+module.exports = { runOnce, previewEvent, isUSActiveWindow, holdReason };
 if (IS_CLI) {
   (async () => {
     await runOnce();
