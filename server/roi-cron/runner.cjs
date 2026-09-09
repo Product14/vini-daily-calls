@@ -34,18 +34,20 @@ const { isSubscribed, isChurned } = require("./subscriptions.cjs");
 // blank roi_rooftop_config.timezone.
 const { resolveTz } = require("./resolveTz.cjs");
 
+// Deliverability gate — malformed / typo'd / already-bounced addresses are never mailed, because
+// their bounces are charged to the sending domain and cost every OTHER rooftop its inbox placement.
+// canEmail() subsumes the old isRealEmail() (it still excludes the …@phone.invalid placeholder, so
+// a phone-only recipient gets SMS only). See emailHealth.cjs.
+const emailHealth = require("./emailHealth.cjs");
+const { canEmail, selectRecipients } = emailHealth;
+
 // Digest recipients for a channel, filtered by dept + per-channel master + the subscription matrix.
 // Digests are rooftop summaries → NO role tiering (everyone subscribed gets them).
 // GATE (r.verified_at): a rooftop only emails recipients a human verified for it — the guarantee
 // against cross-rooftop leaks. Unverified rows are held; the daily audit alert surfaces them.
-// A deliverable email — excludes the phone-only placeholder (…@phone.invalid), so a
-// phone-only recipient is never emailed (they get SMS only).
-function isRealEmail(e) {
-  return /\S+@\S+\.\S+/.test(String(e || "")) && !/@phone\.invalid$/i.test(String(e || ""));
-}
 function subscribedEmails(recips, dept, type) {
   return (recips ?? [])
-    .filter((r) => r.verified_at && isRealEmail(r.email) && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
+    .filter((r) => r.verified_at && canEmail(r) && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && isSubscribed(r, type, "email"))
     .map((r) => r.email);
 }
 function subscribedSmsRecips(recips, dept, type, rooftopSmsEnabled) {
@@ -674,7 +676,7 @@ function guardrailFor(tpl, m) {
 let _sendQueue = Promise.resolve();
 let _lastSendAt = 0;
 function enqueueSend(to, subject, html, opts) {
-  _sendQueue = _sendQueue.then(async () => {
+  const run = async () => {
     const now = Date.now();
     const elapsed = now - _lastSendAt;
     if (MAIL_SEND_DELAY_MS > 0 && _lastSendAt > 0 && elapsed < MAIL_SEND_DELAY_MS) {
@@ -683,8 +685,14 @@ function enqueueSend(to, subject, html, opts) {
     }
     _lastSendAt = Date.now();
     return sendMailRaw(to, subject, html, opts);
-  });
-  return _sendQueue;
+  };
+  // .then(run, run) — run whether or not the PREVIOUS send settled ok. This used to be a plain
+  // .then(run) on a queue that keeps its rejection: once any rooftop's send failed, every later
+  // .then skipped `run` altogether and re-threw the FIRST rooftop's error, so a single mail 4xx
+  // silently killed every remaining digest in the pass without even attempting them.
+  const result = _sendQueue.then(run, run);
+  _sendQueue = result.catch(() => {});   // keep the chain settled; the caller still sees the real error
+  return result;
 }
 
 async function sendMailRaw(to, subject, html, opts) {
@@ -705,19 +713,36 @@ async function sendMailRaw(to, subject, html, opts) {
     to = lock.allowed;
   }
   html = emailValue.stripMarker(html); // strip no-value + v2 markers off the wire
-  const body = JSON.stringify({ to: to.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } });
-  let lastErr = "";
+  // Last line of defence before the wire: drop any address the deliverability gate rejects. The
+  // recipient filters upstream already do this, but manual/backfill callers hand us raw address
+  // lists, and one malformed address in the comma-joined `to` fails the send for everyone on it.
+  const bad = to.filter((e) => !emailHealth.isDeliverableAddress(e));
+  if (bad.length) {
+    to = to.filter((e) => emailHealth.isDeliverableAddress(e));
+    console.warn(`  ⚠ dropped undeliverable address(es): ${bad.join(", ")}`);
+    if (!to.length) { const e = new Error(`No deliverable address left (${bad.join(", ")})`); e.code = "NO_DELIVERABLE_RECIPIENT"; throw e; }
+  }
+  const post = (addrs) => fetch(MAIL_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(MAIL_TOKEN ? { Authorization: `Bearer ${MAIL_TOKEN}` } : {}) },
+    body: JSON.stringify({ to: addrs.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } }),
+  });
+  let lastErr = "", lastBody = "";
   // retry transient mail-gateway failures (5xx / 429) a couple times with backoff
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(MAIL_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(MAIL_TOKEN ? { Authorization: `Bearer ${MAIL_TOKEN}` } : {}) },
-      body,
-    });
+    const res = await post(to);
     if (res.ok) { const j = await res.json().catch(() => ({})); return j.messageId ?? j.id ?? null; }
-    lastErr = `mail ${res.status}: ${(await res.text()).slice(0, 120)}`;
+    lastBody = await res.text().catch(() => "");
+    lastErr = `mail ${res.status}: ${lastBody.slice(0, 120)}`;
     if (res.status < 500 && res.status !== 429) break; // non-transient (4xx) — don't retry
     await new Promise((r) => setTimeout(r, attempt * 1500));
+  }
+  // The proxy rejected a RECIPIENT (not the template, not our auth). Suppress the offender so we
+  // never mail it again, and — when it was a batch — deliver to everyone else rather than letting
+  // one dead address silence the whole rooftop. See isolateAndSuppress.
+  if (emailHealth.classifySendFailure(lastBody) === "hard") {
+    const rescued = await emailHealth.isolateAndSuppress(sb, { to, errBody: lastBody, post });
+    if (rescued.messageId) return rescued.messageId;
   }
   throw new Error(lastErr);
 }
@@ -791,6 +816,51 @@ async function recipientVerificationAudit() {
   } catch (e) { console.warn("[roi-cron] recipient audit skipped:", String(e).slice(0, 140)); }
 }
 
+// ── Deliverability sweep ───────────────────────────────────────────────────────
+// The bounce/rejection paths suppress an address the moment it fails. This is the other half:
+// a daily pass over the whole recipient book that finds addresses which are undeliverable BY
+// CONSTRUCTION — a typo'd @gmial.com, a @dealer.lan, a display name pasted into the email field —
+// and puts them on hold before they ever produce their first bounce. Also folds in any bounce /
+// complaint events the mail provider has reported (roi_engagement_events), which is where an
+// asynchronous bounce lands once the provider webhook is wired to /api/email/bounce.
+// Rides the reliable hourly digest cron, gated to one UTC hour so it runs once a day.
+const DELIVERABILITY_AUDIT_UTC_HOUR = Number(process.env.DELIVERABILITY_AUDIT_UTC_HOUR || 15);
+async function deliverabilityAudit() {
+  try {
+    if (new Date().getUTCHours() !== DELIVERABILITY_AUDIT_UTC_HOUR) return;
+    const { data, error } = await selectRecipients(sb, "team_id,email,email_enabled,verified_at");
+    if (error) return;
+    const suppressed = [];
+    for (const r of data || []) {
+      if (!r.email_enabled || r.suppressed_at) continue;   // paused or already held → nothing to do
+      const p = emailHealth.addressProblem(r.email);
+      // 'placeholder' is a phone-only recipient — deliberate, not a bad address.
+      if (!p || p.code === "placeholder") continue;
+      const res = await emailHealth.suppressAddress(sb, { teamId: r.team_id, email: r.email, reason: p.label });
+      if (res.count) suppressed.push({ team: r.team_id, email: r.email, why: p.label });
+    }
+    // Bounce / complaint events the provider has reported since the last sweep.
+    const since = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+    const { data: ev } = await sb.from("roi_engagement_events")
+      .select("recipient_email,event_type,occurred_at").gte("occurred_at", since)
+      .in("event_type", ["bounce", "complaint", "dropped"]);
+    for (const e of ev || []) {
+      if (!e.recipient_email) continue;
+      const kind = e.event_type === "complaint" ? "complaint" : "hard";
+      const res = await emailHealth.recordFailure(sb, { teamId: null, email: e.recipient_email, kind, detail: `${e.event_type} reported ${String(e.occurred_at).slice(0, 10)}` });
+      if (res.suppressed) suppressed.push({ team: "—", email: e.recipient_email, why: res.reason || e.event_type });
+    }
+    if (!suppressed.length) return;
+    console.log(`[roi-cron] deliverability sweep suppressed ${suppressed.length} address(es)`);
+    await postBreakageAlert({
+      source: "Email deliverability",
+      failures: suppressed.slice(0, 20).map((s) => ({ rooftop: s.team, dept: "recipient", error: `${s.email} — ${s.why}` })),
+      sentOk: null,
+      windowLabel: `daily deliverability sweep — ${suppressed.length} address(es) put on hold so their bounces stop costing the sending domain. Fix the address in the tracker to restore it.`,
+    });
+  } catch (e) { console.warn("[roi-cron] deliverability sweep skipped:", String(e).slice(0, 140)); }
+}
+
 async function runOnce() {
   const ts = new Date().toISOString();
   console.log(`\n── ROI cron pass @ ${ts} · DRY_RUN=${DRY_RUN} ──`);
@@ -800,7 +870,7 @@ async function runOnce() {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
+    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) {
     const e = liveRes.error || cfgRes.error || recRes.error;
@@ -1023,6 +1093,8 @@ async function runOnce() {
   await eventPipelineHeartbeat();
   // Daily audit: surface any enabled recipient still awaiting rooftop verification (held by the gate).
   await recipientVerificationAudit();
+  // Daily sweep: hold any address that can never be delivered to, before it bounces on our domain.
+  await deliverabilityAudit();
   return out;
 }
 
@@ -1047,7 +1119,7 @@ async function backfill(start, end) {
   const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_enabled,daily_template,digest_focus,lifecycle_status,churn_date"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
+    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
@@ -1259,7 +1331,7 @@ async function generateAndSendNow(opts) {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
+    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
@@ -1393,7 +1465,7 @@ async function runCadence(cadence) {
   const [liveRes, cfgRes, recRes] = await Promise.all([
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,churn_date,${enabledCol}`),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
+    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));

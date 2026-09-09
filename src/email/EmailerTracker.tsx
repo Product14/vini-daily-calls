@@ -23,7 +23,7 @@ import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRoof
 import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
-import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow } from "./sendDigest";
 
 /** Pretty-print a phone for display + storage. US numbers (10 digits, or 11 with a leading 1) →
  * "+1 (555) 123-4567". Anything else keeps a leading "+" and its digits, so international / partial
@@ -1579,6 +1579,25 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     if (!res.ok) { setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, verified_at: prevVals[0] ?? null } : r))); setErr(res.error || "Save failed"); return; }
     onSaved();
   };
+  // Release a deliverability hold. A held address is one that FAILED — a hard bounce, a spam
+  // complaint, or an address the sweep found undeliverable (a typo'd @gmial.com, a display name
+  // pasted into the field). Every send to it bounces, and bounces are scored against spyne.ai,
+  // so releasing one that is still dead just spends the sending domain again. The durable fix is
+  // to correct the address in the field above — that clears the hold by itself.
+  const releaseHold = async (email: string) => {
+    if (!window.confirm(`Release the hold on ${email}?\n\nIt was held because mail to it FAILED. If the address is still wrong it will bounce again — and those bounces are charged to spyne.ai, which costs every rooftop its inbox placement.\n\nIf you know the correct address, edit it above instead: that clears the hold on its own.`)) return;
+    const prevRows = teamRecips.filter((r) => r.email === email).map((r) => ({ at: r.suppressed_at, why: r.suppression_reason }));
+    setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, suppressed_at: null, suppression_reason: null } : r)));
+    setRecipBusy(email); setErr("");
+    const res = await suppressRecipientNow({ teamId: rooftop?.team_id, email, suppressed: false });
+    setRecipBusy(null);
+    if (!res.ok) {
+      setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, suppressed_at: prevRows[0]?.at ?? null, suppression_reason: prevRows[0]?.why ?? null } : r)));
+      setErr(res.error || "Could not release the hold"); return;
+    }
+    onSaved();
+  };
+
   // Rooftop SMS master switch.
   const toggleSmsMaster = async () => {
     if (!rooftop?.team_id || smsBusy) return;
@@ -1808,6 +1827,25 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                       ) : null}
                       {!r.verified_at ? (
                         <div className="mt-1 text-[10px] font-semibold text-amber-600">⚠ Unverified — held, not emailed until verified</div>
+                      ) : null}
+                      {/* Deliverability hold. Mail to this address FAILED, so it is no longer sent
+                          to — every bounce is scored against spyne.ai and costs every rooftop its
+                          inbox placement. Shown loudly (not hidden) so someone fixes the address. */}
+                      {r.suppressed_at ? (
+                        <div className="mt-1 rounded-md border border-[#DC2626]/30 bg-[#DC2626]/5 px-2 py-1.5">
+                          <div className="text-[10px] font-semibold text-[#DC2626]">⛔ Bad address — held, no longer emailed</div>
+                          <div className="mt-0.5 text-[10px] leading-relaxed text-text-secondary">
+                            {r.suppression_reason || "This address failed."}
+                            {r.bounce_count ? ` · ${r.bounce_count} failure${r.bounce_count === 1 ? "" : "s"}` : ""}
+                          </div>
+                          <div className="mt-1 text-[10px] text-text-muted">Fix the email above to restore them, or</div>
+                          <button
+                            type="button"
+                            disabled={recipBusy === r.email}
+                            onClick={() => void releaseHold(r.email)}
+                            className="mt-1 rounded-md border border-border-subtle px-2 py-0.5 text-[10px] font-semibold text-text-secondary hover:bg-surface-subtle"
+                          >Release the hold anyway</button>
+                        </div>
                       ) : null}
                       {/* Controls — verify · role · email on/off — on their own row with room to breathe. */}
                       <div className="mt-2 flex items-center gap-2 border-t border-border-subtle pt-2">

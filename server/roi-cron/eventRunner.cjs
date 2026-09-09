@@ -40,6 +40,10 @@ const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 const { resolveTz, resolveWorkingHours } = require("./resolveTz.cjs");
 // Lead-capture field enrichment (ClickHouse) for rooftops on post_conversation_template='lead_capture'.
 const leadCaptureCH = require("./leadCaptureCH.cjs");
+// Deliverability gate (shared with the digest runner) — an address that is malformed, mistyped or
+// already bouncing is never mailed, because its bounces are scored against the sending domain.
+const emailHealth = require("./emailHealth.cjs");
+const { canEmail, selectRecipients } = emailHealth;
 
 const SB_URL = process.env.ROI_SUPABASE_URL;
 const SB_KEY = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -109,7 +113,7 @@ const EVENT_SEND_DELAY_NIGHT_MS  = Number(process.env.EVENT_SEND_DELAY_NIGHT_MS 
 let _eventSendQueue = Promise.resolve();
 let _lastEventSendAt = 0;
 function enqueueSendEvent(to, subject, html, opts) {
-  _eventSendQueue = _eventSendQueue.then(async () => {
+  const run = async () => {
     const delayMs = isUSActiveWindow() ? EVENT_SEND_DELAY_ACTIVE_MS : EVENT_SEND_DELAY_NIGHT_MS;
     const elapsed = Date.now() - _lastEventSendAt;
     if (delayMs > 0 && _lastEventSendAt > 0 && elapsed < delayMs) {
@@ -117,8 +121,13 @@ function enqueueSendEvent(to, subject, html, opts) {
     }
     _lastEventSendAt = Date.now();
     return sendMailRaw(to, subject, html, opts);
-  });
-  return _eventSendQueue;
+  };
+  // .then(run, run) — run whether or not the PREVIOUS send settled ok. A plain .then(run) on a
+  // queue that keeps its rejection skips `run` entirely once anything has failed, so one bad
+  // transactional send would stop every later one in the pass from even being attempted.
+  const result = _eventSendQueue.then(run, run);
+  _eventSendQueue = result.catch(() => {});   // keep the chain settled; the caller still sees the real error
+  return result;
 }
 function withPixel(html, id) {
   if (!html || !id) return html;
@@ -308,11 +317,33 @@ async function sendMailRaw(to, subject, html, opts) {
     if (!force) { const e = new Error("This email shows no value — blocked to avoid churn. Override with the password to send."); e.code = "BLOCKED_NO_VALUE"; throw e; }
     html = emailValue.stripMarker(html);
   }
-  const body = JSON.stringify({ to: to.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } });
+  // Last line of defence before the wire: an address the deliverability gate rejects never goes
+  // out. One malformed address in the comma-joined `to` fails the send for everyone else on it.
+  const bad = to.filter((e) => !emailHealth.isDeliverableAddress(e));
+  if (bad.length) {
+    to = to.filter((e) => emailHealth.isDeliverableAddress(e));
+    console.warn(`  ⚠ dropped undeliverable address(es): ${bad.join(", ")}`);
+    if (!to.length) { const e = new Error(`No deliverable address left (${bad.join(", ")})`); e.code = "NO_DELIVERABLE_RECIPIENT"; throw e; }
+  }
+  const post = (addrs) => fetch(MAIL_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(MAIL_TOKEN ? { Authorization: `Bearer ${MAIL_TOKEN}` } : {}) },
+    body: JSON.stringify({ to: addrs.join(","), subject, template: MAIL_TEMPLATE, templateData: { HTMLdata: html } }),
+  });
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(MAIL_URL, { method: "POST", headers: { "Content-Type": "application/json", ...(MAIL_TOKEN ? { Authorization: `Bearer ${MAIL_TOKEN}` } : {}) }, body });
+    const res = await post(to);
     if (res.ok) { const j = await res.json().catch(() => ({})); return j.messageId ?? j.id ?? null; }
-    if (res.status < 500 && res.status !== 429) throw new Error(`mail ${res.status}`);
+    if (res.status < 500 && res.status !== 429) {
+      // Non-transient. Carry the proxy's body into the error (it used to be dropped, which is why
+      // no failure reason was ever specific enough to act on) and, when it names a bad recipient,
+      // suppress that address and still deliver to the rest of the batch.
+      const errBody = await res.text().catch(() => "");
+      if (emailHealth.classifySendFailure(errBody) === "hard") {
+        const rescued = await emailHealth.isolateAndSuppress(sb, { to, errBody, post });
+        if (rescued.messageId) return rescued.messageId;
+      }
+      throw new Error(`mail ${res.status}: ${errBody.slice(0, 120)}`);
+    }
     await new Promise((r) => setTimeout(r, attempt * 1500));
   }
   throw new Error("mail failed after retries");
@@ -353,7 +384,7 @@ async function runOnce() {
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
     sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
     sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,chat_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,post_conversation_template,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
-    sb.from("roi_recipients").select("team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
+    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
@@ -417,11 +448,11 @@ async function runOnce() {
     // GATE: only recipients a human has verified for THIS rooftop (verified_at set) can be emailed —
     // the guarantee against a wrong-rooftop address ever receiving another rooftop's data. Unverified
     // rows are held; the daily audit alert surfaces them for a human to verify.
-    // isRealEmail excludes the phone-only placeholder (…@phone.invalid) so a phone-only
-    // recipient is never emailed (SMS only).
-    const isRealEmail = (e) => /\S+@\S+\.\S+/.test(String(e || "")) && !/@phone\.invalid$/i.test(String(e || ""));
+    // canEmail() is the deliverability gate: it drops the phone-only placeholder (…@phone.invalid,
+    // SMS only), anything malformed or mistyped, and any address already suppressed for bouncing —
+    // those bounces are charged to the sending domain and cost every other rooftop its placement.
     const emailsForType = (type) =>
-      pickTieredRecipients(recs.filter((r) => r.verified_at && isRealEmail(r.email) && deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
+      pickTieredRecipients(recs.filter((r) => r.verified_at && canEmail(r) && deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
     const smsForType = (type) =>
       c.sms_enabled
         ? pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))

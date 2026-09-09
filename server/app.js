@@ -16,6 +16,10 @@ import { sendProgramsReportEmail } from "./programsEmail.js";
 import { runAgentMetrics, runAgentMetricsIncremental, runAgentMetricsWeekMonth, hasClickhouseCreds } from "./agentMetrics.js";
 import { runAgentRooftops, runAgentRooftopsIncremental, runAgentRooftopsTotalsOnly } from "./agentRooftop.js";
 import { readAgentCache, writeAgentCache, hasCacheDb } from "./agentCache.js";
+// Deliverability gate — the one place that decides whether an address may be mailed. Shared with
+// the digest + transactional crons so a bad address is blocked identically on every send path.
+// Bounces are scored against the sending DOMAIN, so one dead address costs every rooftop.
+const emailHealth = require("./roi-cron/emailHealth.cjs");
 
 // Best-effort run log, mirrors what server/roi-cron/runner.cjs writes for
 // sync-live/sync-lifecycle — gives every refresh tier a "last synced" trail
@@ -2442,16 +2446,23 @@ app.post("/api/email/roi-send-now", requireTrackerAuth, async (req, res) => {
     const sbKeyV = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrlV || !sbKeyV) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
     const sbV = createSbClient(sbUrlV, sbKeyV, { auth: { persistSession: false } });
-    const { data: verifiedRecs } = await sbV.from("roi_recipients")
-      .select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", teamId);
+    const { data: verifiedRecs } = await emailHealth.selectRecipients(
+      sbV, "email,receives_sales,receives_service,email_enabled,verified_at", (q) => q.eq("team_id", teamId));
+    // GATE 2 (deliverability): a manual send is still a send on our domain. An address that is
+    // malformed, mistyped or already suppressed for bouncing is dropped here too — the tracker's
+    // "Send now" button must not be the way a known-bad address keeps getting mail.
+    const blocked = [];
     const verifiedEmails = new Set(
       (verifiedRecs ?? [])
         .filter((r) => r.verified_at && (department === "service" ? r.receives_service : r.receives_sales) && r.email_enabled)
+        .filter((r) => { const b = emailHealth.emailBlock(r); if (b) blocked.push(`${r.email} (${b.label})`); return !b; })
         .map((r) => String(r.email || "").trim().toLowerCase())
     );
     const recipients = requested.filter((e) => verifiedEmails.has(e.toLowerCase()));
     if (!recipients.length) {
-      return res.status(400).json({ error: "None of the requested recipients are verified for this rooftop/department — add + verify them first." });
+      return res.status(400).json({ error: blocked.length
+        ? `No deliverable recipient for this rooftop/department. Held: ${blocked.join("; ")}. Fix the address in the recipient list, which clears the hold.`
+        : "None of the requested recipients are verified for this rooftop/department — add + verify them first." });
     }
 
     // Anti-churn gate: a no-value digest is blocked unless the DANGER override is typed.
@@ -2749,8 +2760,13 @@ app.post("/api/email/roi-event-send-now", requireTrackerAuth, async (req, res) =
     // addresses a human verified for it. Previously an explicit `to` (or the stored row.recipients)
     // was used with NO verification — the one hole that let a manual resend deliver a stored email's
     // dealer/customer PII to an arbitrary address. Now every source is intersected with the verified set.
-    const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", row.team_id);
-    const verifiedRecs = (recs ?? []).filter((r) => r.verified_at && (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled);
+    const { data: recs } = await emailHealth.selectRecipients(
+      sb, "email,receives_sales,receives_service,email_enabled,verified_at", (q) => q.eq("team_id", row.team_id));
+    // GATE 2 (deliverability): drop anything malformed, mistyped or already suppressed for
+    // bouncing — a manual resend to a dead address costs the sending domain exactly as much.
+    const verifiedRecs = (recs ?? [])
+      .filter((r) => r.verified_at && (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled)
+      .filter((r) => emailHealth.canEmail(r));
     const verifiedEmails = verifiedRecs.map((r) => String(r.email || "").trim()).filter(Boolean);
     const verifiedSet = new Set(verifiedEmails.map((e) => e.toLowerCase()));
     let requested = (Array.isArray(to) ? to : to ? [to] : []).map((s) => String(s || "").trim()).filter(Boolean);
@@ -2822,10 +2838,15 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     if (!html) return res.status(404).json({ error: "No live data found to render this email for the rooftop." });
 
     // 2) recipients — the dept's enabled, human-verified addresses
-    const { data: recs } = await sb.from("roi_recipients").select("email,receives_sales,receives_service,email_enabled,verified_at").eq("team_id", teamId);
-    // GATE (r.verified_at): a rooftop only emails recipients a human verified for it (PR #27).
-    const recipients = (recs ?? []).filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled).map((r) => r.email);
-    if (!recipients.length) return res.status(400).json({ error: "no recipients configured for this rooftop/department" });
+    const { data: recs } = await emailHealth.selectRecipients(
+      sb, "email,receives_sales,receives_service,email_enabled,verified_at", (q) => q.eq("team_id", teamId));
+    // GATE 1 (r.verified_at): a rooftop only emails recipients a human verified for it (PR #27).
+    // GATE 2 (canEmail): …and only addresses that can actually receive mail — malformed, mistyped
+    // and already-bouncing addresses are held, because their bounces are scored against spyne.ai.
+    const recipients = (recs ?? [])
+      .filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && emailHealth.canEmail(r))
+      .map((r) => r.email);
+    if (!recipients.length) return res.status(400).json({ error: "no deliverable recipient configured for this rooftop/department" });
 
     // 3) idempotency: a deterministic event_key + a recent-duplicate guard so a double-click or client
     // retry doesn't email the dealer twice (the old `manual-${type}-${Date.now()}` key never deduped).
@@ -2992,7 +3013,13 @@ app.post("/api/recipients", requireTrackerAuth, async (req, res) => {
     const rawEmail = String(email || "").trim();
     const rawPhone = phone === undefined ? undefined : String(phone || "").trim();
     if (!teamId) return res.status(400).json({ error: "teamId required" });
-    if (rawEmail && !/\S+@\S+\.\S+/.test(rawEmail)) return res.status(400).json({ error: "enter a valid email" });
+    // Reject a bad address at the door. The old check was an UNANCHORED /\S+@\S+\.\S+/, so
+    // "Bob Smith <bob@x.com>", "a@x.com, b@y.com" and "john smith@dealer.com" all passed and then
+    // bounced on our domain for months. addressProblem() also catches @gmial.com-class typos.
+    if (rawEmail) {
+      const p = emailHealth.addressProblem(rawEmail);
+      if (p) return res.status(400).json({ error: p.code === "typo" ? `${p.label} — check the spelling before adding it` : p.label });
+    }
     // A recipient needs at least ONE contact channel. When only a phone is given we synthesize a
     // non-deliverable placeholder email (email is the row's identity key) — the sender skips it, so
     // a phone-only recipient receives SMS only. Placeholder is derived from the phone's digits so
@@ -3058,8 +3085,15 @@ app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
     if (email !== undefined) {
       const addr = String(email || "").trim();
       if (addr) {
-        if (!/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "enter a valid email" });
+        const p = emailHealth.addressProblem(addr);
+        if (p) return res.status(400).json({ error: p.code === "typo" ? `${p.label} — check the spelling` : p.label });
         patch.email = addr;
+        // Fixing the address is what lifts a deliverability hold: the old address bounced, this
+        // one hasn't. Clearing it here is what makes the tracker's "fix the typo" flow actually
+        // restore the person's mail instead of leaving them silently held forever.
+        if (addr.toLowerCase() !== String(row.email || "").toLowerCase()) {
+          patch.suppressed_at = null; patch.suppression_reason = null; patch.bounce_count = 0;
+        }
       } else {
         // clearing the email → must keep a phone; fall back to its placeholder identity
         if (!nextPhone) return res.status(400).json({ error: "keep an email or add a phone" });
@@ -3074,7 +3108,13 @@ app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
         .select("id").eq("team_id", teamId).ilike("email", patch.email).neq("id", id).maybeSingle();
       if (clash) return res.status(409).json({ error: "another recipient already uses that email" });
     }
-    const { error } = await sb.from("roi_recipients").update(patch).eq("id", id).eq("team_id", teamId);
+    let { error } = await sb.from("roi_recipients").update(patch).eq("id", id).eq("team_id", teamId);
+    // Tolerate a database that hasn't run migration 0023 yet — drop the hold-clearing fields and
+    // save the rest, so editing an address never fails just because suppression isn't installed.
+    if (error && emailHealth.isMissingColumnError(error)) {
+      const { suppressed_at, suppression_reason, bounce_count, ...rest } = patch;   // eslint-disable-line no-unused-vars
+      ({ error } = await sb.from("roi_recipients").update(rest).eq("id", id).eq("team_id", teamId));
+    }
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ ok: true, id, email: patch.email ?? row.email, phone: patch.phone });
   } catch (err) {
@@ -3128,6 +3168,84 @@ app.post("/api/recipients/verify", requireTrackerAuth, async (req, res) => {
   } catch (err) {
     console.error("POST /api/recipients/verify error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "verify failed" });
+  }
+});
+
+// ── Deliverability hold: suppress / restore an address ───────────────────────
+// An address that fails is held, not deleted, so the tracker can show WHY that person stopped
+// receiving and a CSM can act. This route is the manual lever on the same state the bounce
+// handler and the daily sweep write: `suppressed:true` holds it, `false` restores it.
+// Restoring is a deliberate act — if the address is still dead it will bounce again and the
+// next failure re-holds it, so the safe fix is to correct the address, not to restore it.
+app.post("/api/recipients/suppress", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamId, email, suppressed, reason } = req.body ?? {};
+    const addr = String(email || "").trim();
+    if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const r = suppressed === false
+      ? await emailHealth.unsuppressAddress(sb, { teamId, email: addr })
+      : await emailHealth.suppressAddress(sb, { teamId, email: addr, reason: reason || "Held by a CSM" });
+    if (r.error) return res.status(500).json({ error: r.error.message || "could not update the hold" });
+    if (!r.count) return res.status(404).json({ error: "recipient not found for this rooftop" });
+    return res.json({ ok: true, teamId, email: addr, suppressed: suppressed !== false });
+  } catch (err) {
+    console.error("POST /api/recipients/suppress error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "suppress failed" });
+  }
+});
+
+// ── Bounce / complaint ingest ────────────────────────────────────────────────
+// The feedback loop the sending pipeline never had. Today the sender writes recipients[].received
+// = true the instant the mail proxy accepts the message, and NOTHING ever contradicts it — an
+// asynchronous bounce an hour later is invisible, so a dead address is mailed forever and its
+// bounces are charged to spyne.ai. This endpoint is where the provider tells us the truth.
+//
+// Provider-agnostic on purpose: mail.spyne.ai fronts the actual ESP, so whichever one we are
+// pointed at, the parsing (emailHealth.parseBounceEvents — Resend / SendGrid / SES / the proxy's
+// own shape) does not need rewriting. Authenticated with a shared secret, like the crons.
+//
+// INERT UNTIL WIRED: nothing calls this until someone points the provider's webhook at
+// POST /api/email/bounce. That is a one-line change on the provider side and the single
+// dependency for automatic bounce suppression — see docs/email-deliverability.md.
+app.post("/api/email/bounce", async (req, res) => {
+  try {
+    const secret = process.env.MAIL_WEBHOOK_SECRET || process.env.CRON_SECRET;
+    // FAIL CLOSED. This route writes suppression state — an open one lets anyone silence a
+    // rooftop's email by POSTing a fake bounce for its GM.
+    if (!secret) return res.status(500).json({ ok: false, error: "MAIL_WEBHOOK_SECRET not configured" });
+    const hdr = String(req.headers.authorization || "");
+    const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : String(req.query.secret || "");
+    if (token !== secret) return res.status(401).json({ ok: false, error: "Unauthorized" });
+
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ ok: false, error: "ROI_SUPABASE_SERVICE_KEY not set" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+
+    const events = emailHealth.parseBounceEvents(req.body);
+    if (!events.length) return res.json({ ok: true, ingested: 0, suppressed: 0, note: "no recognised bounce/complaint event in the payload" });
+    const now = new Date().toISOString();
+    let suppressed = 0;
+    for (const e of events) {
+      // Audit trail first — the event is worth keeping even if the address isn't one of ours.
+      await sb.from("roi_engagement_events").insert({
+        recipient_email: emailHealth.normalizeEmail(e.email),
+        event_type: e.type === "complaint" ? "complaint" : e.type === "deferred" ? "deferred" : "bounce",
+        provider: "mail-proxy", raw: { detail: e.detail }, occurred_at: now,
+      }).then(() => {}, (err) => console.warn("[bounce] event log skipped:", String(err?.message || err).slice(0, 120)));
+      // A deferral is a soft failure — counted, and only suppressing once it keeps happening.
+      const kind = e.type === "complaint" ? "complaint" : e.type === "deferred" ? "soft" : "hard";
+      const r = await emailHealth.recordFailure(sb, { teamId: null, email: e.email, kind, detail: e.detail });
+      if (r.suppressed) { suppressed++; console.log(`[bounce] suppressed ${e.email} — ${r.reason}`); }
+    }
+    return res.json({ ok: true, ingested: events.length, suppressed });
+  } catch (err) {
+    console.error("POST /api/email/bounce error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "bounce ingest failed" });
   }
 });
 
@@ -3310,7 +3428,11 @@ app.post("/api/csm", requireTrackerAuth, async (req, res) => {
     const { teamId, name, email, actor } = req.body ?? {};
     const nm = String(name || "").trim();
     const addr = String(email || "").trim();
-    if (!teamId || !nm || !/\S+@\S+\.\S+/.test(addr)) return res.status(400).json({ error: "teamId, CSM name and a valid CSM email are all required" });
+    if (!teamId || !nm) return res.status(400).json({ error: "teamId and CSM name are both required" });
+    // This route also INSERTS a roi_recipients row, so it needs the same address gate as
+    // /api/recipients — the loose check here let malformed CSM addresses into the send list.
+    const csmProblem = emailHealth.addressProblem(addr);
+    if (csmProblem) return res.status(400).json({ error: `CSM email: ${csmProblem.label}` });
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
@@ -3459,7 +3581,7 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
     // to, so discovery/phantom rows for non-live teams never consume the read budget.
     const [cfgRes, recRes, liveRes] = await Promise.all([
       _roiCfgSelect(sb, _ROI_CFG_COLS),
-      sb.from("roi_recipients").select("team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
+      emailHealth.selectRecipients(sb, "team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
       sb.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
     ]);
     // CRITICAL: config/live define the rows themselves. recipients only enrich → degrade to [].
@@ -3538,9 +3660,9 @@ app.get("/api/tracker/team-recipients", requireTrackerAuth, async (req, res) => 
     if (!teamId) return res.status(400).json({ error: "teamId required" });
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const { data, error } = await sb.from("roi_recipients")
-      .select("id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at")
-      .eq("team_id", teamId);
+    const { data, error } = await emailHealth.selectRecipients(
+      sb, "id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at",
+      (q) => q.eq("team_id", teamId));
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ ok: true, rows: data ?? [] });
   } catch (err) {

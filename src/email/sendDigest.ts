@@ -83,6 +83,13 @@ export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabl
 export const verifyRecipientNow = (opts: { teamId?: string; email: string; verified: boolean }) =>
   postJson("/api/recipients/verify", { teamId: opts.teamId, email: opts.email, verified: opts.verified });
 
+/** Hold (or release) an address for deliverability. A held address is never emailed, because its
+ * bounces are scored against the sending domain and cost EVERY rooftop its inbox placement.
+ * Releasing a still-dead address just means it bounces again and is re-held — the durable fix is
+ * to correct the address (which clears the hold on its own). */
+export const suppressRecipientNow = (opts: { teamId?: string; email: string; suppressed: boolean; reason?: string }) =>
+  postJson("/api/recipients/suppress", { teamId: opts.teamId, email: opts.email, suppressed: opts.suppressed, reason: opts.reason });
+
 /** Set (or clear) a recipient's phone number for the SMS channel. */
 export const setRecipientPhoneNow = (opts: { teamId?: string; dept?: DeptKind; email: string; phone: string }) =>
   addRecipientNow({ teamId: opts.teamId, dept: opts.dept, email: opts.email, phone: opts.phone });

@@ -458,7 +458,11 @@ export async function loadEventCounts(): Promise<EventCounts> {
 }
 
 /** One recipient of a team, with BOTH department memberships + the global enabled flag. */
-export type TeamRecipient = { id: string; email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean; phone: string | null; sms_enabled: boolean; role: string | null; subscriptions: import("./mockData").Subscriptions | null; verified_at: string | null };
+// suppressed_at / suppression_reason: the deliverability hold. An address that failed (hard bounce,
+// spam complaint, or one the sweep found undeliverable by construction) is held rather than deleted,
+// so the tracker can show WHY that person stopped receiving and a CSM can fix the address. Optional
+// because a database that hasn't run migration 0023 simply won't return them.
+export type TeamRecipient = { id: string; email: string; name: string | null; receives_sales: boolean; receives_service: boolean; email_enabled: boolean; phone: string | null; sms_enabled: boolean; role: string | null; subscriptions: import("./mockData").Subscriptions | null; verified_at: string | null; suppressed_at?: string | null; suppression_reason?: string | null; bounce_count?: number | null };
 
 /** All recipients for a team (both departments) — powers the ConfigDrawer's side-by-side Sales /
  * Service recipient lists. Each RooftopRow only carries its own department's recipients, so the
