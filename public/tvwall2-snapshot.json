@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-09T14:26:33.836Z",
+ "generatedAt": "2026-09-10T06:58:32.539Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -195,46 +195,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-01",
+    "since": "2026-09-07",
     "sincePct": {
-     "red": 0.7741935483870968,
-     "amber": 0.11290322580645161,
-     "green": 0.11290322580645161
+     "red": 0.7777777777777778,
+     "amber": 0.12698412698412698,
+     "green": 0.09523809523809523
     },
-    "added": 1,
+    "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 2
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "aged a day, so the pro-rata multiplier shrank",
-      "n": 1
-     },
-     {
-      "from": "green",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "salesOb": {
@@ -412,64 +381,15 @@
     }
    ],
    "changes": {
-    "since": "2026-08-31",
+    "since": "2026-09-08",
     "sincePct": {
-     "red": 0.56,
-     "amber": 0.3,
-     "green": 0.14
+     "red": 0.5660377358490566,
+     "amber": 0.2830188679245283,
+     "green": 0.1509433962264151
     },
-    "added": 3,
+    "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "amber",
-      "to": "green",
-      "cause": "the appointment count changed",
-      "n": 2
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 2
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "aged a day, so the pro-rata multiplier shrank",
-      "n": 2
-     },
-     {
-      "from": "green",
-      "to": "amber",
-      "cause": "aged a day, so the pro-rata multiplier shrank",
-      "n": 2
-     },
-     {
-      "from": "green",
-      "to": "red",
-      "cause": "aged a day, so the pro-rata multiplier shrank",
-      "n": 1
-     },
-     {
-      "from": "green",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "red",
-      "to": "green",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "serviceIb": {
@@ -647,46 +567,15 @@
     }
    ],
    "changes": {
-    "since": "2026-08-31",
+    "since": "2026-09-08",
     "sincePct": {
-     "red": 0.509090909090909,
-     "amber": 0.14545454545454545,
-     "green": 0.34545454545454546
+     "red": 0.5333333333333333,
+     "amber": 0.18333333333333332,
+     "green": 0.2833333333333333
     },
-    "added": 5,
+    "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 3
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 2
-     },
-     {
-      "from": "green",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "green",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "serviceOb": {
@@ -849,28 +738,15 @@
     }
    ],
    "changes": {
-    "since": "2026-08-31",
+    "since": "2026-09-08",
     "sincePct": {
-     "red": 0.8918918918918919,
-     "amber": 0.02702702702702703,
-     "green": 0.08108108108108109
+     "red": 0.8947368421052632,
+     "amber": 0,
+     "green": 0.10526315789473684
     },
-    "added": 1,
+    "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "red",
-      "to": "green",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   }
  }
