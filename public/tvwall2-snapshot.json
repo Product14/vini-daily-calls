@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-13T13:02:13.548Z",
+ "generatedAt": "2026-09-14T14:38:02.441Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,23 +26,38 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-13",
+   "asOf": "2026-09-14",
    "proRata": true,
    "total": {
     "agents": 69,
     "arr": 632500,
-    "red": 52,
-    "amber": 8,
-    "green": 9,
-    "dormant": 32,
+    "red": 54,
+    "amber": 7,
+    "green": 8,
+    "dormant": 33,
     "unrateable": 3,
     "pct": {
-     "red": 0.7536231884057971,
-     "amber": 0.11594202898550725,
-     "green": 0.13043478260869565
+     "red": 0.782608695652174,
+     "amber": 0.10144927536231885,
+     "green": 0.11594202898550725
     }
    },
    "csms": [
+    {
+     "csm": "Puneet Sharma",
+     "agents": 7,
+     "arr": 62400,
+     "red": 7,
+     "amber": 0,
+     "green": 0,
+     "dormant": 4,
+     "unrateable": 0,
+     "pct": {
+      "red": 1,
+      "amber": 0,
+      "green": 0
+     }
+    },
     {
      "csm": "Zeeshana Aijaz",
      "agents": 4,
@@ -119,21 +134,6 @@
      }
     },
     {
-     "csm": "Puneet Sharma",
-     "agents": 7,
-     "arr": 62400,
-     "red": 6,
-     "amber": 1,
-     "green": 0,
-     "dormant": 4,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.8571428571428571,
-      "amber": 0.14285714285714285,
-      "green": 0
-     }
-    },
-    {
      "csm": "Prabha Kumari",
      "agents": 9,
      "arr": 47388,
@@ -149,33 +149,33 @@
      }
     },
     {
+     "csm": "Deepanshu Agarwal",
+     "agents": 14,
+     "arr": 132372,
+     "red": 10,
+     "amber": 1,
+     "green": 3,
+     "dormant": 3,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.7142857142857143,
+      "amber": 0.07142857142857142,
+      "green": 0.21428571428571427
+     }
+    },
+    {
      "csm": "Ritika Agarwal",
      "agents": 9,
      "arr": 81000,
      "red": 6,
      "amber": 2,
      "green": 1,
-     "dormant": 2,
+     "dormant": 3,
      "unrateable": 0,
      "pct": {
       "red": 0.6666666666666666,
       "amber": 0.2222222222222222,
       "green": 0.1111111111111111
-     }
-    },
-    {
-     "csm": "Deepanshu Agarwal",
-     "agents": 14,
-     "arr": 132372,
-     "red": 9,
-     "amber": 1,
-     "green": 4,
-     "dormant": 3,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.6428571428571429,
-      "amber": 0.07142857142857142,
-      "green": 0.2857142857142857
      }
     },
     {
@@ -210,11 +210,11 @@
     }
    ],
    "changes": {
-    "since": "2026-09-12",
+    "since": "2026-09-13",
     "sincePct": {
      "red": 0.7536231884057971,
-     "amber": 0.13043478260869565,
-     "green": 0.11594202898550725
+     "amber": 0.11594202898550725,
+     "green": 0.13043478260869565
     },
     "added": 0,
     "removed": 0,
@@ -222,19 +222,19 @@
      {
       "from": "amber",
       "to": "red",
-      "cause": "the appointment count changed",
-      "n": 2
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "came back above the dormancy line",
+      "cause": "aged a day, so the pro-rata multiplier shrank",
       "n": 1
      },
      {
-      "from": "red",
-      "to": "green",
-      "cause": "came back above the dormancy line",
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 1
+     },
+     {
+      "from": "green",
+      "to": "amber",
+      "cause": "aged a day, so the pro-rata multiplier shrank",
       "n": 1
      }
     ]
@@ -246,19 +246,19 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-12",
+   "asOf": "2026-09-13",
    "proRata": true,
    "total": {
     "agents": 54,
     "arr": 512290,
-    "red": 30,
-    "amber": 18,
+    "red": 32,
+    "amber": 16,
     "green": 6,
     "dormant": 19,
     "unrateable": 2,
     "pct": {
-     "red": 0.5555555555555556,
-     "amber": 0.3333333333333333,
+     "red": 0.5925925925925926,
+     "amber": 0.2962962962962963,
      "green": 0.1111111111111111
     }
    },
@@ -354,6 +354,21 @@
      }
     },
     {
+     "csm": "Ritika Agarwal",
+     "agents": 7,
+     "arr": 69000,
+     "red": 4,
+     "amber": 3,
+     "green": 0,
+     "dormant": 1,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.5714285714285714,
+      "amber": 0.42857142857142855,
+      "green": 0
+     }
+    },
+    {
      "csm": "Aditya Kaul",
      "agents": 8,
      "arr": 85200,
@@ -366,21 +381,6 @@
       "red": 0.5,
       "amber": 0.25,
       "green": 0.25
-     }
-    },
-    {
-     "csm": "Ritika Agarwal",
-     "agents": 7,
-     "arr": 69000,
-     "red": 3,
-     "amber": 4,
-     "green": 0,
-     "dormant": 1,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.42857142857142855,
-      "amber": 0.5714285714285714,
-      "green": 0
      }
     },
     {
@@ -402,20 +402,20 @@
      "csm": "Deepanshu Agarwal",
      "agents": 9,
      "arr": 71988,
-     "red": 1,
-     "amber": 4,
+     "red": 2,
+     "amber": 3,
      "green": 4,
      "dormant": 1,
      "unrateable": 0,
      "pct": {
-      "red": 0.1111111111111111,
-      "amber": 0.4444444444444444,
+      "red": 0.2222222222222222,
+      "amber": 0.3333333333333333,
       "green": 0.4444444444444444
      }
     }
    ],
    "changes": {
-    "since": "2026-09-11",
+    "since": "2026-09-12",
     "sincePct": {
      "red": 0.5555555555555556,
      "amber": 0.3333333333333333,
@@ -423,7 +423,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 2
+     }
+    ]
    }
   },
   "serviceIb": {
@@ -432,20 +439,20 @@
    "side": "service",
    "apptValue": 100,
    "reachLabel": "Conversations held",
-   "asOf": "2026-09-12",
+   "asOf": "2026-09-13",
    "proRata": false,
    "total": {
     "agents": 59,
     "arr": 499362,
-    "red": 28,
+    "red": 30,
     "amber": 13,
-    "green": 18,
-    "dormant": 21,
+    "green": 16,
+    "dormant": 23,
     "unrateable": 1,
     "pct": {
-     "red": 0.4745762711864407,
+     "red": 0.5084745762711864,
      "amber": 0.22033898305084745,
-     "green": 0.3050847457627119
+     "green": 0.2711864406779661
     }
    },
    "csms": [
@@ -498,15 +505,30 @@
      "csm": "Prabha Kumari",
      "agents": 17,
      "arr": 114138,
-     "red": 7,
-     "amber": 4,
+     "red": 8,
+     "amber": 3,
      "green": 6,
-     "dormant": 7,
+     "dormant": 8,
      "unrateable": 0,
      "pct": {
-      "red": 0.4117647058823529,
-      "amber": 0.23529411764705882,
+      "red": 0.47058823529411764,
+      "amber": 0.17647058823529413,
       "green": 0.35294117647058826
+     }
+    },
+    {
+     "csm": "Deepanshu Agarwal",
+     "agents": 7,
+     "arr": 72984,
+     "red": 3,
+     "amber": 4,
+     "green": 0,
+     "dormant": 2,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.42857142857142855,
+      "amber": 0.5714285714285714,
+      "green": 0
      }
     },
     {
@@ -555,21 +577,6 @@
      }
     },
     {
-     "csm": "Deepanshu Agarwal",
-     "agents": 7,
-     "arr": 72984,
-     "red": 2,
-     "amber": 3,
-     "green": 2,
-     "dormant": 1,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.2857142857142857,
-      "amber": 0.42857142857142855,
-      "green": 0.2857142857142857
-     }
-    },
-    {
      "csm": "Tushar Srivastava",
      "agents": 6,
      "arr": 46500,
@@ -586,7 +593,7 @@
     }
    ],
    "changes": {
-    "since": "2026-09-11",
+    "since": "2026-09-12",
     "sincePct": {
      "red": 0.4745762711864407,
      "amber": 0.22033898305084745,
@@ -594,7 +601,26 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "green",
+      "to": "red",
+      "cause": "crossed the dormancy line",
+      "n": 1
+     },
+     {
+      "from": "green",
+      "to": "amber",
+      "cause": "the appointment count changed",
+      "n": 1
+     },
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 1
+     }
+    ]
    }
   },
   "serviceOb": {
@@ -757,7 +783,7 @@
     }
    ],
    "changes": {
-    "since": "2026-09-11",
+    "since": "2026-09-12",
     "sincePct": {
      "red": 0.868421052631579,
      "amber": 0,
