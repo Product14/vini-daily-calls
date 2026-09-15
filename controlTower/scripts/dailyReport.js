@@ -43,8 +43,10 @@ const REPO    = join(CT, "..");
 
 const DRY          = process.env.DRY_RUN === "1" || process.argv.includes("--dry-run");
 const FORCE_RESEND = process.env.FORCE_RESEND === "1" || process.argv.includes("--force");
-// Email can be turned off independently of Slack (SEND_EMAIL=0). Default: on.
+// Each channel can be turned off independently (SEND_EMAIL=0 / SEND_SLACK=0).
+// Default: on. If BOTH are off the job is a no-op (see main()).
 const SEND_EMAIL   = process.env.SEND_EMAIL !== "0";
+const SEND_SLACK   = process.env.SEND_SLACK !== "0";
 const SLACK_TOKEN     = process.env.SLACK_BOT_TOKEN;
 const REPORT_CHANNEL  = process.env.SLACK_CHANNEL;
 const ALERT_CHANNEL   = process.env.SLACK_ALERT_CHANNEL;
@@ -152,6 +154,14 @@ async function renderSlackPng(payload) {
 async function main() {
   log(`→ Vini daily control tower${DRY ? " (DRY RUN)" : ""}${FORCE_RESEND ? " [FORCE_RESEND]" : ""} — ${new Date().toISOString()}`);
 
+  // Both channels off ⇒ genuine no-op. Return BEFORE the guardrail so a
+  // zero/broken feed can't fire a spurious "nothing sent" alert when there was
+  // nothing to send anyway.
+  if (!SEND_EMAIL && !SEND_SLACK) {
+    log("· email and Slack are both OFF (SEND_EMAIL=0, SEND_SLACK=0) — nothing to send.");
+    return;
+  }
+
   // 1. Assemble + guardrail (any throw ⇒ top-level catch ⇒ alert, no claim).
   const { assembleSlackPayload } = await import("../server/slackPayload.js");
   const { payload, guardrail } = await assembleSlackPayload();
@@ -166,9 +176,9 @@ async function main() {
 
   // 2. Generate artifacts (NO sends here — a build failure hits the top-level
   //    catch, alerts, and claims nothing, so it's safe to retry).
-  log(`→ generate ${SEND_EMAIL ? "email HTML + " : ""}Slack PNG`);
+  log(`→ generate ${[SEND_EMAIL && "email HTML", SEND_SLACK && "Slack PNG"].filter(Boolean).join(" + ")}`);
   if (SEND_EMAIL) execFileSync(process.execPath, [join(SCRIPTS, "previewAgentsEmail.js")], { cwd: CT, stdio: "inherit" });
-  const pngPath = await renderSlackPng(payload);
+  const pngPath = SEND_SLACK ? await renderSlackPng(payload) : null;
 
   // 3. FORCE_RESEND — clear today's ledger so the claims below win fresh.
   if (FORCE_RESEND && sb && !DRY) {
@@ -182,8 +192,10 @@ async function main() {
         execFileSync(process.execPath, [join(SCRIPTS, "sendVinniReport.js"), date], { cwd: CT, stdio: "inherit" });
       })
     : (log("· email OFF (SEND_EMAIL=0) — skipping"), "off");
-  const slackRes = await sendChannel(date, "slack", () =>
-    postSlackReportPng(pngPath, `Vini Control Tower · ${payload.asOfDate}`, `Vini Daily Snapshot — ${payload.asOfDate}`));
+  const slackRes = SEND_SLACK
+    ? await sendChannel(date, "slack", () =>
+        postSlackReportPng(pngPath, `Vini Control Tower · ${payload.asOfDate}`, `Vini Daily Snapshot — ${payload.asOfDate}`))
+    : (log("· slack OFF (SEND_SLACK=0) — skipping"), "off");
 
   log(`✓ Done — email:${emailRes} slack:${slackRes}${DRY ? " (dry)" : ""}`);
   if ([emailRes, slackRes].some(r => r === "failed" || r === "held")) process.exit(1);
