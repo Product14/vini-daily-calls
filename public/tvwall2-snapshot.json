@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-16T13:00:32.037Z",
+ "generatedAt": "2026-09-17T12:56:25.130Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,7 +26,7 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-16",
+   "asOf": "2026-09-17",
    "proRata": true,
    "total": {
     "agents": 69,
@@ -140,7 +140,7 @@
      "red": 6,
      "amber": 0,
      "green": 1,
-     "dormant": 3,
+     "dormant": 2,
      "unrateable": 0,
      "pct": {
       "red": 0.8571428571428571,
@@ -185,7 +185,7 @@
      "red": 6,
      "amber": 3,
      "green": 0,
-     "dormant": 5,
+     "dormant": 6,
      "unrateable": 0,
      "pct": {
       "red": 0.6666666666666666,
@@ -210,34 +210,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-15",
+    "since": "2026-09-16",
     "sincePct": {
-     "red": 0.7971014492753623,
+     "red": 0.8115942028985508,
      "amber": 0.10144927536231885,
-     "green": 0.10144927536231885
+     "green": 0.08695652173913043
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "green",
-      "to": "red",
-      "cause": "aged a day, so the pro-rata multiplier shrank",
-      "n": 1
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "salesOb": {
@@ -246,23 +227,38 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-15",
+   "asOf": "2026-09-16",
    "proRata": true,
    "total": {
     "agents": 54,
     "arr": 512290,
-    "red": 33,
-    "amber": 15,
+    "red": 35,
+    "amber": 13,
     "green": 6,
-    "dormant": 22,
+    "dormant": 23,
     "unrateable": 2,
     "pct": {
-     "red": 0.6111111111111112,
-     "amber": 0.2777777777777778,
+     "red": 0.6481481481481481,
+     "amber": 0.24074074074074073,
      "green": 0.1111111111111111
     }
    },
    "csms": [
+    {
+     "csm": "Tushar Srivastava",
+     "agents": 3,
+     "arr": 46338,
+     "red": 3,
+     "amber": 0,
+     "green": 0,
+     "dormant": 3,
+     "unrateable": 0,
+     "pct": {
+      "red": 1,
+      "amber": 0,
+      "green": 0
+     }
+    },
     {
      "csm": "Zeeshana Aijaz",
      "agents": 3,
@@ -324,21 +320,6 @@
      }
     },
     {
-     "csm": "Tushar Srivastava",
-     "agents": 3,
-     "arr": 46338,
-     "red": 2,
-     "amber": 1,
-     "green": 0,
-     "dormant": 2,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.6666666666666666,
-      "amber": 0.3333333333333333,
-      "green": 0
-     }
-    },
-    {
      "csm": "Sudansh Tiruwa",
      "agents": 5,
      "arr": 55200,
@@ -384,6 +365,21 @@
      }
     },
     {
+     "csm": "Puneet Sharma",
+     "agents": 6,
+     "arr": 60000,
+     "red": 3,
+     "amber": 3,
+     "green": 0,
+     "dormant": 1,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.5,
+      "amber": 0.5,
+      "green": 0
+     }
+    },
+    {
      "csm": "Deepanshu Agarwal",
      "agents": 9,
      "arr": 71988,
@@ -397,25 +393,10 @@
       "amber": 0.2222222222222222,
       "green": 0.4444444444444444
      }
-    },
-    {
-     "csm": "Puneet Sharma",
-     "agents": 6,
-     "arr": 60000,
-     "red": 2,
-     "amber": 4,
-     "green": 0,
-     "dormant": 1,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.3333333333333333,
-      "amber": 0.6666666666666666,
-      "green": 0
-     }
     }
    ],
    "changes": {
-    "since": "2026-09-14",
+    "since": "2026-09-15",
     "sincePct": {
      "red": 0.6111111111111112,
      "amber": 0.2777777777777778,
@@ -423,7 +404,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 2
+     }
+    ]
    }
   },
   "serviceIb": {
@@ -432,7 +420,7 @@
    "side": "service",
    "apptValue": 100,
    "reachLabel": "Conversations held",
-   "asOf": "2026-09-15",
+   "asOf": "2026-09-16",
    "proRata": false,
    "total": {
     "agents": 61,
@@ -601,34 +589,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-14",
+    "since": "2026-09-15",
     "sincePct": {
-     "red": 0.4918032786885246,
-     "amber": 0.16393442622950818,
+     "red": 0.47540983606557374,
+     "amber": 0.18032786885245902,
      "green": 0.3442622950819672
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "came back above the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "serviceOb": {
@@ -637,7 +606,7 @@
    "side": "service",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-15",
+   "asOf": "2026-09-16",
    "proRata": false,
    "total": {
     "agents": 38,
@@ -645,7 +614,7 @@
     "red": 31,
     "amber": 1,
     "green": 6,
-    "dormant": 30,
+    "dormant": 31,
     "unrateable": 0,
     "pct": {
      "red": 0.8157894736842105,
@@ -691,7 +660,7 @@
      "red": 5,
      "amber": 0,
      "green": 0,
-     "dormant": 4,
+     "dormant": 5,
      "unrateable": 0,
      "pct": {
       "red": 1,
@@ -791,28 +760,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-14",
+    "since": "2026-09-15",
     "sincePct": {
-     "red": 0.868421052631579,
-     "amber": 0,
-     "green": 0.13157894736842105
+     "red": 0.8157894736842105,
+     "amber": 0.02631578947368421,
+     "green": 0.15789473684210525
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "red",
-      "to": "green",
-      "cause": "came back above the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   }
  }
