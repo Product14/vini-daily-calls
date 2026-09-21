@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-20T12:47:37.470Z",
+ "generatedAt": "2026-09-21T05:53:48.723Z",
  "products": {
   "salesIb": {
    "asOf": "2026-09-20",
@@ -687,7 +687,7 @@
      "factor": 1,
      "ratio": 1.41,
      "mrr": 850,
-     "reach7": 1220
+     "reach7": 1217
     },
     "ec4a32bac02d": {
      "band": "amber",
@@ -877,7 +877,7 @@
      "factor": 1,
      "ratio": 0.86,
      "mrr": 700,
-     "reach7": 339
+     "reach7": 338
     },
     "09f9a03b9cd6": {
      "band": "amber",
@@ -907,7 +907,7 @@
      "factor": 1,
      "ratio": 8.31,
      "mrr": 650,
-     "reach7": 4947
+     "reach7": 4946
     },
     "483af153da66": {
      "band": "green",
@@ -917,7 +917,7 @@
      "factor": 1,
      "ratio": 6.92,
      "mrr": 650,
-     "reach7": 4948
+     "reach7": 4946
     },
     "2476b5310e4a": {
      "band": "green",
@@ -997,7 +997,7 @@
      "factor": 1,
      "ratio": 1.2,
      "mrr": 500,
-     "reach7": 197
+     "reach7": 196
     },
     "f72da6e6ba2e": {
      "band": "red",
