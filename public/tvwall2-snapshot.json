@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-21T05:53:48.723Z",
+ "generatedAt": "2026-09-21T14:45:11.998Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,23 +26,38 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-20",
+   "asOf": "2026-09-21",
    "proRata": true,
    "total": {
     "agents": 58,
     "arr": 511524,
-    "red": 44,
-    "amber": 7,
+    "red": 46,
+    "amber": 5,
     "green": 7,
     "dormant": 27,
     "unrateable": 3,
     "pct": {
-     "red": 0.7586206896551724,
-     "amber": 0.1206896551724138,
+     "red": 0.7931034482758621,
+     "amber": 0.08620689655172414,
      "green": 0.1206896551724138
     }
    },
    "csms": [
+    {
+     "csm": "Ritika Agarwal",
+     "agents": 9,
+     "arr": 81000,
+     "red": 9,
+     "amber": 0,
+     "green": 0,
+     "dormant": 6,
+     "unrateable": 0,
+     "pct": {
+      "red": 1,
+      "amber": 0,
+      "green": 0
+     }
+    },
     {
      "csm": "Puneet Sharma",
      "agents": 7,
@@ -104,21 +119,6 @@
      }
     },
     {
-     "csm": "Ritika Agarwal",
-     "agents": 9,
-     "arr": 81000,
-     "red": 8,
-     "amber": 1,
-     "green": 0,
-     "dormant": 6,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.8888888888888888,
-      "amber": 0.1111111111111111,
-      "green": 0
-     }
-    },
-    {
      "csm": "Deepanshu Agarwal",
      "agents": 14,
      "arr": 108372,
@@ -167,14 +167,14 @@
      "csm": "Prabha Kumari",
      "agents": 6,
      "arr": 36588,
-     "red": 3,
-     "amber": 3,
+     "red": 4,
+     "amber": 2,
      "green": 0,
      "dormant": 2,
      "unrateable": 0,
      "pct": {
-      "red": 0.5,
-      "amber": 0.5,
+      "red": 0.6666666666666666,
+      "amber": 0.3333333333333333,
       "green": 0
      }
     },
@@ -203,7 +203,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 2
+     }
+    ]
    }
   },
   "salesOb": {
@@ -212,19 +219,19 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-19",
+   "asOf": "2026-09-20",
    "proRata": true,
    "total": {
     "agents": 44,
     "arr": 407514,
-    "red": 31,
-    "amber": 8,
+    "red": 32,
+    "amber": 7,
     "green": 5,
     "dormant": 17,
     "unrateable": 1,
     "pct": {
-     "red": 0.7045454545454546,
-     "amber": 0.18181818181818182,
+     "red": 0.7272727272727273,
+     "amber": 0.1590909090909091,
      "green": 0.11363636363636363
     }
    },
@@ -290,6 +297,21 @@
      }
     },
     {
+     "csm": "Ritika Agarwal",
+     "agents": 7,
+     "arr": 69000,
+     "red": 5,
+     "amber": 2,
+     "green": 0,
+     "dormant": 1,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.7142857142857143,
+      "amber": 0.2857142857142857,
+      "green": 0
+     }
+    },
+    {
      "csm": "Puneet Sharma",
      "agents": 6,
      "arr": 60000,
@@ -320,21 +342,6 @@
      }
     },
     {
-     "csm": "Ritika Agarwal",
-     "agents": 7,
-     "arr": 69000,
-     "red": 4,
-     "amber": 3,
-     "green": 0,
-     "dormant": 1,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.5714285714285714,
-      "amber": 0.42857142857142855,
-      "green": 0
-     }
-    },
-    {
      "csm": "Deepanshu Agarwal",
      "agents": 9,
      "arr": 71988,
@@ -359,7 +366,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 1
+     }
+    ]
    }
   },
   "serviceIb": {
@@ -368,20 +382,20 @@
    "side": "service",
    "apptValue": 100,
    "reachLabel": "Conversations held",
-   "asOf": "2026-09-19",
+   "asOf": "2026-09-20",
    "proRata": false,
    "total": {
-    "agents": 62,
-    "arr": 520710,
-    "red": 32,
+    "agents": 60,
+    "arr": 500922,
+    "red": 30,
     "amber": 10,
     "green": 20,
     "dormant": 26,
     "unrateable": 1,
     "pct": {
-     "red": 0.5161290322580645,
-     "amber": 0.16129032258064516,
-     "green": 0.3225806451612903
+     "red": 0.5,
+     "amber": 0.16666666666666666,
+     "green": 0.3333333333333333
     }
    },
    "csms": [
@@ -477,32 +491,17 @@
     },
     {
      "csm": "Puneet Sharma",
-     "agents": 6,
-     "arr": 46164,
-     "red": 3,
+     "agents": 5,
+     "arr": 38376,
+     "red": 2,
      "amber": 2,
      "green": 1,
-     "dormant": 2,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.5,
-      "amber": 0.3333333333333333,
-      "green": 0.16666666666666666
-     }
-    },
-    {
-     "csm": "Deepanshu Agarwal",
-     "agents": 8,
-     "arr": 84984,
-     "red": 3,
-     "amber": 2,
-     "green": 3,
      "dormant": 1,
      "unrateable": 0,
      "pct": {
-      "red": 0.375,
-      "amber": 0.25,
-      "green": 0.375
+      "red": 0.4,
+      "amber": 0.4,
+      "green": 0.2
      }
     },
     {
@@ -518,6 +517,21 @@
       "red": 0.3333333333333333,
       "amber": 0,
       "green": 0.6666666666666666
+     }
+    },
+    {
+     "csm": "Deepanshu Agarwal",
+     "agents": 7,
+     "arr": 72984,
+     "red": 2,
+     "amber": 2,
+     "green": 3,
+     "dormant": 2,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.2857142857142857,
+      "amber": 0.2857142857142857,
+      "green": 0.42857142857142855
      }
     },
     {
@@ -544,7 +558,7 @@
      "green": 0.3225806451612903
     },
     "added": 0,
-    "removed": 0,
+    "removed": 2,
     "moved": []
    }
   },
@@ -554,20 +568,20 @@
    "side": "service",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-19",
+   "asOf": "2026-09-20",
    "proRata": false,
    "total": {
-    "agents": 39,
-    "arr": 410002,
-    "red": 31,
+    "agents": 38,
+    "arr": 401002,
+    "red": 30,
     "amber": 3,
     "green": 5,
-    "dormant": 31,
+    "dormant": 30,
     "unrateable": 0,
     "pct": {
-     "red": 0.7948717948717948,
-     "amber": 0.07692307692307693,
-     "green": 0.1282051282051282
+     "red": 0.7894736842105263,
+     "amber": 0.07894736842105263,
+     "green": 0.13157894736842105
     }
    },
    "csms": [
@@ -678,17 +692,17 @@
     },
     {
      "csm": "Deepanshu Agarwal",
-     "agents": 10,
-     "arr": 110388,
-     "red": 5,
+     "agents": 9,
+     "arr": 101388,
+     "red": 4,
      "amber": 2,
      "green": 3,
-     "dormant": 5,
+     "dormant": 4,
      "unrateable": 0,
      "pct": {
-      "red": 0.5,
-      "amber": 0.2,
-      "green": 0.3
+      "red": 0.4444444444444444,
+      "amber": 0.2222222222222222,
+      "green": 0.3333333333333333
      }
     },
     {
@@ -715,7 +729,7 @@
      "green": 0.1282051282051282
     },
     "added": 0,
-    "removed": 0,
+    "removed": 1,
     "moved": []
    }
   }
