@@ -235,12 +235,27 @@ const REPORTING_AUTH = process.env.REPORTING_CRON_SECRET || process.env.CRON_SEC
 // feed). Surfaced loudly at the end of runOnce so a misconfig can't silently disable all transactional
 // email for days. Reset at the start of each pass.
 let _feedDegraded = false;
+// The live Spyne meetings/appointments feed degrading (dead token, Spyne outage, auth misconfig) is a
+// DISTINCT failure from the ClickHouse-backed conversations/action-items feed above — same "used to
+// silently resolve to empty" shape (this is the 40h fleet-wide post_appointment outage, 2026-09-19→21:
+// a dead SPYNE_API_TOKEN made the live meetings call fail, which reporting-vini's /api/meetings
+// swallowed into a plain {meetings:[],total:0} — indistinguishable from a genuinely quiet rooftop, so
+// nothing here ever saw a thrown error or a `degraded` flag to alert on) but a different root cause and
+// a different fix location (reporting-vini's meetings.ts/route.ts now set `meetingsFeedDegraded`
+// instead), so it gets its own flag + its own accurately-worded alert rather than folding into
+// `_feedDegraded` above, whose alert text specifically names ClickHouse/conversations/action-items.
+let _meetingsFeedDegraded = false;
+let _meetingsFeedDegradedDetail = "";
 async function apiJson(path) {
   const headers = REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {};
   const res = await fetch(`${REPORTING_API_BASE}${path}`, { headers, signal: AbortSignal.timeout(12000) });
   if (!res.ok) throw new Error(`reporting-api ${res.status} ${path}`);
   const j = await res.json();
   if (j && (j.degraded || j.note === "clickhouse not configured")) _feedDegraded = true;
+  if (j && j.meetingsFeedDegraded && !_meetingsFeedDegraded) {
+    _meetingsFeedDegraded = true;
+    _meetingsFeedDegradedDetail = String(j.meetingsFeedError || "").slice(0, 200);
+  }
   return j;
 }
 // The /api/action-items feed hard-caps `limit` at 200 server-side regardless of what's requested —
@@ -399,6 +414,8 @@ const finishSms = (id, patch) => sb.from("roi_event_sms").update(patch).eq("id",
 async function runOnce() {
   console.log(`\n── ROI EVENT pass @ ${new Date().toISOString()} · DRY_RUN=${DRY_RUN} · window=${POLL_MINUTES}m ──`);
   _feedDegraded = false;
+  _meetingsFeedDegraded = false;
+  _meetingsFeedDegradedDetail = "";
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
@@ -1152,6 +1169,23 @@ async function runOnce() {
       detail: "The reporting-vini `/api/conversations` + `/api/action-items` feeds returned degraded (ClickHouse not configured / unauthorized). Set CLICKHOUSE_HOST / CLICKHOUSE_PASSWORD (and confirm CRON_SECRET auth) on the reporting-vini deployment.",
       windowLabel: `event email pass (~${POLL_MINUTES}m)`,
     }).catch((e) => console.warn("[roi-event] systemic alert skipped:", String(e).slice(0, 140)));
+  }
+  // Same shape of alert, distinct cause: the LIVE Spyne meetings/appointments call is failing (bad or
+  // expired SPYNE_API_TOKEN / DIGEST_SPYNE_TOKEN, or a Spyne-side outage) rather than a reporting-vini
+  // config gap. This is precisely the class of failure that went unalerted for 40h fleet-wide
+  // (2026-09-19→21): `post_appointment` silently produced zero jobs because an empty meetings list
+  // and a "no bookings today" meetings list were indistinguishable before reporting-vini started
+  // setting `meetingsFeedDegraded`. If this fires, check SPYNE_API_TOKEN on the reporting-vini
+  // deployment first — that credential is what the live meetings call authenticates with.
+  if (_meetingsFeedDegraded) {
+    out.meetings_feed_degraded = true;
+    console.error(`  ⚠️  reporting-vini MEETINGS feed DEGRADED (${_meetingsFeedDegradedDetail || "live Spyne API call failing"}) — appointment-booked emails are DISABLED until the Spyne token is fixed on the reporting-vini deployment. No post_appointment events were sent this pass.`);
+    await postSystemicAlert({
+      source: "Transactional email",
+      title: "reporting-vini MEETINGS feed DEGRADED — appointment emails DISABLED",
+      detail: `The reporting-vini \`/api/meetings\` live Spyne call is failing (${_meetingsFeedDegradedDetail || "no detail captured"}). This silently zeroes out ALL post_appointment emails fleet-wide — it is the exact failure behind the 2026-09-19→21 outage. Check SPYNE_API_TOKEN on the reporting-vini deployment.`,
+      windowLabel: `event feed fetch (~${POLL_MINUTES}m)`,
+    }).catch((e) => console.warn("[roi-event] meetings feed systemic alert skipped:", String(e).slice(0, 140)));
   }
   console.log("  events summary:", JSON.stringify(out));
   console.log(`  sms summary: sent=${out.sms_sent} suppressed=${out.sms_suppressed} dupe=${out.sms_dupe} no_recipients=${out.sms_no_recipients} errors=${out.sms_errors} batches=${out.sms_batches}`);
