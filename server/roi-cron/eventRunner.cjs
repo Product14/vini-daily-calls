@@ -480,7 +480,9 @@ async function runOnce() {
       console.log(`  · ${name} [${dept}] lead-capture rooftop → only the lead sheet is sent (appointment/action-item types suppressed by template)`);
     }
     const recs = recOf.get(L.team_id) ?? [];
-    const deptOk = (r) => (dept === "sales" ? r.receives_sales : r.receives_service);
+    // `d` overrides this pass's department for the channels that carry their own (chat — see the
+    // chat block below). Omitted, it behaves exactly as before.
+    const deptOk = (r, d) => ((d || dept) === "sales" ? r.receives_sales : r.receives_service);
     // Per-TYPE recipient selection: dept + per-channel master + the subscription matrix, then
     // role-tiered (salesperson → bdc → gm; whole rooftop when no roles set). Transactional events
     // are lead-ish, so they route to the tier; a rooftop with no roles behaves exactly as before.
@@ -490,8 +492,20 @@ async function runOnce() {
     // canEmail() is the deliverability gate: it drops the phone-only placeholder (…@phone.invalid,
     // SMS only), anything malformed or mistyped, and any address already suppressed for bouncing —
     // those bounces are charged to the sending domain and cost every other rooftop its placement.
-    const emailsForType = (type) =>
-      pickTieredRecipients(recs.filter((r) => r.verified_at && canEmail(r) && deptOk(r) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
+    const emailsForType = (type, d) =>
+      pickTieredRecipients(recs.filter((r) => r.verified_at && canEmail(r) && deptOk(r, d) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
+    // Recipients for a job that carries its OWN department (chat). Try that department first, and
+    // fall back to this pass's department when nobody at the rooftop receives it — a sales chat at a
+    // rooftop staffed only for service still has to reach a human, just labelled correctly. Without
+    // the fallback, fixing the label would turn those into silent recipients_missing rows.
+    const emailsForJob = (job) => {
+      const t = job.subscriptionType || job.type;
+      if (!job.department || job.department === dept) return emailsForType(t);
+      const own = emailsForType(t, job.department);
+      if (own.length) return own;
+      console.log(`  · ${name} no ${job.department} recipient → ${job.type} falls back to [${dept}]`);
+      return emailsForType(t);
+    };
     const smsForType = (type) =>
       c.sms_enabled
         ? pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
@@ -896,13 +910,26 @@ async function runOnce() {
           if (lmk && coveredLeadKeys.has(lmk)) { out.post_conversation_suppressed++; continue; }
           const allMsgs = (cv.sms || []).filter((x) => x && x.at).sort((a, b) => String(a.at).localeCompare(String(b.at)));
           const done = String(cv.status || "") === "completed";
+          // DEPARTMENT PER CHAT, not per pass. The chat poll runs once per team, so `dept` here is
+          // whichever live department row came first out of roi_live_departments — a query with no
+          // ORDER BY. That row was deciding both who received every chat and how it was labelled.
+          // Inver Grove Ford, 2026-09-23: a "is this 2025 Civic Hybrid the Sport or Sport Touring?"
+          // chat was emailed to service@ under a "Vini · Service" header while the lead
+          // (service_type='sales'), the outcome ('Vehicle Inquiry') and the action item
+          // ('SALES_SEND_VEHICLE_INFO') all said sales. Nine rooftops had mixed chat traffic and so
+          // were mis-routing one side of it. cv.dept is the lead's own department; 'other' (blank on
+          // ~2% of chat leads) falls back to this pass's dept, so a chat is never dropped for want
+          // of one. The console link follows the same department as the label.
+          const cDept = cv.dept === "sales" || cv.dept === "service" ? cv.dept : dept;
+          const cLinks = cDept === dept ? L_ : links(L.team_id, c.enterprise_id, cDept);
           for (const s of smsSessions(allMsgs, chatGapMin)) {
             if (!s.hasReply) continue;
             if ((nowC - s._lastT) <= chatGapMin * 60000 && !isEod && !done) continue; // still active → wait
             const conv = { ...cv, channel: "chat", sms: s.msgs.slice(-12) };
             jobs.push({ type: "post_conversation", subscriptionType: "chat", key: `chat:${cv.id}:${day}:s${s.startAt}`,
+              department: cDept,
               subject: `Website chat — ${cv.customer || name}`,
-              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: conv, links: L_ }) });
+              html: T.renderPostConversation({ rooftopName: name, dept: cDept, tz, conversation: conv, links: cLinks }) });
           }
         }
       }
@@ -925,13 +952,16 @@ async function runOnce() {
       if (BATCH_EMAIL_TYPES.has(job.type)) continue;
       let id;
       try {
-        id = await claim({ ...base, email_type: job.type }, job.key);
+        // job.department overrides the pass's for a channel that carries its own (chat). The dedupe
+        // key is (team_id, email_type, event_key) — department is not part of it, so a job recording
+        // its real department can't double-send.
+        id = await claim({ ...base, department: job.department || base.department, email_type: job.type }, job.key);
         if (!id) { out.skipped_dupe++; continue; } // already handled in a prior pass
         // Recipients are chosen PER TYPE (subscription matrix + role tier), not per rooftop.
         // subscriptionType overrides the matrix key when a job's audience differs from its stored
         // email_type — chat jobs store as post_conversation (tracker/dedupe grain) but match the
         // 'chat' key so a recipient's call-noise opt-out doesn't silence chat.
-        const emails = emailsForType(job.subscriptionType || job.type);
+        const emails = emailsForJob(job);
         // Inject the open-tracking pixel now that we have the row id, so the stored
         // HTML and the sent bytes both carry it (id keys the open back to this row).
         const html = withPixel(job.html, id);
