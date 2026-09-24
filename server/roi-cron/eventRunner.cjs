@@ -577,10 +577,16 @@ async function runOnce() {
         }
       }
       if (c.action_item_enabled && !leadCapture) {
-        const [recent, open] = await Promise.all([
-          fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=recent&minutes=${POLL_MINUTES}`),
-          fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`),
-        ]);
+        // `open` is ONLY consumed inside the `for (const [k, arrived] of byLead)` loop below, which
+        // iterates RECENT items — so on a pass where nothing new arrived (the normal case for one
+        // rooftop-dept in a 4-minute window) the whole paged `open` read was fetched and thrown away.
+        // It is the single biggest source of load on the /api/action-items feed: a full current-state
+        // snapshot, re-paged from scratch, ~15x/hour per rooftop-dept, for rooftops whose backlog runs
+        // thousands deep. Fetch it only once we know there is a recent item to enrich.
+        const recent = await fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=recent&minutes=${POLL_MINUTES}`);
+        const open = (recent.actionItems || []).length
+          ? await fetchAllActionItems(`team_id=${L.team_id}&serviceType=${dept}&scope=open`)
+          : { actionItems: [], total: 0 };
         if (recent.capped || open.capped) {
           out.action_items_feed_capped++;
           console.warn(`  ⚠ ${name} [${dept}] action-items feed (recent/open) hit the pagination safety cap (${ACTION_ITEMS_MAX_PAGES * ACTION_ITEMS_PAGE_LIMIT}+ items) — some may be invisible this pass`);

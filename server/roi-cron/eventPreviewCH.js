@@ -53,12 +53,19 @@ function fmtWhen(dt, tz) {
 // can pick an empty version (lead with no customer_id, customer row with a blank name), which
 // is why so many real customers surfaced as "Unknown". anyIf(..., notEmpty(...)) prefers a
 // populated value across the duplicate versions.
-const IDENTITY_JOINS =
-  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
+// TENANT-SCOPED identity joins. Unscoped, each of these re-aggregated the WHOLE fleet —
+// dealer_leads.leads (1.37M rows) + customer (1.20M) — on every call, purely to attach a name and
+// phone to one rooftop's rows; that hash-table build dominated the query's memory. Now functions of
+// teamId so the predicate is pushed into both sides. Lossless: across the 8 busiest teams, zero
+// leads resolve to a customer owned by another team. teamId=null keeps the old unscoped form for
+// the by-conversationId lookups that have no team in scope.
+const teamPred = (teamId) => (teamId ? " WHERE team_id=" + lit(teamId) : "");
+const identityJoins = (teamId) =>
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads" + teamPred(teamId) + " GROUP BY lead_id) l ON e.leadId=l.lead_id" +
   // `emails` rides along for the lead-capture email (unused by the other event types) so the
   // preview resolves identity from the SAME row shape the cron send path does.
   " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number," +
-  " anyIf(emails, notEmpty(emails)) emails FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+  " anyIf(emails, notEmpty(emails)) emails FROM dealer_leads.customer" + teamPred(teamId) + " GROUP BY customer_id) c ON l.cid=c.customer_id";
 
 // Placeholder names the source data stores for unidentified callers (~12k literal "unknown",
 // plus "n/a"/"na"/"test"/etc.) — these are NOT real customer names, so treat them as no-name.
@@ -77,12 +84,12 @@ async function one(sql) { const rows = await runClickhouse(sql); return rows && 
 
 // ── SMS support ──────────────────────────────────────────────────────────────
 // Identity join for the conversations table (its own lead→customer resolution).
-const CONV_IDENTITY =
-  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON cv.leadId=l.lead_id" +
-  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) cu ON l.cid=cu.customer_id";
-const SMS_CONV_SELECT =
+const convIdentity = (teamId) =>
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads" + teamPred(teamId) + " GROUP BY lead_id) l ON cv.leadId=l.lead_id" +
+  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer" + teamPred(teamId) + " GROUP BY customer_id) cu ON l.cid=cu.customer_id";
+const smsConvSelect = (teamId) =>
   "SELECT cv.conversationId conversationId, cv.leadId leadId, toString(cv.createdAt) at," +
-  " ifNull(cv.summary,'') summary, cu.name customer, cu.mobile_number phone FROM dealer_leads.conversations cv" + CONV_IDENTITY;
+  " ifNull(cv.summary,'') summary, cu.name customer, cu.mobile_number phone FROM dealer_leads.conversations cv" + convIdentity(teamId);
 // Per-lead dept, inferred from that lead's calls (SMS carries no dept of its own).
 const LEAD_DEPT_MAP =
   "(SELECT leadId, if(countIf(lower(callDetails_agentInfo_agentType)='service') > countIf(lower(callDetails_agentInfo_agentType)='sales'),'service','sales') dept" +
@@ -114,9 +121,9 @@ const LEAD_DIR_MAP =
   " countIf(positionCaseInsensitive(ifNull(report_inOutType,''),'out')=0),'outbound','inbound') dir" +
   " FROM dealer_leads.endcallreports WHERE isTestCall=0 AND __deleted=0 AND createdAt >= now()-INTERVAL 180 DAY GROUP BY leadId)";
 // lead → customer identity for an actionItems subquery aliased `a` (exposes `leadId`).
-const AI_IDENTITY =
-  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON a.leadId=l.lead_id" +
-  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+const aiIdentity = (teamId) =>
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads" + teamPred(teamId) + " GROUP BY lead_id) l ON a.leadId=l.lead_id" +
+  " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer" + teamPred(teamId) + " GROUP BY customer_id) c ON l.cid=c.customer_id";
 // One deduped row per OPEN action item, optionally scoped to a team / dept / single lead, and to a
 // createdAt window. scope: 'open' (is_completed=0) | 'overdue' (open AND real past due date).
 function aiBaseSql({ teamId = null, dept = null, scope = "open", leadKey = null, since = null } = {}) {
@@ -151,9 +158,9 @@ async function smsThread(conversationId) {
   const failed = rows.filter((r) => String(r.status) === "failed").length;
   return { messages: rows.map((r) => ({ direction: r.direction, body: r.body, status: r.status })), failed };
 }
-const smsConvLatest = (teamId) => one(SMS_CONV_SELECT + " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) ORDER BY cv.createdAt DESC LIMIT 1");
-const smsConvById = (conversationId) => one(SMS_CONV_SELECT + " WHERE cv.conversationId=" + lit(conversationId) + " LIMIT 1");
-const smsConvByLead = (teamId, leadId) => (leadId ? one(SMS_CONV_SELECT + " WHERE cv.teamId=" + lit(teamId) + " AND cv.leadId=" + lit(leadId) + " AND cv.type='sms' AND cv.isTest=0 ORDER BY cv.createdAt DESC LIMIT 1") : Promise.resolve(null));
+const smsConvLatest = (teamId) => one(smsConvSelect(teamId) + " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) ORDER BY cv.createdAt DESC LIMIT 1");
+const smsConvById = (conversationId) => one(smsConvSelect(null) + " WHERE cv.conversationId=" + lit(conversationId) + " LIMIT 1");
+const smsConvByLead = (teamId, leadId) => (leadId ? one(smsConvSelect(teamId) + " WHERE cv.teamId=" + lit(teamId) + " AND cv.leadId=" + lit(leadId) + " AND cv.type='sms' AND cv.isTest=0 ORDER BY cv.createdAt DESC LIMIT 1") : Promise.resolve(null));
 
 // conversation opts for an SMS conversation (channel:'sms' → template renders the thread).
 function smsConvOpts(cv, thread) {
@@ -174,12 +181,12 @@ function smsConvOpts(cv, thread) {
 // dealerActionItems), and some rooftops' chats write a full endcallreports-style report JSON
 // into `summary`. Identity falls back lead→customer, then the chat's own captured `number`
 // (a visitor can leave a phone before any lead row exists).
-const CHAT_CONV_SELECT =
+const chatConvSelect = (teamId) =>
   "SELECT cv.conversationId conversationId, cv.leadId leadId, toString(cv.createdAt) at," +
   " ifNull(cv.summary,'') summaryJson, ifNull(cv.conversationAnalytics,'') analyticsJson," +
-  " cu.name customer, coalesce(nullIf(cu.mobile_number,''), cv.number) phone FROM dealer_leads.conversations cv" + CONV_IDENTITY;
-const chatConvById = (conversationId) => one(CHAT_CONV_SELECT + " WHERE cv.conversationId=" + lit(conversationId) + " AND cv.type='chat' LIMIT 1");
-const chatConvLatest = (teamId) => one(CHAT_CONV_SELECT + " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='chat' AND ifNull(cv.isTest,0)=0 AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,''))) ORDER BY cv.createdAt DESC LIMIT 1");
+  " cu.name customer, coalesce(nullIf(cu.mobile_number,''), cv.number) phone FROM dealer_leads.conversations cv" + convIdentity(teamId);
+const chatConvById = (conversationId) => one(chatConvSelect(null) + " WHERE cv.conversationId=" + lit(conversationId) + " AND cv.type='chat' LIMIT 1");
+const chatConvLatest = (teamId) => one(chatConvSelect(teamId) + " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='chat' AND ifNull(cv.isTest,0)=0 AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,''))) ORDER BY cv.createdAt DESC LIMIT 1");
 // conversation opts for a chat conversation (channel:'chat' → same thread render, chat labels).
 function chatConvOpts(cv, thread) {
   const report = parseOverview(cv.summaryJson);
@@ -264,7 +271,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
         : "") +
       " c.name customer, c.mobile_number phone," +
       " q.scorePercentage score, q.overallGrade grade, q.customerFrustrated frustrated" +
-      " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
+      " FROM dealer_leads.endcallreports e" + identityJoins(teamId) +
       " LEFT JOIN (SELECT callId, any(scorePercentage) scorePercentage, any(overallGrade) overallGrade, any(customerFrustrated) customerFrustrated FROM dealer_leads.conversationQualities WHERE createdAt >= now()-INTERVAL 30 DAY GROUP BY callId) q ON e.callId=q.callId" +
       " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)";
     const renderSms = async (cv) => {
@@ -332,8 +339,8 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
       " m.status status, m.transportation_option transportation, m.timezone mtz, m.proposed_vins vins, m.source source," +
       " c.name customer, c.mobile_number phone" +
       " FROM dealer_leads.meetings m" +
-      " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
-      " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+      " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads" + teamPred(teamId) + " GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
+      " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number FROM dealer_leads.customer" + teamPred(teamId) + " GROUP BY customer_id) c ON l.cid=c.customer_id" +
       " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER;
     const order = " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT 1";
     let row = eventKey ? await one(base + " AND (m.meeting_id=" + lit(eventKey) + " OR m._id=" + lit(eventKey) + ")" + order) : null;
@@ -364,7 +371,7 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
   // All of one lead's open/overdue tasks, earliest-due first, with resolved customer identity.
   const itemsForLead = (lk) => runClickhouse(
     "SELECT a.description description, a.dueAt dueAt, a.vehicle vehicle, c.name customer, c.mobile_number phone" +
-    " FROM (" + aiBaseSql({ teamId, dept, scope, leadKey: lk }) + ") a" + AI_IDENTITY +
+    " FROM (" + aiBaseSql({ teamId, dept, scope, leadKey: lk }) + ") a" + aiIdentity(teamId) +
     " ORDER BY a.dueAt ASC");
   let leadId = leadKey || ((await newestLead()) || {}).leadId;
   let rows = leadId ? await itemsForLead(leadId) : [];
@@ -447,8 +454,8 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " m.service_type serviceType, m.status status, m.timezone mtz, toString(m.created_at) createdAt," +
       " " + dx + " direction, c.name customer, c.mobile_number phone" +
       " FROM dealer_leads.meetings m" + APPT_DIR_JOIN +
-      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
-      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id" +
+      " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads" + teamPred(teamId) + " GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
+      " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer" + teamPred(teamId) + " GROUP BY customer_id) c ON l.cid=c.customer_id" +
       " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER + " AND m.created_at >= " + since + dfilt(dx) +
       " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT " + lim + " OFFSET " + off;
     return (await runClickhouse(sql)).map((r) => {
@@ -467,7 +474,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
     const callSql =
       "SELECT toString(e.callId) eventKey, e.report_title title, toString(e.createdAt) createdAt," +
       " " + cdx + " direction, c.name customer, c.mobile_number phone" +
-      " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
+      " FROM dealer_leads.endcallreports e" + identityJoins(teamId) +
       " WHERE e.teamId=" + lit(teamId) + " AND e.isTestCall=0 AND e.__deleted=0 AND notEmpty(e.report_overview)" +
       " AND lower(e.callDetails_agentInfo_agentType)=" + lit(dept) + " AND e.createdAt >= " + since + dfilt(cdx) +
       " ORDER BY e.createdAt DESC LIMIT 1 BY e.callId LIMIT " + (off + lim);
@@ -483,7 +490,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
     // SMS conversations (dept via the lead's calls; direction = agent-initiated vs inbound)
     const smsSql =
       "SELECT toString(cv.conversationId) eventKey, toString(cv.createdAt) createdAt, cu.name customer, cu.mobile_number phone," +
-      " coalesce(nullIf(dm.dept,''),'sales') dept, " + SMS_DIR + " direction FROM dealer_leads.conversations cv" + CONV_IDENTITY +
+      " coalesce(nullIf(dm.dept,''),'sales') dept, " + SMS_DIR + " direction FROM dealer_leads.conversations cv" + convIdentity(teamId) +
       " LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
       " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='sms' AND cv.isTest=0 AND notEmpty(cv.leadId) AND cv.createdAt >= " + since + dfilt(SMS_DIR) +
       " AND " + SMS_HAS_REPLY +
@@ -502,7 +509,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
     const chatSql =
       "SELECT toString(cv.conversationId) eventKey, toString(cv.createdAt) createdAt, cu.name customer," +
       " coalesce(nullIf(cu.mobile_number,''), cv.number) phone," +
-      " coalesce(nullIf(dm.dept,''),'sales') dept FROM dealer_leads.conversations cv" + CONV_IDENTITY +
+      " coalesce(nullIf(dm.dept,''),'sales') dept FROM dealer_leads.conversations cv" + convIdentity(teamId) +
       " LEFT JOIN " + LEAD_DEPT_MAP + " dm ON cv.leadId=dm.leadId" +
       " WHERE cv.teamId=" + lit(teamId) + " AND cv.type='chat' AND ifNull(cv.isTest,0)=0" +
       " AND (notEmpty(cv.leadId) OR notEmpty(ifNull(cv.number,''))) AND cv.createdAt >= " + since +
@@ -528,7 +535,7 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
     "SELECT a.leadId leadId, count() nItems, max(a.createdAt) createdAt," +
     " " + dirExpr + " direction, any(c.name) customer, any(c.mobile_number) phone" +
     " FROM (" + aiBaseSql({ teamId, dept, scope: aiScope, since }) + ") a" +
-    " LEFT JOIN " + LEAD_DIR_MAP + " dirm ON a.leadId=dirm.leadId" + AI_IDENTITY +
+    " LEFT JOIN " + LEAD_DIR_MAP + " dirm ON a.leadId=dirm.leadId" + aiIdentity(teamId) +
     " GROUP BY a.leadId, dirm.dir" + (dir ? " HAVING " + dirExpr + "=" + lit(dir) : "") +
     " ORDER BY createdAt DESC LIMIT " + lim + " OFFSET " + off;
   return (await runClickhouse(sql)).map((r) => {

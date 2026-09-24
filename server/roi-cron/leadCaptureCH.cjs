@@ -265,10 +265,15 @@ function pickApptRequest(apptDetails, summaryLines) {
 // re-send it. Phrasing check only; there is no structured flag for the link send.
 const PREQUAL_SENT_RE = /(texted|sent|sending).{0,60}pre-?qual|pre-?qual.{0,60}(link\s+(sent|texted)|sent\s+via\s+sms)/i;
 
-const IDENTITY_JOINS =
-  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads GROUP BY lead_id) l ON e.leadId=l.lead_id" +
+// TENANT-SCOPED. These two subqueries used to carry no team predicate, so every caller
+// re-aggregated the WHOLE fleet — dealer_leads.leads (1.37M rows) + customer (1.20M) — just to
+// attach a name and phone to one rooftop's calls. That build dominated the query's memory. Now a
+// function of teamId rather than a constant, so the predicate can be pushed into both sides.
+// Lossless: across the 8 busiest teams, zero leads resolve to a customer owned by another team.
+const identityJoins = (teamId) =>
+  " LEFT JOIN (SELECT lead_id, anyIf(customer_id, notEmpty(customer_id)) cid FROM dealer_leads.leads WHERE team_id=" + lit(teamId) + " GROUP BY lead_id) l ON e.leadId=l.lead_id" +
   " LEFT JOIN (SELECT customer_id, anyIf(name, notEmpty(name)) name, anyIf(mobile_number, notEmpty(mobile_number)) mobile_number," +
-  " anyIf(emails, notEmpty(emails)) emails FROM dealer_leads.customer GROUP BY customer_id) c ON l.cid=c.customer_id";
+  " anyIf(emails, notEmpty(emails)) emails FROM dealer_leads.customer WHERE team_id=" + lit(teamId) + " GROUP BY customer_id) c ON l.cid=c.customer_id";
 
 const JUNK_NAMES = new Set(["unknown", "unknown caller", "n/a", "na", "none", "null", "test", "-", "."]);
 function cleanName(name) {
@@ -374,7 +379,7 @@ async function fetchLeadFields(teamId, callIds) {
   const sql =
     "SELECT e.callId callId, e.id id, toString(e.createdAt) at," + LEAD_FIELD_COLS + "," +
     " ifNull(c.name,'') customer, ifNull(c.mobile_number,'') phone, c.emails emails" +
-    " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
+    " FROM dealer_leads.endcallreports e" + identityJoins(teamId) +
     // TEAM-SCOPED: an id from another rooftop returns nothing rather than another dealer's lead
     // (the caller then falls back to the standard email). Cross-rooftop isolation is a hard rule.
     //
@@ -416,7 +421,7 @@ async function fetchLeadFieldsByLead(teamId, leadIds) {
   const sql =
     "SELECT e.leadId leadId, toString(e.createdAt) at," + LEAD_FIELD_COLS + "," +
     " ifNull(c.name,'') customer, ifNull(c.mobile_number,'') phone, c.emails emails" +
-    " FROM dealer_leads.endcallreports e" + IDENTITY_JOINS +
+    " FROM dealer_leads.endcallreports e" + identityJoins(teamId) +
     // TEAM-SCOPED for the same reason as above: a leadId that isn't this rooftop's returns nothing.
     " WHERE e.teamId=" + lit(teamId) + " AND e.__deleted=0 AND e.leadId IN (" + ids.map(lit).join(",") + ")" +
     " AND notEmpty(e.report_overview)" +
@@ -573,7 +578,7 @@ async function fetchMeetingMetaSource(teamId, meetingIds) {
   const sql =
     "SELECT toString(m.meeting_id) meetingId, toString(m._id) rowId," +
     // SharedReplacingMergeTree keeps duplicate physical rows and an early version can carry an empty
-    // meta — prefer a populated value across them (same defence as IDENTITY_JOINS elsewhere).
+    // meta — prefer a populated value across them (same defence as identityJoins elsewhere).
     " anyIf(JSONExtractString(m.meta,'source'), notEmpty(JSONExtractString(m.meta,'source'))) metaSource" +
     " FROM dealer_leads.meetings m" +
     // TEAM-SCOPED: a meeting id that isn't this rooftop's returns nothing. Cross-rooftop isolation.
