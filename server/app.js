@@ -3554,11 +3554,13 @@ async function _roiCfgSelect(sb, cols, effectiveFilter) {
 
 const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
 const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
-// rendered_html is deliberately NOT here. Every sent and dry-run run stores its full email HTML,
-// and shipping all of them with the grid made /api/tracker/rooftops-data the bulk of the tracker's
-// load time, for bytes only the cell drawer reads. The drawer fetches one run's HTML by `id` from
-// /api/tracker/digest-run-html when it opens.
-const _ROI_RUN_COLS = "id,team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,message_id,sent_at,opened_at,open_count";
+// rendered_html and metrics are deliberately NOT here. Every sent and dry-run run stores its full
+// email HTML plus metricsFull (the rooftop's campaigns, appointment list, top vehicles and warm
+// leads), and shipping both for every run in the window made /api/tracker/rooftops-data take tens
+// of seconds, for fields only the cell drawer reads. The grid reads status, recipients and opens;
+// the drawer fetches one run's metrics + HTML by `id` from /api/tracker/digest-run when it opens.
+// Keeping them out also stops every rooftop's warm-lead names going to the browser in bulk.
+const _ROI_RUN_COLS = "id,team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,message_id,sent_at,opened_at,open_count";
 
 /** Shift an ISO "YYYY-MM-DD" by n days (UTC). */
 function _isoShiftDays(iso, n) {
@@ -3694,20 +3696,20 @@ app.get("/api/tracker/lifecycle-rooftops", requireTrackerAuth, async (req, res) 
   }
 });
 
-// 2b) One digest run's stored email HTML, for the cell drawer's "exact HTML" view. Split out of
-// rooftops-data (see _ROI_RUN_COLS) so the grid never downloads HTML nobody has opened.
-app.get("/api/tracker/digest-run-html", requireTrackerAuth, async (req, res) => {
+// 2b) One digest run's heavy fields (stored metrics + email HTML), for the cell drawer. Split out of
+// rooftops-data (see _ROI_RUN_COLS) so the grid never downloads a run nobody has opened.
+app.get("/api/tracker/digest-run", requireTrackerAuth, async (req, res) => {
   try {
     const id = String(req.query.id || "").trim();
     if (!id) return res.status(400).json({ error: "id required" });
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const { data, error } = await sb.from("roi_digest_runs").select("id,rendered_html").eq("id", id).maybeSingle();
+    const { data, error } = await sb.from("roi_digest_runs").select("id,metrics,rendered_html").eq("id", id).maybeSingle();
     if (error) return res.status(500).json({ error: error.message });
     if (!data) return res.status(404).json({ error: "run not found" });
-    return res.json({ ok: true, id: data.id, rendered_html: data.rendered_html ?? null });
+    return res.json({ ok: true, id: data.id, metrics: data.metrics ?? null, rendered_html: data.rendered_html ?? null });
   } catch (err) {
-    console.error("GET /api/tracker/digest-run-html error:", err?.message ?? err);
+    console.error("GET /api/tracker/digest-run error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
   }
 });

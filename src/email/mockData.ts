@@ -65,11 +65,13 @@ export type CellRun = {
   department: DeptKind;
   status: SendStatus;
   reason?: string; // raw backend reason (e.g. 'dry_run', 'no_data')
+  /** Stored digest payload. The grid load no longer carries it (see loadDigestRun); the cell drawer
+   * fetches it by runId. Set only where a caller already has it. */
   metrics?: DigestMetrics;
-  /** roi_digest_runs.id: the key the cell drawer fetches this run's stored HTML by. */
+  /** roi_digest_runs.id: the key the cell drawer fetches this run's metrics + stored HTML by. */
   runId?: string;
-  /** Exact HTML stored at send time (real sends only; null for metrics-only backfill). The grid
-   * load no longer carries it (see loadDigestRunHtml); set only where a caller already has it. */
+  /** Exact HTML stored at send time (real sends only; null for metrics-only backfill). Same as
+   * metrics: fetched by the drawer, not carried by the grid load. */
   renderedHtml?: string;
   /** First time the email was opened (tracking pixel). */
   openedAt?: string;

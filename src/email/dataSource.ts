@@ -50,7 +50,6 @@ type RunRow = {
   status: SendStatus;
   reason: string | null;
   recipients: { email: string; name?: string; received?: boolean; bounced?: boolean; opened?: boolean; opened_at?: string }[] | null;
-  metrics: DigestMetrics | null;
   message_id: string | null;
   sent_at: string | null;
   opened_at: string | null;
@@ -143,7 +142,6 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
     department: r.department,
     status: r.status,
     reason: r.reason ?? undefined,
-    metrics: r.metrics ?? undefined,
     runId: r.id != null ? String(r.id) : undefined,
     openedAt: r.opened_at ?? undefined,
     openCount: r.open_count ?? undefined,
@@ -348,14 +346,16 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   return { rooftops, source: "supabase", today, lastSynced: new Date() };
 }
 
-/** The exact stored HTML of ONE digest run, fetched when the cell drawer opens. The grid read
- * leaves it out because it was most of that payload's bytes. Resolves null when the run has no
- * stored HTML, and throws on a failed read so the drawer can tell "not stored" from "couldn't load". */
-export async function loadDigestRunHtml(runId: string): Promise<string | null> {
-  const res = await fetch(`/api/tracker/digest-run-html?id=${encodeURIComponent(runId)}`, { cache: "no-store", headers: trackerAuthHeaders() });
+/** ONE digest run's heavy fields, fetched when the cell drawer opens: its stored metrics and the
+ * exact email HTML. The grid read leaves both out because together they were nearly all of that
+ * payload. Either is null when the run has none; throws on a failed read so the drawer can tell
+ * "not stored" from "couldn't load". */
+export type DigestRunDetail = { metrics: DigestMetrics | null; html: string | null };
+export async function loadDigestRun(runId: string): Promise<DigestRunDetail> {
+  const res = await fetch(`/api/tracker/digest-run?id=${encodeURIComponent(runId)}`, { cache: "no-store", headers: trackerAuthHeaders() });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const j = await res.json();
-  return (j.rendered_html as string | null) ?? null;
+  return { metrics: (j.metrics as DigestMetrics | null) ?? null, html: (j.rendered_html as string | null) ?? null };
 }
 
 /** Lightweight rows for rooftops NOT yet represented by a roi_live_departments grid row —
