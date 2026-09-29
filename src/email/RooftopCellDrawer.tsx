@@ -13,6 +13,7 @@ import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
 import { sendDigestNow, generateAndSendNow, generatePreviewNow, renderStoredPreview, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
 import { loadDigestRun, type DigestRunDetail } from "./dataSource";
+import { confirmDialog } from "../ui/dialogs";
 
 /**
  * Cell-action drawer.
@@ -1452,10 +1453,13 @@ function PeriodicGenerateSection({
   const send = async () => {
     if (inFlight.current) return;
     if (!emails.length) { setSState("error"); setSMsg("No recipients configured for this department."); return; }
-    const ok = window.confirm(
-      `Send the ${cadence} digest now?\n\nReal email to ${emails.length} recipient(s) via mail.spyne.ai. Honours the rooftop's dry-run flag (held if dry-run is on).`,
-    );
-    if (!ok) return;
+    // Unlike window.confirm this waits asynchronously, so re-check inFlight once it's answered.
+    const ok = await confirmDialog({
+      title: `Send the ${cadence} digest now?`,
+      message: `It goes as a real email to ${emails.length} recipient${emails.length === 1 ? "" : "s"} through mail.spyne.ai. If the rooftop is in dry run, it is held instead.`,
+      confirmLabel: "Send digest",
+    });
+    if (!ok || inFlight.current) return;
     inFlight.current = true; setSState("sending"); setSMsg("");
     const r = await generateAndSendNow({ cadence, teamId: rooftop.team_id, dept });
     if (r.ok) {

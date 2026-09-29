@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { toPng } from "html-to-image";
 import { getProgramsClient, PROGRAMS_DB_CONFIGURED } from "./supabaseClient";
+import { alertDialog } from "../ui/dialogs";
 import { OWNER_NAMES, teamForOwner, canonicalOwnerName } from "./owners";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
@@ -2504,7 +2505,7 @@ function EmailReportView({ accounts, state, overall }: {
       link.click();
     } catch (e) {
       console.error("[report] image export failed:", e);
-      alert("Couldn't generate image. See console for details.");
+      void alertDialog({ title: "Couldn't generate the image", message: "Exporting the report failed. The browser console has the details." });
     } finally {
       setSavingImg(false);
     }

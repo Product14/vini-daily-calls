@@ -14,6 +14,7 @@
 // service-role key) instead of the browser's publishable/anon key — the tables are RLS-protected,
 // so the anon key can no longer read them. isSupabaseConfigured still gates the "connected" state.
 import { isSupabaseConfigured } from "./supabaseClient";
+import { promptDialog } from "../ui/dialogs";
 import {
   type AgentType,
   type Cadence,
@@ -673,14 +674,26 @@ export function trackerAuthHeaders(): Record<string, string> {
  * "History" panel (roi_config_audit_log) can attribute it. Not real auth (the tracker sits
  * behind one shared login, see TrackerAuthGate) — just a cheap, persistent display name. */
 const ACTOR_KEY = "vini-tracker-actor";
-export function getActorName(): string {
+// One open ask at a time: two saves fired before a name is stored share the same dialog.
+let actorAsk: Promise<string> | null = null;
+export async function getActorName(): Promise<string> {
   try {
     const stored = localStorage.getItem(ACTOR_KEY);
     if (stored) return stored;
   } catch { /* private mode → ask every time */ }
-  const name = (typeof window !== "undefined" ? window.prompt("Your name (shown in the config change history):") : "")?.trim();
-  if (name) { try { localStorage.setItem(ACTOR_KEY, name); } catch { /* ignore */ } }
-  return name || "";
+  if (!actorAsk) {
+    actorAsk = promptDialog({
+      title: "What's your name?",
+      message: "It's shown beside your changes in the config history. This browser only asks once.",
+      label: "Your name",
+      confirmLabel: "Save",
+    }).then((v) => {
+      const name = (v ?? "").trim();
+      if (name) { try { localStorage.setItem(ACTOR_KEY, name); } catch { /* ignore */ } }
+      return name;
+    }).finally(() => { actorAsk = null; });
+  }
+  return actorAsk;
 }
 export function setActorName(name: string): void {
   try { localStorage.setItem(ACTOR_KEY, name.trim()); } catch { /* ignore */ }
@@ -696,7 +709,7 @@ export async function updateRooftopConfig(teamId: string, patch: Partial<Rooftop
     const res = await fetch("/api/rooftop-config", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ teamId, actor: getActorName(), ...patch }),
+      body: JSON.stringify({ teamId, actor: await getActorName(), ...patch }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
@@ -727,7 +740,7 @@ export async function updateRooftopLiveStatus(teamId: string, isLive: boolean): 
     const res = await fetch("/api/rooftop-live-status", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ teamId, isLive, actor: getActorName() }),
+      body: JSON.stringify({ teamId, isLive, actor: await getActorName() }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
@@ -753,7 +766,7 @@ export async function updateLifecycleOverride(
     const res = await fetch("/api/tracker/lifecycle-override", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ teamId, stage, actor: getActorName() }),
+      body: JSON.stringify({ teamId, stage, actor: await getActorName() }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };
@@ -772,7 +785,7 @@ export async function updateRooftopDryRun(teamId: string, department: string, dr
     const res = await fetch("/api/tracker/dry-run", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ teamId, department, dryRun, actor: getActorName() }),
+      body: JSON.stringify({ teamId, department, dryRun, actor: await getActorName() }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Save failed (HTTP ${res.status})` };

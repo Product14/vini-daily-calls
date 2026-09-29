@@ -16,6 +16,7 @@
  */
 import { useState } from "react";
 import { updateLifecycleOverride } from "./dataSource";
+import { confirmDialog } from "../ui/dialogs";
 import type { LifecycleStatus, RooftopRow } from "./mockData";
 
 const STAGE_COLORS: Record<LifecycleStatus, { bg: string; fg: string }> = {
@@ -75,7 +76,12 @@ function StopEmailerButton({ rooftop, onStopEmails }: { rooftop: RooftopRow; onS
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
   const run = async () => {
-    if (!window.confirm(`Stop ALL emails (daily/weekly/monthly + transactional) to ${rooftop.name}?\n\nThis is the real kill switch — the cron will never send this rooftop anything again until a human re-activates it.`)) return;
+    if (!(await confirmDialog({
+      title: `Stop all emails to ${rooftop.name}?`,
+      message: "This stops the daily, weekly and monthly digests and every transactional email. It is the real kill switch: the cron sends this rooftop nothing again until someone re-activates it.",
+      confirmLabel: "Stop all emails",
+      tone: "danger",
+    }))) return;
     setState("busy"); setMsg("");
     const res = await onStopEmails(rooftop);
     if (res.ok) { setState("done"); }

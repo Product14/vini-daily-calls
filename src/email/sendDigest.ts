@@ -4,6 +4,7 @@
 // flips to "sent" (from the DB) with the stored HTML + recipients viewable.
 import { renderDigestEmail } from "./renderDigest";
 import { getActorName, trackerAuthHeaders } from "./dataSource";
+import { promptDialog } from "../ui/dialogs";
 import type { Cadence, DeptKind, DigestMetrics } from "./mockData";
 
 export type SendDigestOpts = {
@@ -64,9 +65,14 @@ async function sendWithOverridePrompt(doPost: (override?: string) => Promise<Res
   };
   let { status, b } = await run();
   if (b && b.blocked === true && b.ok !== true) {
-    const pw = typeof window !== "undefined"
-      ? window.prompt("⚠ This email shows NO value to the customer.\nSending it now is a churn risk.\n\nType the override password to send anyway:")
-      : null;
+    const pw = await promptDialog({
+      title: "This email shows no value to the customer",
+      message: "Sending it now is a churn risk. Type the override password to send it anyway.",
+      label: "Override password",
+      secret: true,
+      tone: "danger",
+      confirmLabel: "Send anyway",
+    });
     if (!pw || !pw.trim()) return { ok: false, blocked: true, error: "Send cancelled — the email shows no value.", body: b };
     ({ status, b } = await run(pw.trim()));
   }
@@ -108,13 +114,13 @@ export const setRecipientSubscriptionNow = (opts: { teamId?: string; email: stri
   postJson("/api/recipients/subscription", { teamId: opts.teamId, email: opts.email, type: opts.type, channel: opts.channel, enabled: opts.enabled });
 
 /** Update a rooftop's send hour / minute / timezone / weekly-monthly send-day, or the SMS master switch (sms_enabled). */
-export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean; weekly_send_dow?: number; monthly_send_day?: number }) =>
-  postJson("/api/rooftop-config", { ...opts, actor: getActorName() });
+export const updateRooftopConfigNow = async (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean; weekly_send_dow?: number; monthly_send_day?: number }) =>
+  postJson("/api/rooftop-config", { ...opts, actor: await getActorName() });
 
 /** Assign a CSM (name + email both required) → enables both departments. */
-export const addCsmNow = (opts: { teamId?: string; name: string; email: string }) => {
-  if (!opts.name?.trim() || !/\S+@\S+\.\S+/.test(opts.email || "")) return Promise.resolve({ ok: false, error: "CSM name and a valid email are required." });
-  return postJson("/api/csm", { teamId: opts.teamId, name: opts.name.trim(), email: opts.email.trim(), actor: getActorName() });
+export const addCsmNow = async (opts: { teamId?: string; name: string; email: string }) => {
+  if (!opts.name?.trim() || !/\S+@\S+\.\S+/.test(opts.email || "")) return { ok: false, error: "CSM name and a valid email are required." };
+  return postJson("/api/csm", { teamId: opts.teamId, name: opts.name.trim(), email: opts.email.trim(), actor: await getActorName() });
 };
 
 /** Report a missing rooftop → emails product@spyne.ai + subhav.malhotra@spyne.ai. */

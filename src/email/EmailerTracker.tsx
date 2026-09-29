@@ -24,6 +24,7 @@ import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
 import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow } from "./sendDigest";
+import { confirmDialog, promptDialog } from "../ui/dialogs";
 
 /** Pretty-print a phone for display + storage. US numbers (10 digits, or 11 with a leading 1) →
  * "+1 (555) 123-4567". Anything else keeps a leading "+" and its digits, so international / partial
@@ -156,12 +157,16 @@ export function EmailerTracker() {
   // every recipient list down to @spyne.ai addresses — no customer is emailed.
   // Subject is prefixed "[PREVIEW]". Needs a mail token, like a live send.
   const runSpynePreviewAll = useCallback(async () => {
-    const pw = window.prompt(
-      "Send a PREVIEW now?\n\nThis really emails — but ONLY the internal reviewers " +
-      "devansh.hasija@spyne.ai and subhav.malhotra@spyne.ai, across all rooftops. " +
-      "No customer (and no other address) receives anything. Subject is prefixed “[PREVIEW]”.\n\n" +
-      "Type the send password to confirm:",
-    );
+    const pw = await promptDialog({
+      title: "Send a preview to reviewers?",
+      message:
+        "This sends real email, but only to the internal reviewers devansh.hasija@spyne.ai and " +
+        "subhav.malhotra@spyne.ai, for every rooftop. No customer, and no other address, receives " +
+        "anything. The subject starts with [PREVIEW].",
+      label: "Send password",
+      secret: true,
+      confirmLabel: "Send preview",
+    });
     if (pw == null) return; // cancelled
     if (!pw.trim()) {
       setPreviewState("error");
@@ -207,9 +212,14 @@ export function EmailerTracker() {
     // Manual bulk live send requires a typed password (anti-churn / deliberate-send
     // guard). It's forwarded to cron4 as x-send-override and must match the override
     // password; the scheduled cron is exempt (it carries no FE mail token).
-    const pw = window.prompt(
-      `⚠ Send REAL emails now to ${liveCount} live rooftop(s)?\n\nThis emails real customers via mail.spyne.ai (dry-run rooftops are skipped). This is not a preview.\n\nType the send password to confirm:`,
-    );
+    const pw = await promptDialog({
+      title: `Send real emails to ${liveCount} live rooftop${liveCount === 1 ? "" : "s"}?`,
+      message: "This emails real customers through mail.spyne.ai. Dry-run rooftops are skipped. This is not a preview.",
+      label: "Send password",
+      secret: true,
+      tone: "danger",
+      confirmLabel: "Send live",
+    });
     if (pw == null) return; // cancelled
     if (!pw.trim()) {
       setLiveState("error");
@@ -1252,7 +1262,11 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   const openTab = (html: string) => { const w = window.open("", "_blank"); if (w) { w.document.open(); w.document.write(html); w.document.close(); } };
   const sendNow = async (r: EventEmailRow) => {
     if (!r.rendered_html) return;
-    if (!window.confirm(`Send this ${entry.label} email now to its recipient(s)?\n\nThis sends a REAL email via the mail proxy.`)) return;
+    if (!(await confirmDialog({
+      title: `Send this ${entry.label} email now?`,
+      message: "It goes to its recipients as a real email, through the mail proxy.",
+      confirmLabel: "Send email",
+    }))) return;
     setSending(true); setSendMsg("");
     try {
       // Anti-churn gated: if the email shows no value the client prompts for the override password.
@@ -1272,7 +1286,11 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   // Render the latest design live + send it to the rooftop's recipients (synthetic preview path).
   const generateSend = async () => {
     if (!entry) return;
-    if (!window.confirm(`Send this ${entry.label} email to ${entry.rooftop.name}'s recipients?\n\nRenders the latest design from live data and sends a REAL email via the mail proxy.`)) return;
+    if (!(await confirmDialog({
+      title: `Send this ${entry.label} email to ${entry.rooftop.name}?`,
+      message: "It renders the latest design from live data and sends a real email to the rooftop's recipients, through the mail proxy.",
+      confirmLabel: "Send email",
+    }))) return;
     setGenState("sending"); setSendMsg("");
     const r = await generateSendEventNow({
       teamId: entry.rooftop.team_id, enterpriseId: entry.rooftop.enterprise_id, department: entry.rooftop.department,
@@ -1578,7 +1596,11 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   // Verify (or un-verify) a recipient for this rooftop. Unverified recipients are HELD — never emailed —
   // so a wrong-rooftop address can't leak another rooftop's data. Optimistic.
   const verifyRecip = async (email: string, next: boolean) => {
-    if (next && !window.confirm(`Confirm ${email} belongs to ${rooftop.name} and should receive its emails?\n\nOnly verify people you know are at THIS rooftop — this is the guard against sending one store's data to another.`)) return;
+    if (next && !(await confirmDialog({
+      title: `Verify ${email} for ${rooftop.name}?`,
+      message: "Only verify people you know work at this rooftop. Verifying is the guard against sending one store's data to another, and a verified address starts receiving this rooftop's emails.",
+      confirmLabel: "Verify",
+    }))) return;
     const stamp = next ? new Date().toISOString() : null;
     const prevVals = teamRecips.filter((r) => r.email === email).map((r) => r.verified_at);
     setTeamRecips((prev) => prev.map((r) => (r.email === email ? { ...r, verified_at: stamp } : r)));
@@ -1594,7 +1616,14 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   // so releasing one that is still dead just spends the sending domain again. The durable fix is
   // to correct the address in the field above — that clears the hold by itself.
   const releaseHold = async (email: string) => {
-    if (!window.confirm(`Release the hold on ${email}?\n\nIt was held because mail to it FAILED. If the address is still wrong it will bounce again — and those bounces are charged to spyne.ai, which costs every rooftop its inbox placement.\n\nIf you know the correct address, edit it above instead: that clears the hold on its own.`)) return;
+    if (!(await confirmDialog({
+      title: `Release the hold on ${email}?`,
+      message:
+        "It was held because mail to it failed. If the address is still wrong it will bounce again, and those bounces are charged to spyne.ai, which costs every rooftop its inbox placement.\n\n" +
+        "If you know the correct address, edit it above instead. That clears the hold on its own.",
+      confirmLabel: "Release hold",
+      tone: "danger",
+    }))) return;
     const prevRows = teamRecips.filter((r) => r.email === email).map((r) => ({ at: r.suppressed_at, why: r.suppression_reason }));
     setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, suppressed_at: null, suppression_reason: null } : r)));
     setRecipBusy(email); setErr("");
