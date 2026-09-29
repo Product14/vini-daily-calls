@@ -17,7 +17,8 @@ const DIGEST_TYPES = ["daily", "weekly", "monthly"];
 const TRANSACTIONAL_TYPES = ["post_appointment", "post_conversation", "action_item", "action_item_overdue"];
 const ALL_TYPES = [...DIGEST_TYPES, ...TRANSACTIONAL_TYPES];
 const CHANNELS = ["email", "sms"];
-// Role fallback order for transactional routing: prefer the salesperson, escalate to the "parent".
+// Recognised recipient roles. LABELS ONLY — they describe who a recipient is (shown in the
+// tracker), they do NOT route or filter a send. See pickTieredRecipients.
 const ROLE_TIERS = ["salesperson", "bdc", "gm"];
 
 const isDigest = (type) => DIGEST_TYPES.includes(type);
@@ -74,21 +75,26 @@ function isChurned(cfg, onDate) {
   return Boolean(churn) && Boolean(on) && churn <= on;
 }
 
-const normRole = (r) => String(r || "").trim().toLowerCase();
-
-/** Role-tiered fallback for TRANSACTIONAL routing. Given an already channel+dept+subscription
- * eligible list, return the first non-empty tier (salesperson → bdc → gm). If NO recipient has a
- * tier role set, return the whole list (backward compatible — the rooftop is the "parent"). */
+/** TRANSACTIONAL routing — every eligible recipient is kept. Identity function by design.
+ *
+ * This used to be a role-tiered fallback: of an eligible list, only the first non-empty tier
+ * (salesperson → bdc → gm) was emailed. That silently EXCLUDED people who had been added to a
+ * rooftop, verified by a human, and left email_enabled — a GM behind a BDC got nothing, and a
+ * recipient with no role at all got nothing the moment ANY colleague had a role set. It was
+ * invisible from the tracker (which shows them as active recipients) and invisible in the send
+ * path (no suppressed/not_sent row is written for someone who was filtered out before the send),
+ * so "the automatic emails stopped" was the only symptom. It also disagreed with the manual
+ * "Send to customer" button, which never tiered — the same rooftop got two different audiences.
+ * On 2026-08-12 it was dropping 57 verified recipients across 26 rooftops.
+ *
+ * The product rule is now: exclusion is an EXPLICIT act, never a derived one. To stop emailing
+ * someone, turn off their email_enabled / subscriptions cell, or remove them. `role` is a label.
+ *
+ * Kept as a named pass-through (rather than deleting the call sites) so the routing decision has
+ * one documented home — if per-role routing ever comes back it must be opt-in per rooftop, and it
+ * belongs here. */
 function pickTieredRecipients(recips) {
-  const list = Array.isArray(recips) ? recips : [];
-  if (!list.length) return [];
-  const anyTierRole = list.some((r) => ROLE_TIERS.includes(normRole(r.role)));
-  if (!anyTierRole) return list; // no roles configured → send to all eligible
-  for (const tier of ROLE_TIERS) {
-    const m = list.filter((r) => normRole(r.role) === tier);
-    if (m.length) return m;
-  }
-  return list; // roles present but none in the tier list → fall back to all
+  return Array.isArray(recips) ? recips : [];
 }
 
 module.exports = {

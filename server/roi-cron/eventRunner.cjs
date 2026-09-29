@@ -33,7 +33,7 @@ const emailValue = require("./emailValue.cjs");
 // SMS channel — the Twilio companion to sendMail(). Gated per rooftop by roi_rooftop_config.sms_enabled
 // and per recipient by roi_recipients.sms_enabled + phone. Its own dedupe ledger (roi_event_sms).
 const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
-// Per-recipient subscription matrix + role-tiered ("assigned salesperson → parent") routing.
+// Per-recipient subscription matrix. pickTieredRecipients is a pass-through: role never excludes.
 const { isSubscribed, pickTieredRecipients, isChurned } = require("./subscriptions.cjs");
 const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 // Self-healing dealer-timezone lookup (live Spyne working-hours API) — see resolveTz.cjs for why.
@@ -483,9 +483,8 @@ async function runOnce() {
     // `d` overrides this pass's department for the channels that carry their own (chat — see the
     // chat block below). Omitted, it behaves exactly as before.
     const deptOk = (r, d) => ((d || dept) === "sales" ? r.receives_sales : r.receives_service);
-    // Per-TYPE recipient selection: dept + per-channel master + the subscription matrix, then
-    // role-tiered (salesperson → bdc → gm; whole rooftop when no roles set). Transactional events
-    // are lead-ish, so they route to the tier; a rooftop with no roles behaves exactly as before.
+    // Per-TYPE recipient selection: dept + per-channel master + the subscription matrix. Role is a
+    // label only: every eligible recipient is kept (see pickTieredRecipients in subscriptions.cjs).
     // GATE: only recipients a human has verified for THIS rooftop (verified_at set) can be emailed —
     // the guarantee against a wrong-rooftop address ever receiving another rooftop's data. Unverified
     // rows are held; the daily audit alert surfaces them for a human to verify.
@@ -1083,9 +1082,9 @@ async function runOnce() {
       } else out.sent += claimed.length;
     }
 
-    // ── SMS channel — same events, texted to the type's subscribed + role-tiered phones ──
+    // ── SMS channel — same events, texted to the type's subscribed phones ──
     // Only SMS-able job types (those carrying smsBody). Recipients are chosen PER TYPE
-    // (subscription matrix + role tier), NOT per lead — every job of a given type this pass
+    // (subscription matrix), NOT per lead — every job of a given type this pass
     // resolves to the exact same phone(s). Independent dedupe (roi_event_sms). We claim ONLY when a
     // real send will happen — a dry-run neither claims nor sends, so enabling SMS later isn't
     // pre-empted by a suppressed row. post_conversation SMS rides its EOD batch (jobs only exist at EOD).

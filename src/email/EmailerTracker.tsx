@@ -1685,7 +1685,7 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     else { onSaved(); void reloadRecips(); }
     return res;
   };
-  // Set a recipient's role (salesperson|bdc|gm|null) — role-tiered transactional fallback. Optimistic.
+  // Set a recipient's role (salesperson|bdc|gm|null). A label only; it never decides who is emailed. Optimistic.
   const setRole = async (email: string, d: DeptKind, role: "salesperson" | "bdc" | "gm" | null) => {
     const prev = teamRecips.find((r) => r.email === email)?.role ?? null;
     setTeamRecips((p) => p.map((r) => (r.email === email ? { ...r, role } : r)));
@@ -1904,12 +1904,14 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                             className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-700 hover:bg-amber-100"
                           >Verify</button>
                         )}
-                        {/* Role — drives the salesperson → BDC → GM fallback for transactional alerts. */}
+                        {/* Role — a LABEL for who this person is. It does not route or filter sends:
+                            every verified, On recipient gets the rooftop's enabled alerts. Turn a
+                            person off with the On/Off toggle or remove them. */}
                         <select
                           value={r.role ?? ""}
                           disabled={recipBusy === r.email}
                           onChange={(e) => void setRole(r.email, d, (e.target.value || null) as "salesperson" | "bdc" | "gm" | null)}
-                          title="Role for transactional routing (salesperson → BDC → GM fallback)"
+                          title="Who this person is. A label only — it doesn't affect who gets emailed; use the On/Off toggle for that."
                           className="rounded-md border border-border-subtle bg-surface-background px-1.5 py-1 text-[11px] text-text-secondary focus:border-brand-primary focus:outline-none"
                         >
                           <option value="">No role</option>
