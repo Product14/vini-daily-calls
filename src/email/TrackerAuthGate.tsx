@@ -11,28 +11,52 @@ import { TRACKER_TOKEN_KEY as TOKEN_KEY } from "./dataSource";
 // key has no access to customer PII. This sign-in gates that authenticated server surface.
 
 
+function readStoredToken(): string | null {
+  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+
+/** The token is base64("<expiryMs>.<hmac>"). Only the server can check the HMAC, but the expiry is
+ * readable here, so an expired token goes straight to the sign-in form. */
+function tokenLooksLive(token: string | null): boolean {
+  if (!token) return false;
+  try {
+    const exp = Number(atob(token).split(".")[0]);
+    return Number.isFinite(exp) && exp > Date.now();
+  } catch { return false; }
+}
+
 export function TrackerAuthGate({ children }: { children: ReactNode }) {
-  const [authed, setAuthed] = useState<boolean | null>(null); // null = still checking a stored token
+  // Optimistic: an unexpired stored token renders the tracker at once instead of waiting a server
+  // round-trip first, which used to sit in series ahead of every data request. Safe because the gate
+  // was never what protects the data: every /api/tracker/* and /api/email/* read checks the HMAC
+  // server-side and answers 401, so a forged value reaches an empty shell, and the verify below
+  // then drops it to the sign-in form.
+  const [authed, setAuthed] = useState<boolean>(() => tokenLooksLive(readStoredToken()));
   const [id, setId] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // On mount, re-validate any stored token against the server (so a forged localStorage value fails).
+  // Re-validate the stored token against the server in the background (so a forged or
+  // secret-rotated localStorage value fails). A network error keeps the session; the data
+  // reads report their own failures.
   useEffect(() => {
     let live = true;
-    const token = (() => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } })();
-    if (!token) { setAuthed(false); return; }
+    const token = readStoredToken();
+    if (!tokenLooksLive(token)) return;
     fetch("/api/tracker/verify", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }),
     })
       .then((r) => r.json())
-      .then((j) => { if (live) setAuthed(!!j.ok); })
-      .catch(() => { if (live) setAuthed(false); });
+      .then((j) => {
+        if (!live || j.ok) return;
+        try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+        setAuthed(false);
+      })
+      .catch(() => { /* offline or cold-start blip: keep the session */ });
     return () => { live = false; };
   }, []);
 
-  if (authed === null) return <div className="flex h-screen w-full items-center justify-center bg-surface-background text-[13px] text-text-muted">Loading…</div>;
   if (authed) return <>{children}</>;
 
   const submit = async (e: FormEvent) => {

@@ -12,6 +12,7 @@ import {
 import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
 import { sendDigestNow, generateAndSendNow, generatePreviewNow, renderStoredPreview, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
+import { loadDigestRunHtml } from "./dataSource";
 
 /**
  * Cell-action drawer.
@@ -132,12 +133,35 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
     return () => window.removeEventListener("keydown", h);
   }, [open, onClose, nav]);
 
+  // The grid load no longer carries each run's stored email HTML (it was most of that payload), so
+  // fetch the opened run's copy here. Keyed by run id so stepping to another cell never shows the
+  // previous cell's email.
+  const primaryRunId = (() => {
+    const rs = cell?.runs ?? [];
+    return (rs.find((r) => r.status === cell?.status) ?? rs[0])?.runId;
+  })();
+  const [storedHtml, setStoredHtml] = useState<{ runId: string; html: string | null; failed?: boolean } | null>(null);
+  useEffect(() => {
+    if (!open || !primaryRunId) return;
+    let alive = true;
+    loadDigestRunHtml(primaryRunId)
+      .then((html) => { if (alive) setStoredHtml({ runId: primaryRunId, html }); })
+      .catch(() => { if (alive) setStoredHtml({ runId: primaryRunId, html: null, failed: true }); });
+    return () => { alive = false; };
+    // `cell` too: a grid reload (e.g. after a dry-run re-run regenerated this run's HTML) hands the
+    // drawer a new cell object for the same run id, and the stored copy must follow it.
+  }, [open, primaryRunId, cell]);
+
   if (!mounted || !rooftop || !cell) return null;
 
   const status = cell.status;
   const runs = cell.runs ?? [];
   // the run that drives this cell (matching status), else the first run
   const primary = runs.find((r) => r.status === status) ?? runs[0] ?? null;
+  const storedForRun = storedHtml && primary?.runId && storedHtml.runId === primary.runId ? storedHtml : null;
+  const runHtml = primary?.renderedHtml ?? storedForRun?.html ?? undefined;
+  const runHtmlLoading = !primary?.renderedHtml && !!primary?.runId && !storedForRun;
+  const runHtmlFailed = !!storedForRun?.failed;
   const metrics = primary?.metrics;
   const dept = primary?.department;
   const rawReason = primary?.reason;
@@ -266,8 +290,12 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
                 {tplActive
                   ? `${cell.cadence} digest · ${tplActive === "v2" ? "New" : "Classic"} template preview`
                   : isSent
-                  ? primary?.renderedHtml
+                  ? runHtmlLoading
+                    ? "Email sent · loading exact HTML…"
+                    : runHtml
                     ? `Email sent · ${effTplName} template${effFocusName ? ` · ${effFocusName}` : ""} · exact HTML`
+                    : runHtmlFailed
+                    ? "Email sent · couldn't load the stored HTML"
                     : "Email sent · exact HTML not stored"
                   : previewHtml
                   ? `${cell.cadence} digest · ${effTplName} template${effFocusName ? ` · ${effFocusName}` : ""} preview`
@@ -298,7 +326,17 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
             </div>
             {tplErr ? <div className="mb-2 rounded bg-negative/10 px-2 py-1 text-[11px] text-negative">{tplErr}</div> : null}
             {tplBusy ? <div className="mb-2 text-[11px] text-text-muted">Rendering preview…</div> : null}
-            <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={previewHtml ?? primary?.renderedHtml} isSent={isSent} view={view} />
+            {!previewHtml && runHtmlLoading ? (
+              <div className="rounded-xl border border-border-subtle bg-surface-card px-4 py-10 text-center text-[12px] text-text-muted">
+                Loading email…
+              </div>
+            ) : !previewHtml && isSent && runHtmlFailed ? (
+              <div className="rounded-xl border border-border-subtle bg-surface-card px-4 py-10 text-center text-[12px] text-text-muted">
+                Couldn’t load the stored email. Close and reopen this cell to retry.
+              </div>
+            ) : (
+              <DigestEmail rooftop={rooftop} cell={cell} metrics={metrics} dept={dept} renderedHtml={previewHtml ?? runHtml} isSent={isSent} view={view} />
+            )}
           </div>
 
           <aside className="space-y-4">

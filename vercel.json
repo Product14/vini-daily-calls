@@ -1,6 +1,12 @@
 {
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+    }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.js" },
     { "source": "/(.*)",     "destination": "/index.html" }
@@ -15,6 +21,7 @@
     { "path": "/api/cron/roi-events",  "schedule": "*/4 0-2,12-23 * * *" },
     { "path": "/api/cron/roi-events",  "schedule": "*/15 3-11 * * *" },
     { "path": "/api/cron/agents-refresh-incremental", "schedule": "*/5 * * * *" },
+    { "path": "/api/cron/tracker-counts",             "schedule": "*/5 * * * *" },
     { "path": "/api/cron/agents-refresh",             "schedule": "0 * * * *"  },
     { "path": "/api/cron/agents-refresh-full",        "schedule": "0 4 * * 0" },
     { "path": "/api/cron/csm-sync",       "schedule": "0 6 * * *"    },

@@ -2688,26 +2688,53 @@ app.get("/api/email/roi-event-daycounts", requireTrackerAuth, async (req, res) =
 });
 
 // ── GET /api/email/roi-event-counts — per (team×dept×type) totals from CH ────
-// Powers the transactional grid totals from REAL events (history + live). Three
-// heavy grouped scans → cached in-process for 5 min. ?refresh=1 bypasses.
+// Powers the transactional grid totals from REAL events (history + live). countEventsCH is six
+// fleet-wide grouped scans run one after another (~3s at p50, ~9s at p90 off system.query_log),
+// and the 5-min TTL used to live only in this instance's memory, so every cold serverless
+// instance made the tracker wait on all six. The same 5-min freshness now lives in Postgres
+// (agent_metrics_cache, the table the /agents precompute uses): /api/cron/tracker-counts
+// rewrites it every 5 min, and a page load reads one row. Compute on the request path happens
+// only when no row exists yet, or on ?refresh=1.
 let eventCountsCache = { rows: null, fetchedAt: 0 };
 let eventCountsInflight = null;
 const EVENT_COUNTS_TTL_MS = 5 * 60 * 1000;
+const EVENT_COUNTS_CACHE_KEY = "roi_event_counts";
+const EVENT_COUNTS_SINCE_DAYS = 120;
+/** Compute the CH totals once per instance at a time, and persist them for every other instance. */
+function refreshEventCounts() {
+  if (!eventCountsInflight) {
+    eventCountsInflight = import("./roi-cron/eventPreviewCH.js")
+      .then((m) => m.countEventsCH({ sinceDays: EVENT_COUNTS_SINCE_DAYS }))
+      .then(async (rows) => {
+        eventCountsCache = { rows, fetchedAt: Date.now() };
+        await writeAgentCache(EVENT_COUNTS_CACHE_KEY, { rows });
+        return eventCountsCache;
+      })
+      .finally(() => { eventCountsInflight = null; });
+  }
+  return eventCountsInflight;
+}
 app.get("/api/email/roi-event-counts", requireTrackerAuth, async (req, res) => {
   try {
     if (!hasClickhouseCreds()) return res.json({ ok: true, counts: [], note: "ClickHouse not configured" });
+    const t0 = Date.now();
     const force = req.query.refresh === "1";
-    const fresh = !force && eventCountsCache.rows && (Date.now() - eventCountsCache.fetchedAt) < EVENT_COUNTS_TTL_MS;
-    if (!fresh) {
-      if (!eventCountsInflight) {
-        const sinceDays = Number(req.query.sinceDays) || 120;
-        eventCountsInflight = import("./roi-cron/eventPreviewCH.js")
-          .then((m) => m.countEventsCH({ sinceDays }))
-          .then((rows) => { eventCountsCache = { rows, fetchedAt: Date.now() }; })
-          .finally(() => { eventCountsInflight = null; });
+    let from = "memory";
+    if (force) { await refreshEventCounts(); from = "clickhouse"; }
+    else if (!eventCountsCache.rows || (Date.now() - eventCountsCache.fetchedAt) >= EVENT_COUNTS_TTL_MS) {
+      const stored = await readAgentCache(EVENT_COUNTS_CACHE_KEY);
+      const storedAt = stored ? new Date(stored.computedAt).getTime() : 0;
+      if (stored && Array.isArray(stored.payload?.rows) && storedAt > eventCountsCache.fetchedAt) {
+        eventCountsCache = { rows: stored.payload.rows, fetchedAt: storedAt };
+        from = "postgres";
       }
-      await eventCountsInflight;
+      if (!eventCountsCache.rows) { await refreshEventCounts(); from = "clickhouse"; }
+      // Past the TTL with the cron behind: serve what we have, recompute for the next load.
+      else if ((Date.now() - eventCountsCache.fetchedAt) >= EVENT_COUNTS_TTL_MS) {
+        refreshEventCounts().catch((e) => console.warn("[roi-event-counts] background refresh failed:", e?.message ?? e));
+      }
     }
+    res.set("Server-Timing", `counts;dur=${Date.now() - t0};desc="${from}"`);
     return res.json({ ok: true, counts: eventCountsCache.rows || [], fetchedAt: new Date(eventCountsCache.fetchedAt).toISOString() });
   } catch (err) {
     console.error("GET /api/email/roi-event-counts error:", err?.message ?? err);
@@ -3527,7 +3554,11 @@ async function _roiCfgSelect(sb, cols, effectiveFilter) {
 
 const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
 const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
-const _ROI_RUN_COLS = "team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,rendered_html,message_id,sent_at,opened_at,open_count";
+// rendered_html is deliberately NOT here. Every sent and dry-run run stores its full email HTML,
+// and shipping all of them with the grid made /api/tracker/rooftops-data the bulk of the tracker's
+// load time, for bytes only the cell drawer reads. The drawer fetches one run's HTML by `id` from
+// /api/tracker/digest-run-html when it opens.
+const _ROI_RUN_COLS = "id,team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,metrics,message_id,sent_at,opened_at,open_count";
 
 /** Shift an ISO "YYYY-MM-DD" by n days (UTC). */
 function _isoShiftDays(iso, n) {
@@ -3544,16 +3575,19 @@ function _isoShiftDays(iso, n) {
  * spikes (e.g. the sync-live discovery flood put 900+ rows on a single date), the newest-1000
  * budget gets consumed by one or two days and every older date returns ZERO rows, blanking the
  * tracker's history. We instead fetch in 1000-row pages, ordered by a unique key (id) so paging
- * is deterministic across ties, until a short page signals the end. Callers bound volume with a
- * date floor + the live-team set so the number of pages stays small.
+ * is deterministic across ties. Callers bound volume with a date floor + the live-team set.
+ *
+ * The first page also asks for an exact count, and every remaining page is then fetched at once
+ * rather than one after another: each page is a full round-trip to Supabase, and the tracker's
+ * first paint waits on the last one. A row the cron writes mid-read can shift offsets by one, so
+ * rows are de-duplicated by id and a full final page still falls through to sequential reads.
  */
 const _ROI_PAGE = 1000;
 async function _fetchRoiRunsPaged(sb, { floor, capDate, cadenceEq, cadenceNeq, teamIds }) {
   if (Array.isArray(teamIds) && teamIds.length === 0) return []; // no live teams → nothing to show
-  const out = [];
-  for (let offset = 0; ; offset += _ROI_PAGE) {
+  const page = (offset, withCount) => {
     let q = sb.from("roi_digest_runs")
-      .select(_ROI_RUN_COLS)
+      .select(_ROI_RUN_COLS, withCount ? { count: "exact" } : undefined)
       .gte("local_date", floor)
       .order("local_date", { ascending: false })
       .order("id", { ascending: true }) // unique tiebreak → stable paging across requests
@@ -3562,11 +3596,24 @@ async function _fetchRoiRunsPaged(sb, { floor, capDate, cadenceEq, cadenceNeq, t
     if (cadenceEq) q = q.eq("cadence", cadenceEq);
     if (cadenceNeq) q = q.neq("cadence", cadenceNeq);
     if (Array.isArray(teamIds) && teamIds.length) q = q.in("team_id", teamIds);
-    const { data, error } = await q;
-    if (error) throw error;
-    out.push(...(data ?? []));
-    if (!data || data.length < _ROI_PAGE) break;
-  }
+    return q;
+  };
+  const seen = new Set();
+  const out = [];
+  const take = (res) => {
+    if (res.error) throw res.error;
+    for (const r of res.data ?? []) if (!seen.has(r.id)) { seen.add(r.id); out.push(r); }
+    return (res.data ?? []).length;
+  };
+  const first = await page(0, true);
+  if (take(first) < _ROI_PAGE) return out;
+  const total = Number(first.count) || 0;
+  const offsets = [];
+  for (let offset = _ROI_PAGE; offset < total; offset += _ROI_PAGE) offsets.push(offset);
+  let lastLen = _ROI_PAGE;
+  for (const res of await Promise.all(offsets.map((o) => page(o, false)))) lastLen = take(res);
+  // Rows added since the count (or no count at all): keep reading until a short page.
+  for (let offset = _ROI_PAGE * (offsets.length + 1); lastLen === _ROI_PAGE; offset += _ROI_PAGE) lastLen = take(await page(offset, false));
   return out;
 }
 
@@ -3577,18 +3624,19 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const a = String(req.query.anchor || "");
     const anchor = /^\d{4}-\d{2}-\d{2}$/.test(a) ? a : null;
-    // Config/recipients/live depts first — live depts give us the team set to scope the runs read
-    // to, so discovery/phantom rows for non-live teams never consume the read budget.
-    const [cfgRes, recRes, liveRes] = await Promise.all([
-      _roiCfgSelect(sb, _ROI_CFG_COLS),
-      emailHealth.selectRecipients(sb, "team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role"),
-      sb.from("roi_live_departments").select("team_id,department,is_live,dry_run"),
-    ]);
-    // CRITICAL: config/live define the rows themselves. recipients only enrich → degrade to [].
-    const critErr = cfgRes.error || liveRes.error;
-    if (critErr) return res.status(500).json({ error: critErr.message });
-    if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
+    const t0 = Date.now();
+    // Live depts give us the team set to scope the runs read to, so discovery/phantom rows for
+    // non-live teams never consume the read budget. Config + recipients don't gate the runs read,
+    // so they run alongside it instead of in front of it.
+    const cfgP = _roiCfgSelect(sb, _ROI_CFG_COLS);
+    const recP = emailHealth.selectRecipients(sb, "team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role");
+    const liveRes = await sb.from("roi_live_departments").select("team_id,department,is_live,dry_run");
+    if (liveRes.error) {
+      cfgP.then(() => {}, () => {}); recP.then(() => {}, () => {}); // settle quietly; we're answering now
+      return res.status(500).json({ error: liveRes.error.message });
+    }
     const liveTeamIds = [...new Set((liveRes.data ?? []).filter((l) => l.is_live).map((l) => l.team_id))];
+    const tMeta = Date.now();
 
     // Windowed + paged runs read (see _fetchRoiRunsPaged). Anchor ceiling for the floors is the
     // explicit history anchor, else today — the client's default anchor (max of latest run /
@@ -3604,9 +3652,16 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
       ]);
       runs = daily.concat(nonDaily);
     } catch (e) {
+      cfgP.then(() => {}, () => {}); recP.then(() => {}, () => {});
       console.error("GET /api/tracker/rooftops-data runs read error:", e?.message ?? e);
       return res.status(500).json({ error: e?.message ?? "runs read failed" });
     }
+    const [cfgRes, recRes] = await Promise.all([cfgP, recP]);
+    // CRITICAL: config/live define the rows themselves. recipients only enrich → degrade to [].
+    if (cfgRes.error) return res.status(500).json({ error: cfgRes.error.message });
+    if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
+    // Visible in the browser's Network → Timing tab, so a slow load can be pinned on a stage.
+    res.set("Server-Timing", `live;dur=${tMeta - t0}, runs;dur=${Date.now() - tMeta};desc="${runs.length} runs"`);
     return res.json({
       ok: true,
       runs,
@@ -3635,6 +3690,24 @@ app.get("/api/tracker/lifecycle-rooftops", requireTrackerAuth, async (req, res) 
     return res.json({ ok: true, configs: cfgRes.data ?? [], liveTeamIds: (liveRes.data ?? []).map((l) => l.team_id) });
   } catch (err) {
     console.error("GET /api/tracker/lifecycle-rooftops error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 2b) One digest run's stored email HTML, for the cell drawer's "exact HTML" view. Split out of
+// rooftops-data (see _ROI_RUN_COLS) so the grid never downloads HTML nobody has opened.
+app.get("/api/tracker/digest-run-html", requireTrackerAuth, async (req, res) => {
+  try {
+    const id = String(req.query.id || "").trim();
+    if (!id) return res.status(400).json({ error: "id required" });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data, error } = await sb.from("roi_digest_runs").select("id,rendered_html").eq("id", id).maybeSingle();
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data) return res.status(404).json({ error: "run not found" });
+    return res.json({ ok: true, id: data.id, rendered_html: data.rendered_html ?? null });
+  } catch (err) {
+    console.error("GET /api/tracker/digest-run-html error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
   }
 });
@@ -4220,6 +4293,23 @@ function makeAgentsRefreshRoute(mode, { rooftop: rooftopFn, overall: overallFn }
     return res.status(ok ? 200 : 500).json({ ok, ...summary });
   };
 }
+
+// Keeps the tracker's transactional event totals precomputed (see /api/email/roi-event-counts).
+app.get("/api/cron/tracker-counts", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  if (!hasClickhouseCreds()) return res.status(200).json({ ok: false, error: "ClickHouse creds not set" });
+  const t0 = Date.now();
+  try {
+    const { rows } = await refreshEventCounts();
+    return res.status(200).json({ ok: true, rows: rows.length, cacheDb: hasCacheDb(), ms: Date.now() - t0 });
+  } catch (err) {
+    console.error("GET /api/cron/tracker-counts error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: String(err?.message ?? err) });
+  }
+});
 
 app.get("/api/cron/agents-refresh-incremental", makeAgentsRefreshRoute("incremental", {
   rooftop: refreshRooftopCacheIncremental,

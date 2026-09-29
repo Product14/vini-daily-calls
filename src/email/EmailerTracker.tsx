@@ -78,6 +78,9 @@ export function EmailerTracker() {
     parseTrackerPath(window.location.pathname).cadenceOrView === "transactional" ? "transactional" : "digests"
   );
   const [eventCounts, setEventCounts] = useState<EventCounts>(new Map());
+  // False until the first counts load lands. The digest grid no longer waits for it, so the
+  // Transactional view needs to tell "not loaded yet" apart from a genuine zero.
+  const [countsReady, setCountsReady] = useState(false);
   const [eventList, setEventList] = useState<{ rooftop: RooftopRow; type: string; label: string; direction?: "inbound" | "outbound" | null } | null>(null);
   const [search, setSearch] = useState("");
   // Whether the search-result dropdown is showing (focus-driven, see the search input below).
@@ -125,9 +128,11 @@ export function EmailerTracker() {
 
   const reload = useCallback(async () => {
     setLoading(true);
+    // Event counts feed only the Transactional view, so the digest grid renders without them and
+    // they fill in when they land. (loadEventCounts degrades to an empty map, never rejects.)
+    void loadEventCounts().then((counts) => { setEventCounts(counts); setCountsReady(true); });
     try {
-      const [res, counts, lifecycleOnly] = await Promise.all([loadRooftops({ anchor: anchor ?? undefined }), loadEventCounts(), loadLifecycleOnlyRooftops()]);
-      setEventCounts(counts);
+      const [res, lifecycleOnly] = await Promise.all([loadRooftops({ anchor: anchor ?? undefined }), loadLifecycleOnlyRooftops()]);
       setRooftops(res.rooftops);
       setLifecycleRooftops(lifecycleOnly);
       setToday(res.today);
@@ -886,14 +891,16 @@ export function EmailerTracker() {
           {view === "transactional" ? (
             /* Per-type sent rate + open rate — one card per transactional email type.
                Sent / Opened each open a per-day analytics modal. */
-            txTypeStats.map((s) => (
+            countsReady ? txTypeStats.map((s) => (
               <TxTypeStat
                 key={s.key}
                 s={s}
                 onSent={() => setTxAnalytics({ type: s.key, label: s.label, metric: "sent" })}
                 onOpened={() => setTxAnalytics({ type: s.key, label: s.label, metric: "opened" })}
               />
-            ))
+            )) : (
+              <span className="self-center text-[12px] text-text-muted">Loading transactional counts…</span>
+            )
           ) : (
             <>
               <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} />
@@ -946,7 +953,7 @@ export function EmailerTracker() {
                       <Th key={t.key} minW={132}>
                         <div>{t.label}</div>
                         <div className="mt-1 text-[11px] font-bold tabular text-positive">
-                          {tot} <span className="font-medium text-text-muted">sent</span>
+                          {countsReady ? tot : "…"} <span className="font-medium text-text-muted">sent</span>
                         </div>
                       </Th>
                     );
@@ -1023,7 +1030,9 @@ export function EmailerTracker() {
                         const total = prodDir ? (ec?.byDir?.[prodDir] ?? 0) : (ec?.total ?? 0);
                         return (
                           <td key={t.key} className={`${divider} ${groupTop} px-2 py-2`} style={{ minWidth: 132 }}>
-                            {total > 0 ? (
+                            {!countsReady ? (
+                              <div className="py-1 text-center text-[11px] text-text-muted">…</div>
+                            ) : total > 0 ? (
                               <button
                                 type="button"
                                 onClick={() => setEventList({ rooftop: r, type: t.key, label: t.label, direction: prodDir })}

@@ -41,6 +41,7 @@ export type LoadResult = {
 };
 
 type RunRow = {
+  id: string;
   team_id: string;
   enterprise_id: string | null;
   department: DeptKind;
@@ -50,7 +51,6 @@ type RunRow = {
   reason: string | null;
   recipients: { email: string; name?: string; received?: boolean; bounced?: boolean; opened?: boolean; opened_at?: string }[] | null;
   metrics: DigestMetrics | null;
-  rendered_html: string | null;
   message_id: string | null;
   sent_at: string | null;
   opened_at: string | null;
@@ -144,7 +144,7 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
     status: r.status,
     reason: r.reason ?? undefined,
     metrics: r.metrics ?? undefined,
-    renderedHtml: r.rendered_html ?? undefined,
+    runId: r.id != null ? String(r.id) : undefined,
     openedAt: r.opened_at ?? undefined,
     openCount: r.open_count ?? undefined,
     recipients: (r.recipients ?? undefined)?.map(rec => ({
@@ -171,6 +171,16 @@ function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell
   return cell("not_sent", normReason(ns?.reason ?? null));
 }
 
+/** Use the response index.html's inline script started for `url` before the bundle loaded, once;
+ * any later call (a Refresh, a second load) fetches fresh. A failed prefetch falls back to a fetch. */
+function prefetchedOr(url: string, init: RequestInit): Promise<Response> {
+  const w = window as unknown as { __trackerPrefetch?: Record<string, Promise<Response> | undefined> };
+  const pending = w.__trackerPrefetch?.[url];
+  if (!pending) return fetch(url, init);
+  delete w.__trackerPrefetch![url];
+  return pending.catch(() => fetch(url, init));
+}
+
 export async function loadRooftops(opts: { anchor?: string } = {}): Promise<LoadResult> {
   const todayIso = new Date().toISOString().slice(0, 10);
   // Optional history anchor (YYYY-MM-DD) — becomes the right-most column, so the tracker can jump to
@@ -186,7 +196,8 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   // rows/columns, so every mapping below is unchanged. A failed fetch → "error" (same as before).
   let runs: RunRow[]; let configs: ConfigRow[]; let recipients: RecipientRow[]; let lives: LiveRow[];
   try {
-    const res = await fetch(`/api/tracker/rooftops-data${anchorReq ? `?anchor=${anchorReq}` : ""}`, { cache: "no-store", headers: trackerAuthHeaders() });
+    const init: RequestInit = { cache: "no-store", headers: trackerAuthHeaders() };
+    const res = await (anchorReq ? fetch(`/api/tracker/rooftops-data?anchor=${anchorReq}`, init) : prefetchedOr("/api/tracker/rooftops-data", init));
     if (!res.ok) {
       console.warn("[tracker] rooftops-data read failed: HTTP", res.status);
       return { rooftops: [], source: "error", today: todayIso, lastSynced: new Date() };
@@ -337,6 +348,16 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   return { rooftops, source: "supabase", today, lastSynced: new Date() };
 }
 
+/** The exact stored HTML of ONE digest run, fetched when the cell drawer opens. The grid read
+ * leaves it out because it was most of that payload's bytes. Resolves null when the run has no
+ * stored HTML, and throws on a failed read so the drawer can tell "not stored" from "couldn't load". */
+export async function loadDigestRunHtml(runId: string): Promise<string | null> {
+  const res = await fetch(`/api/tracker/digest-run-html?id=${encodeURIComponent(runId)}`, { cache: "no-store", headers: trackerAuthHeaders() });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  return (j.rendered_html as string | null) ?? null;
+}
+
 /** Lightweight rows for rooftops NOT yet represented by a roi_live_departments grid row —
  * onboarding/contracting-stage accounts (and any churned account with no send history). No
  * digest cells: these power the tracker's non-grid "LifecycleList" view. A team with lifecycle
@@ -346,7 +367,7 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
   if (!isSupabaseConfigured) return [];
   let configs: ConfigRow[]; let liveTeamIds: string[];
   try {
-    const res = await fetch(`/api/tracker/lifecycle-rooftops`, { cache: "no-store", headers: trackerAuthHeaders() });
+    const res = await prefetchedOr(`/api/tracker/lifecycle-rooftops`, { cache: "no-store", headers: trackerAuthHeaders() });
     if (!res.ok) { console.warn("[tracker] lifecycle-only read failed: HTTP", res.status); return []; }
     const j = await res.json();
     configs = (j.configs ?? []) as ConfigRow[];
@@ -414,10 +435,13 @@ export type EventEmailRow = {
  * alone if the CH endpoint is unavailable. */
 export async function loadEventCounts(): Promise<EventCounts> {
   const m: EventCounts = new Map();
+  // Both reads start now; they are merged in order below (view first, then the CH override).
+  const chRes = prefetchedOr(`/api/email/roi-event-counts`, { cache: "no-store", headers: trackerAuthHeaders() });
+  chRes.catch(() => { /* handled where it is awaited */ });
   // 1) generated-rows view → seeds all types + the `sent` overlay.
   if (isSupabaseConfigured) {
     try {
-      const res = await fetch(`/api/tracker/event-counts`, { cache: "no-store", headers: trackerAuthHeaders() });
+      const res = await prefetchedOr(`/api/tracker/event-counts`, { cache: "no-store", headers: trackerAuthHeaders() });
       if (!res.ok) console.warn("[tracker] event counts (view) read failed: HTTP", res.status);
       const j = res.ok ? await res.json() : {};
       for (const r of ((j.rows ?? []) as Array<{ team_id: string; department: string; email_type: string; total: number; sent: number; not_sent: number; opened: number | null; last_at: string | null }>)) {
@@ -430,7 +454,7 @@ export async function loadEventCounts(): Promise<EventCounts> {
   }
   // 2) ClickHouse totals → override `total` with the REAL event count (keep `sent` from the view).
   try {
-    const r = await fetch(`/api/email/roi-event-counts`, { cache: "no-store", headers: trackerAuthHeaders() });
+    const r = await chRes;
     const j = await r.json().catch(() => ({}));
     if (r.ok && Array.isArray((j as { counts?: unknown }).counts)) {
       // CH returns one row per (team×dept×type×direction) — fold to per (team::dept::type) with a
@@ -637,7 +661,7 @@ export async function loadEventFeed(
 /** The tracker sign-in token (see TrackerAuthGate) — the server now requires this on every
  * config-mutation route (recipients*, rooftop-config, rooftop-live-status, csm, missing-rooftop,
  * config-audit-log). Shared here so every fetch in this module (and sendDigest.ts) can attach it. */
-export const TRACKER_TOKEN_KEY = "vini-tracker-token";
+export const TRACKER_TOKEN_KEY = "vini-tracker-token"; // also hard-coded in index.html's prefetch
 export function trackerAuthHeaders(): Record<string, string> {
   try {
     const token = localStorage.getItem(TRACKER_TOKEN_KEY);

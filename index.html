@@ -4,6 +4,25 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vini Dashboard</title>
+    <script>
+      // Email tracker only: start its first data reads now, while the JS bundle is still
+      // downloading, instead of after React mounts. dataSource.ts takes each response once
+      // (prefetchedOr). The token key mirrors TRACKER_TOKEN_KEY there. No-op on every other page.
+      (function () {
+        try {
+          var p = location.pathname;
+          if (p !== "/email-tracker" && p.indexOf("/email-tracker/") !== 0) return;
+          if (p === "/email-tracker/realtime") return;
+          var t = localStorage.getItem("vini-tracker-token");
+          if (!t || !(Number(atob(t).split(".")[0]) > Date.now())) return;
+          var init = { cache: "no-store", headers: { Authorization: "Bearer " + t } };
+          var urls = ["/api/tracker/rooftops-data", "/api/tracker/lifecycle-rooftops", "/api/tracker/event-counts", "/api/email/roi-event-counts"];
+          var pending = {};
+          for (var i = 0; i < urls.length; i++) pending[urls[i]] = fetch(urls[i], init);
+          window.__trackerPrefetch = pending;
+        } catch (e) { /* no storage / no fetch: the app fetches normally */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
