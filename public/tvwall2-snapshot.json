@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-30T09:37:42.627Z",
+ "generatedAt": "2026-09-30T14:29:36.304Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,19 +26,19 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-29",
+   "asOf": "2026-09-30",
    "proRata": true,
    "total": {
     "agents": 57,
     "arr": 510924,
-    "red": 45,
-    "amber": 5,
+    "red": 46,
+    "amber": 4,
     "green": 7,
-    "dormant": 29,
+    "dormant": 28,
     "unrateable": 2,
     "pct": {
-     "red": 0.7894736842105263,
-     "amber": 0.08771929824561403,
+     "red": 0.8070175438596491,
+     "amber": 0.07017543859649122,
      "green": 0.12280701754385964
     }
    },
@@ -50,7 +50,7 @@
      "red": 12,
      "amber": 0,
      "green": 0,
-     "dormant": 9,
+     "dormant": 8,
      "unrateable": 0,
      "pct": {
       "red": 1,
@@ -134,6 +134,21 @@
      }
     },
     {
+     "csm": "Aditya Kaul",
+     "agents": 8,
+     "arr": 111600,
+     "red": 6,
+     "amber": 0,
+     "green": 2,
+     "dormant": 3,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.75,
+      "amber": 0,
+      "green": 0.25
+     }
+    },
+    {
      "csm": "Prabha Kumari",
      "agents": 6,
      "arr": 36588,
@@ -146,21 +161,6 @@
       "red": 0.6666666666666666,
       "amber": 0.16666666666666666,
       "green": 0.16666666666666666
-     }
-    },
-    {
-     "csm": "Aditya Kaul",
-     "agents": 8,
-     "arr": 111600,
-     "red": 5,
-     "amber": 1,
-     "green": 2,
-     "dormant": 3,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.625,
-      "amber": 0.125,
-      "green": 0.25
      }
     },
     {
@@ -188,7 +188,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 1
+     }
+    ]
    }
   },
   "salesOb": {
@@ -197,19 +204,19 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-28",
+   "asOf": "2026-09-29",
    "proRata": true,
    "total": {
     "agents": 48,
     "arr": 426114,
-    "red": 35,
-    "amber": 7,
+    "red": 34,
+    "amber": 8,
     "green": 6,
     "dormant": 16,
     "unrateable": 2,
     "pct": {
-     "red": 0.7291666666666666,
-     "amber": 0.14583333333333334,
+     "red": 0.7083333333333334,
+     "amber": 0.16666666666666666,
      "green": 0.125
     }
    },
@@ -245,21 +252,6 @@
      }
     },
     {
-     "csm": "Prabha Kumari",
-     "agents": 6,
-     "arr": 44988,
-     "red": 6,
-     "amber": 0,
-     "green": 0,
-     "dormant": 4,
-     "unrateable": 1,
-     "pct": {
-      "red": 1,
-      "amber": 0,
-      "green": 0
-     }
-    },
-    {
      "csm": "No CSM assigned",
      "agents": 1,
      "arr": 0,
@@ -271,6 +263,21 @@
      "pct": {
       "red": 1,
       "amber": 0,
+      "green": 0
+     }
+    },
+    {
+     "csm": "Prabha Kumari",
+     "agents": 6,
+     "arr": 44988,
+     "red": 5,
+     "amber": 1,
+     "green": 0,
+     "dormant": 4,
+     "unrateable": 1,
+     "pct": {
+      "red": 0.8333333333333334,
+      "amber": 0.16666666666666666,
       "green": 0
      }
     },
@@ -344,7 +351,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "red",
+      "to": "amber",
+      "cause": "the appointment count changed",
+      "n": 1
+     }
+    ]
    }
   },
   "serviceIb": {
@@ -353,20 +367,20 @@
    "side": "service",
    "apptValue": 100,
    "reachLabel": "Conversations held",
-   "asOf": "2026-09-28",
+   "asOf": "2026-09-29",
    "proRata": false,
    "total": {
     "agents": 63,
     "arr": 519522,
-    "red": 33,
-    "amber": 15,
-    "green": 15,
-    "dormant": 28,
+    "red": 34,
+    "amber": 13,
+    "green": 16,
+    "dormant": 27,
     "unrateable": 2,
     "pct": {
-     "red": 0.5238095238095238,
-     "amber": 0.23809523809523808,
-     "green": 0.23809523809523808
+     "red": 0.5396825396825397,
+     "amber": 0.20634920634920634,
+     "green": 0.25396825396825395
     }
    },
    "csms": [
@@ -446,6 +460,21 @@
      }
     },
     {
+     "csm": "Prabha Kumari",
+     "agents": 17,
+     "arr": 114138,
+     "red": 9,
+     "amber": 2,
+     "green": 6,
+     "dormant": 8,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.5294117647058824,
+      "amber": 0.11764705882352941,
+      "green": 0.35294117647058826
+     }
+    },
+    {
      "csm": "Puneet Sharma",
      "agents": 6,
      "arr": 47376,
@@ -458,36 +487,6 @@
       "red": 0.5,
       "amber": 0.5,
       "green": 0
-     }
-    },
-    {
-     "csm": "Tushar Srivastava",
-     "agents": 6,
-     "arr": 46500,
-     "red": 3,
-     "amber": 1,
-     "green": 2,
-     "dormant": 2,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.5,
-      "amber": 0.16666666666666666,
-      "green": 0.3333333333333333
-     }
-    },
-    {
-     "csm": "Prabha Kumari",
-     "agents": 17,
-     "arr": 114138,
-     "red": 8,
-     "amber": 4,
-     "green": 5,
-     "dormant": 8,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.47058823529411764,
-      "amber": 0.23529411764705882,
-      "green": 0.29411764705882354
      }
     },
     {
@@ -506,17 +505,32 @@
      }
     },
     {
+     "csm": "Tushar Srivastava",
+     "agents": 6,
+     "arr": 46500,
+     "red": 2,
+     "amber": 2,
+     "green": 2,
+     "dormant": 1,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.3333333333333333,
+      "amber": 0.3333333333333333,
+      "green": 0.3333333333333333
+     }
+    },
+    {
      "csm": "Sudansh Tiruwa",
      "agents": 3,
      "arr": 33588,
-     "red": 0,
-     "amber": 1,
+     "red": 1,
+     "amber": 0,
      "green": 2,
      "dormant": 0,
      "unrateable": 0,
      "pct": {
-      "red": 0,
-      "amber": 0.3333333333333333,
+      "red": 0.3333333333333333,
+      "amber": 0,
       "green": 0.6666666666666666
      }
     }
@@ -530,7 +544,26 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "amber",
+      "to": "red",
+      "cause": "the appointment count changed",
+      "n": 2
+     },
+     {
+      "from": "amber",
+      "to": "green",
+      "cause": "the appointment count changed",
+      "n": 1
+     },
+     {
+      "from": "red",
+      "to": "amber",
+      "cause": "came back above the dormancy line",
+      "n": 1
+     }
+    ]
    }
   },
   "serviceOb": {
@@ -539,46 +572,31 @@
    "side": "service",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-09-28",
+   "asOf": "2026-09-29",
    "proRata": false,
    "total": {
-    "agents": 37,
-    "arr": 387814,
+    "agents": 38,
+    "arr": 393814,
     "red": 32,
-    "amber": 1,
-    "green": 4,
+    "amber": 0,
+    "green": 6,
     "dormant": 30,
     "unrateable": 1,
     "pct": {
-     "red": 0.8648648648648649,
-     "amber": 0.02702702702702703,
-     "green": 0.10810810810810811
+     "red": 0.8421052631578947,
+     "amber": 0,
+     "green": 0.15789473684210525
     }
    },
    "csms": [
     {
-     "csm": "Ritika Agarwal",
-     "agents": 9,
-     "arr": 76200,
-     "red": 9,
-     "amber": 0,
-     "green": 0,
-     "dormant": 8,
-     "unrateable": 0,
-     "pct": {
-      "red": 1,
-      "amber": 0,
-      "green": 0
-     }
-    },
-    {
      "csm": "Puneet Sharma",
-     "agents": 3,
-     "arr": 28200,
-     "red": 3,
+     "agents": 4,
+     "arr": 34200,
+     "red": 4,
      "amber": 0,
      "green": 0,
-     "dormant": 3,
+     "dormant": 4,
      "unrateable": 0,
      "pct": {
       "red": 1,
@@ -608,7 +626,7 @@
      "red": 1,
      "amber": 0,
      "green": 0,
-     "dormant": 1,
+     "dormant": 0,
      "unrateable": 0,
      "pct": {
       "red": 1,
@@ -647,6 +665,21 @@
      }
     },
     {
+     "csm": "Ritika Agarwal",
+     "agents": 9,
+     "arr": 76200,
+     "red": 8,
+     "amber": 0,
+     "green": 1,
+     "dormant": 8,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.8888888888888888,
+      "amber": 0,
+      "green": 0.1111111111111111
+     }
+    },
+    {
      "csm": "Tushar Srivastava",
      "agents": 5,
      "arr": 89100,
@@ -666,14 +699,14 @@
      "agents": 5,
      "arr": 42738,
      "red": 3,
-     "amber": 1,
-     "green": 1,
+     "amber": 0,
+     "green": 2,
      "dormant": 3,
      "unrateable": 0,
      "pct": {
       "red": 0.6,
-      "amber": 0.2,
-      "green": 0.2
+      "amber": 0,
+      "green": 0.4
      }
     },
     {
@@ -699,9 +732,22 @@
      "amber": 0.02702702702702703,
      "green": 0.10810810810810811
     },
-    "added": 0,
+    "added": 1,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "red",
+      "to": "green",
+      "cause": "the appointment count changed",
+      "n": 1
+     },
+     {
+      "from": "amber",
+      "to": "green",
+      "cause": "the appointment count changed",
+      "n": 1
+     }
+    ]
    }
   }
  }
