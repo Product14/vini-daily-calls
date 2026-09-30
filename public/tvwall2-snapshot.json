@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-09-29T14:30:55.927Z",
+ "generatedAt": "2026-09-30T09:37:42.627Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -180,7 +180,7 @@
     }
    ],
    "changes": {
-    "since": "2026-09-28",
+    "since": "2026-09-29",
     "sincePct": {
      "red": 0.7894736842105263,
      "amber": 0.08771929824561403,
@@ -336,34 +336,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-27",
+    "since": "2026-09-28",
     "sincePct": {
-     "red": 0.7111111111111111,
-     "amber": 0.17777777777777778,
-     "green": 0.1111111111111111
+     "red": 0.7291666666666666,
+     "amber": 0.14583333333333334,
+     "green": 0.125
     },
-    "added": 3,
+    "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "amber",
-      "to": "green",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "serviceIb": {
@@ -541,46 +522,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-27",
+    "since": "2026-09-28",
     "sincePct": {
      "red": 0.5238095238095238,
-     "amber": 0.2222222222222222,
-     "green": 0.25396825396825395
+     "amber": 0.23809523809523808,
+     "green": 0.23809523809523808
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "came back above the dormancy line",
-      "n": 2
-     },
-     {
-      "from": "green",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "green",
-      "cause": "the appointment count changed",
-      "n": 1
-     },
-     {
-      "from": "green",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     },
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "serviceOb": {
@@ -743,22 +693,15 @@
     }
    ],
    "changes": {
-    "since": "2026-09-27",
+    "since": "2026-09-28",
     "sincePct": {
-     "red": 0.8918918918918919,
+     "red": 0.8648648648648649,
      "amber": 0.02702702702702703,
-     "green": 0.08108108108108109
+     "green": 0.10810810810810811
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "red",
-      "to": "green",
-      "cause": "came back above the dormancy line",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   }
  }
