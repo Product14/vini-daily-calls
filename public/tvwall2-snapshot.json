@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-10-04T13:36:36.302Z",
+ "generatedAt": "2026-10-05T16:41:20.174Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,20 +26,20 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-10-04",
+   "asOf": "2026-10-05",
    "proRata": true,
    "total": {
     "agents": 59,
     "arr": 524724,
-    "red": 46,
+    "red": 45,
     "amber": 6,
-    "green": 7,
+    "green": 8,
     "dormant": 30,
     "unrateable": 2,
     "pct": {
-     "red": 0.7796610169491526,
+     "red": 0.7627118644067796,
      "amber": 0.1016949152542373,
-     "green": 0.11864406779661017
+     "green": 0.13559322033898305
     }
    },
    "csms": [
@@ -50,7 +50,7 @@
      "red": 12,
      "amber": 0,
      "green": 0,
-     "dormant": 9,
+     "dormant": 10,
      "unrateable": 0,
      "pct": {
       "red": 1,
@@ -134,21 +134,6 @@
      }
     },
     {
-     "csm": "Sudansh Tiruwa",
-     "agents": 7,
-     "arr": 73788,
-     "red": 5,
-     "amber": 1,
-     "green": 1,
-     "dormant": 3,
-     "unrateable": 0,
-     "pct": {
-      "red": 0.7142857142857143,
-      "amber": 0.14285714285714285,
-      "green": 0.14285714285714285
-     }
-    },
-    {
      "csm": "Prabha Kumari",
      "agents": 6,
      "arr": 36588,
@@ -161,6 +146,21 @@
       "red": 0.6666666666666666,
       "amber": 0.16666666666666666,
       "green": 0.16666666666666666
+     }
+    },
+    {
+     "csm": "Sudansh Tiruwa",
+     "agents": 7,
+     "arr": 73788,
+     "red": 4,
+     "amber": 1,
+     "green": 2,
+     "dormant": 2,
+     "unrateable": 0,
+     "pct": {
+      "red": 0.5714285714285714,
+      "amber": 0.14285714285714285,
+      "green": 0.2857142857142857
      }
     },
     {
@@ -180,7 +180,7 @@
     }
    ],
    "changes": {
-    "since": "2026-10-03",
+    "since": "2026-10-04",
     "sincePct": {
      "red": 0.7796610169491526,
      "amber": 0.1016949152542373,
@@ -188,7 +188,14 @@
     },
     "added": 0,
     "removed": 0,
-    "moved": []
+    "moved": [
+     {
+      "from": "red",
+      "to": "green",
+      "cause": "came back above the dormancy line",
+      "n": 1
+     }
+    ]
    }
   },
   "salesOb": {
@@ -197,7 +204,7 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-10-03",
+   "asOf": "2026-10-04",
    "proRata": true,
    "total": {
     "agents": 49,
@@ -205,7 +212,7 @@
     "red": 37,
     "amber": 6,
     "green": 6,
-    "dormant": 16,
+    "dormant": 17,
     "unrateable": 2,
     "pct": {
      "red": 0.7551020408163265,
@@ -278,14 +285,14 @@
      "csm": "Ritika Agarwal",
      "agents": 12,
      "arr": 100200,
-     "red": 10,
-     "amber": 1,
+     "red": 9,
+     "amber": 2,
      "green": 1,
-     "dormant": 5,
+     "dormant": 6,
      "unrateable": 0,
      "pct": {
-      "red": 0.8333333333333334,
-      "amber": 0.08333333333333333,
+      "red": 0.75,
+      "amber": 0.16666666666666666,
       "green": 0.08333333333333333
      }
     },
@@ -308,14 +315,14 @@
      "csm": "Deepanshu Agarwal",
      "agents": 9,
      "arr": 71988,
-     "red": 4,
-     "amber": 3,
+     "red": 5,
+     "amber": 2,
      "green": 2,
      "dormant": 0,
      "unrateable": 0,
      "pct": {
-      "red": 0.4444444444444444,
-      "amber": 0.3333333333333333,
+      "red": 0.5555555555555556,
+      "amber": 0.2222222222222222,
       "green": 0.2222222222222222
      }
     },
@@ -336,19 +343,19 @@
     }
    ],
    "changes": {
-    "since": "2026-10-02",
+    "since": "2026-10-03",
     "sincePct": {
-     "red": 0.7142857142857143,
-     "amber": 0.16326530612244897,
+     "red": 0.7551020408163265,
+     "amber": 0.12244897959183673,
      "green": 0.12244897959183673
     },
     "added": 0,
     "removed": 0,
     "moved": [
      {
-      "from": "amber",
-      "to": "red",
-      "cause": "crossed the dormancy line",
+      "from": "red",
+      "to": "amber",
+      "cause": "the appointment count changed",
       "n": 1
      },
      {
@@ -366,7 +373,7 @@
    "side": "service",
    "apptValue": 100,
    "reachLabel": "Conversations held",
-   "asOf": "2026-10-03",
+   "asOf": "2026-10-04",
    "proRata": false,
    "total": {
     "agents": 64,
@@ -374,7 +381,7 @@
     "red": 37,
     "amber": 11,
     "green": 16,
-    "dormant": 30,
+    "dormant": 32,
     "unrateable": 2,
     "pct": {
      "red": 0.578125,
@@ -435,7 +442,7 @@
      "red": 7,
      "amber": 1,
      "green": 1,
-     "dormant": 5,
+     "dormant": 6,
      "unrateable": 0,
      "pct": {
       "red": 0.7777777777777778,
@@ -480,7 +487,7 @@
      "red": 9,
      "amber": 2,
      "green": 6,
-     "dormant": 7,
+     "dormant": 8,
      "unrateable": 0,
      "pct": {
       "red": 0.5294117647058824,
@@ -535,7 +542,7 @@
     }
    ],
    "changes": {
-    "since": "2026-10-02",
+    "since": "2026-10-03",
     "sincePct": {
      "red": 0.578125,
      "amber": 0.171875,
@@ -552,7 +559,7 @@
    "side": "service",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-10-03",
+   "asOf": "2026-10-04",
    "proRata": false,
    "total": {
     "agents": 39,
@@ -706,7 +713,7 @@
     }
    ],
    "changes": {
-    "since": "2026-10-02",
+    "since": "2026-10-03",
     "sincePct": {
      "red": 0.8461538461538461,
      "amber": 0,
