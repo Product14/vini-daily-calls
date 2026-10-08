@@ -762,6 +762,11 @@ const eventKeys = {
   chat: (conversationId, day, sessionStartAt) => `chat:${conversationId}:${day}:s${sessionStartAt}`,
 };
 
+/* Action-item intents that never notify (nothing for a rep to do) — the ONE list, used by the cron's
+ * feed filter and overdue count (eventRunner) and by the tracker's eligible counts (eventPreviewCH).
+ * sales/service_left_voicemail: user request 2026-07-21 — "left voicemail (low)" alert lines are noise. */
+const NON_ACTIONABLE_INTENTS = new Set(["sales_lost_lead", "sales_left_voicemail", "service_left_voicemail"]);
+
 /* SMS replies that are only an opt-out keyword are the customer LEAVING, not engaging (canonical rule;
  * the same literal list as reporting-vini agentBaseFact.sql `n_human_inbound_real`). 99 SMS summary
  * emails in three days were about a lone "STOP" (A3-11). */
@@ -812,7 +817,7 @@ function buildSmsLead(callLead, seed, msgs) {
 module.exports = {
   fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, fetchApptAsksByCall, fetchMeetingMetaSource,
   fetchServiceReasonsByLead, fetchMeetingsTruth, fetchLeadDepts, countActionItemLeads,
-  eventKeys, asUtcDate, OPT_OUT_KEYWORDS, isOptOutBody,
+  eventKeys, asUtcDate, OPT_OUT_KEYWORDS, isOptOutBody, NON_ACTIONABLE_INTENTS,
   leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
   extractZip, pickApptWhen, pickApptRequest, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };

@@ -1440,6 +1440,8 @@ module.exports = {
   // shared with eventRunner so the send GATE and the RENDER can never disagree about
   // whether a conversation has a real summary / was a real conversation.
   cleanSummary, isNoConversation,
+  // the same list as SQL, so the tracker's "eligible" counts apply the cron's voicemail gate verbatim
+  NO_CONVERSATION_ENDED_REASONS: Object.keys(NO_CONVERSATION_ENDED_REASONS),
   // THE canonical reason-for-service formatter — the daily digest renders through this same one
   // (via digestEnrich) so the appointment alert and the digest can never word it differently.
   fmtServiceReason,
