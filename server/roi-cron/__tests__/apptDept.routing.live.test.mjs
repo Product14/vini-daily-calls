@@ -7,7 +7,7 @@
 // post_appointment, so the Sales row listed all 27 service appointments as eligible; five were sent
 // from it and the service bookings reached the sales team.
 //
-// Run: node server/roi-cron/__tests__/apptDept.routing.test.mjs   (needs CLICKHOUSE_* in env)
+// Run: npm run test:live   (needs CLICKHOUSE_* in env; excluded from the offline `npm test`)
 import "dotenv/config";
 import { listEventsCH, meetingDeptCH } from "../eventPreviewCH.js";
 import { runClickhouse } from "../../agentMetrics.js";

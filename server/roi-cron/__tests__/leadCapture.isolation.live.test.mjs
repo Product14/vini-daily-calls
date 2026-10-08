@@ -2,6 +2,7 @@
 // belongs to a different dealer. Runs the enrichment with MISMATCHED (team, call) / (team, lead)
 // pairs and asserts nothing comes back — the email then falls back to the standard format rather
 // than rendering another dealer's customer.
+// Live: needs CLICKHOUSE_* in env. Run with `npm run test:live` (excluded from the offline `npm test`).
 import "dotenv/config";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
