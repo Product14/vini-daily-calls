@@ -1260,7 +1260,7 @@ function GenerateSendSection({
       setSMsg(!s ? `Sent to ${emails.join(", ")}`
         : s.sent > 0 ? `Sent to ${emails.join(", ")}`
         : (s.already_sent ?? 0) > 0 ? "Already sent for this period. Nothing was sent again."
-        : s.suppressed > 0 ? "Held: the department is in dry run, so nothing was sent."
+        : (s.suppressed > 0 || (s.held ?? 0) > 0) ? "Held: the department is in dry run, so nothing was sent."
         : s.no_data > 0 ? "No activity for this period. Nothing was sent."
         : s.no_recipients > 0 ? "No eligible recipients. Nothing was sent."
         : (s.paused ?? 0) > 0 ? "This email type is turned off for the rooftop. Nothing was sent."

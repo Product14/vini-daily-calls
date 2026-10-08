@@ -392,9 +392,10 @@ export type EventEmailRow = {
   subject: string | null; recipients: { email: string; received?: boolean; opened?: boolean; opened_at?: string }[] | null;
   sent_at: string | null; created_at: string; opened_at: string | null; open_count?: number | null;
   reason: string | null; rendered_html: string | null; event_key: string; message_id: string | null;
-  /** Drill-down rows: the ClickHouse event's own key and the cron's key for it. */
+  /** Drill-down rows: the ClickHouse event's own key and the cron's key(s) for it. */
   source_event_key?: string;
   cron_event_key?: string;
+  cron_event_keys?: string[];
 };
 
 /** Per-(rooftop, dept, type) counts. TOTAL comes live from ClickHouse (all real events,
@@ -498,7 +499,7 @@ export async function loadEventEmails(
       const qs = new URLSearchParams({ teamId, department: department || "", emailType, limit: String(limit), offset: String(offset) });
       const res = await fetch(`/api/tracker/event-emails?${qs.toString()}`, { cache: "no-store", headers: trackerAuthHeaders() });
       if (!res.ok) console.warn("[tracker] event emails read failed: HTTP", res.status);
-      else { const j = await res.json(); stored = (j.rows ?? []) as EventEmailRow[]; }
+      else { const j = await res.json(); stored = ((j.rows ?? []) as EventEmailRow[]).filter((r) => !String(r.reason ?? "").startsWith("alias_of:")); }
     } catch (e) { console.warn("[tracker] event emails read error:", e); }
   }
   return { rows: stored, hasMore: stored.length === limit };
@@ -633,7 +634,7 @@ export async function countEventByMetric(teamIds: string[], emailType: string, m
 /** One eligible event from ClickHouse (history + live), via /api/email/roi-event-list. `cronEventKey`
  * is the key the events cron files this event's email under; `stored` is the email the pipeline
  * produced for it, matched on that key by the server (null when none). */
-type CHEvent = { eventKey: string; cronEventKey?: string; customer?: string; phone?: string; createdAt: string; direction?: string; label?: string; sub?: string; stored?: (EventEmailRow & { department?: string }) | null };
+type CHEvent = { eventKey: string; cronEventKey?: string; cronEventKeys?: string[]; customer?: string; phone?: string; createdAt: string; direction?: string; label?: string; sub?: string; stored?: (EventEmailRow & { department?: string }) | null };
 
 /** The transactional drill-down FEED: every eligible event from ClickHouse (all dates, history
  * included), each filed under the date it was supposed to go, with real send-status overlaid from
@@ -645,7 +646,7 @@ type CHEvent = { eventKey: string; cronEventKey?: string; customer?: string; pho
  * valid. Falls back to the stored-rows-only view (loadEventEmails) if the CH endpoint is down. */
 export async function loadEventFeed(
   teamId: string, department: string, emailType: string,
-  opts: { limit?: number; offset?: number; direction?: string | null } = {},
+  opts: { limit?: number; offset?: number; direction?: string | null; tz?: string | null } = {},
 ): Promise<EventEmailPage> {
   const limit = opts.limit ?? 50;
   const offset = Math.max(0, opts.offset ?? 0);
@@ -655,6 +656,8 @@ export async function loadEventFeed(
   try {
     const qs = new URLSearchParams({ teamId, department: department || "", emailType, sinceDays: "365", limit: String(limit), offset: String(offset) });
     if (direction) qs.set("direction", direction);
+    // The dealer's zone decides the cron's dealer-local keys (and day filing) for each event.
+    if (opts.tz) qs.set("tz", opts.tz);
     const r = await fetch(`/api/email/roi-event-list?${qs.toString()}`, { cache: "no-store", headers: trackerAuthHeaders() });
     const j = await r.json().catch(() => ({}));
     if (r.ok && Array.isArray((j as { events?: unknown }).events)) ch = (j as { events: CHEvent[] }).events;
@@ -663,15 +666,16 @@ export async function loadEventFeed(
   // 2) The server already matched each event to the email the pipeline produced for it, on the
   // cron's key (A4 F13: matching on the list's own key never hit, so every row read "eligible").
   const rows: EventEmailRow[] = ch.map((ev) => {
-    const cronKey = ev.cronEventKey || ev.eventKey;
-    if (ev.stored) return { ...ev.stored, source_event_key: ev.eventKey, cron_event_key: cronKey };
+    const cronKey = ev.cronEventKey || ev.cronEventKeys?.[0] || ev.eventKey;
+    const cronKeys = ev.cronEventKeys?.length ? ev.cronEventKeys : [cronKey];
+    if (ev.stored) return { ...ev.stored, source_event_key: ev.eventKey, cron_event_key: cronKey, cron_event_keys: cronKeys };
     return {
       id: "", email_type: emailType, status: "not_emailed",
       subject: ev.label || null, recipients: null, sent_at: null,
       created_at: (ev.createdAt || "").replace(" ", "T"), // CH DateTime → ISO-ish for Date()
       opened_at: null, open_count: 0, reason: ev.sub || null,
       rendered_html: null, event_key: ev.eventKey, message_id: null,
-      source_event_key: ev.eventKey, cron_event_key: cronKey,
+      source_event_key: ev.eventKey, cron_event_key: cronKey, cron_event_keys: cronKeys,
     };
   });
   return { rows, hasMore: ch.length === limit };

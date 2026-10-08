@@ -219,8 +219,11 @@ export function classifyCell(runs: RunLite[], ctx: CellContext): Classified {
     if (!best || PRIORITY.indexOf(state) < PRIORITY.indexOf(best.state)) best = { state, run };
   }
   const b = best!;
-  const detail = b.state === "unknown" ? `Reason: ${b.run.reason || b.run.status}` : (b.run.reason_detail || undefined);
-  return { state: b.state, detail: detail ?? undefined, rawReason: b.run.reason ?? null, primary: b.run };
+  // A sent cell keeps no detail: reason_detail can be left over from an earlier failed attempt on
+  // the same row ("Sent · reporting-api 504 …" read as a failure).
+  const raw = b.state === "sent" ? "" : b.state === "unknown" ? `Reason: ${b.run.reason || b.run.status}` : (b.run.reason_detail || "");
+  const detail = raw.replace(/\s+/g, " ").trim();
+  return { state: b.state, detail: detail ? (detail.length > 220 ? `${detail.slice(0, 217)}...` : detail) : undefined, rawReason: b.run.reason ?? null, primary: b.run };
 }
 
 /** The legacy SendStatus a state maps to (drawer branches and old consumers still read it). */
@@ -285,7 +288,7 @@ export function dueCellIndex(dueKey: string, cadence: Cadence, anchor: string, c
 }
 
 // ── KPIs ─────────────────────────────────────────────────────────────────────────────────────
-export type DueRow = { team_id?: string; rooftop_id?: string; department?: string; cells: BuiltCell[]; dueKey: string };
+export type DueRow = { team_id?: string; rooftop_id?: string; department?: string; cells: BuiltCell[]; dueKey: string; dryRun?: boolean };
 export type KpiSummary = {
   sent: number; notSent: number; setup: number; silent: number; pending: number; excluded: number;
   opened: number; rated: number; sentRatePct: number; openRatePct: number; departments: number;
@@ -353,8 +356,14 @@ export const BOARD_LABEL: Record<BoardKey, string> = {
   recipients_missing: "No eligible recipients", unsubscribed: "Recipients opted out", not_classified: "Department not classified",
 };
 /** The board key a due cell files under, or null when it needs no action. Dry-run holds are a
- * deliberate state, so they are not on the board (they still count in "Not set up"). */
-export function boardKey(cell: BuiltCell | undefined): BoardKey | null {
+ * deliberate state, so they are not on the board (they still count in "Not set up"); nor are the
+ * setup gaps of a department that is still in dry run (go-live prep, not a dealer missing mail). */
+const SETUP_KEYS = new Set<BoardKey>(["recipients_missing", "unsubscribed", "not_classified"]);
+export function boardKey(cell: BuiltCell | undefined, dryRun = false): BoardKey | null {
+  const k = boardKeyOf(cell);
+  return k && dryRun && SETUP_KEYS.has(k) ? null : k;
+}
+function boardKeyOf(cell: BuiltCell | undefined): BoardKey | null {
   if (!cell) return null;
   switch (cell.state) {
     case "missed": case "missed_send_day": return "missed";
@@ -375,7 +384,7 @@ export function actionBoard(rows: (DueRow & { name: string })[], cadence: Cadenc
   const by = new Map<BoardKey, { teams: Set<string>; depts: number; names: Set<string> }>();
   for (const r of rows) {
     const i = dueCellIndex(r.dueKey, cadence, anchor, r.cells.length || CADENCE_LEN[cadence]);
-    const k = boardKey(i >= 0 ? r.cells[i] : undefined);
+    const k = boardKey(i >= 0 ? r.cells[i] : undefined, r.dryRun);
     if (!k) continue;
     const e = by.get(k) ?? { teams: new Set<string>(), depts: 0, names: new Set<string>() };
     e.teams.add(r.team_id || r.rooftop_id || r.name); e.depts++; e.names.add(r.name);
@@ -392,7 +401,7 @@ export function actionBoard(rows: (DueRow & { name: string })[], cadence: Cadenc
 /** Does this row's due cell sit under board chip `key`? (the chip's filter) */
 export function rowMatchesBoard(r: DueRow, key: BoardKey, cadence: Cadence, anchor: string): boolean {
   const i = dueCellIndex(r.dueKey, cadence, anchor, r.cells.length || CADENCE_LEN[cadence]);
-  return boardKey(i >= 0 ? r.cells[i] : undefined) === key;
+  return boardKey(i >= 0 ? r.cells[i] : undefined, r.dryRun) === key;
 }
 
 // ── Transactional KPIs (C6) ──────────────────────────────────────────────────────────────────
@@ -406,6 +415,27 @@ export function txKpi(c: Partial<TxStatusCounts> | null | undefined): TxKpi {
   const sent = n(c?.sent), notSent = n(c?.not_sent) + n(c?.error), opened = Math.min(n(c?.opened), sent);
   const attempted = sent + notSent;
   return { sent, notSent, held: n(c?.suppressed), inFlight: n(c?.queued), attempted, sentRatePct: pct(sent, attempted), opened, openRatePct: pct(opened, sent) };
+}
+
+// ── Transactional row reasons ────────────────────────────────────────────────────────────────
+/** roi_event_emails.reason, in words, for the drill-down. `alias_of:<key>` rows are bookkeeping
+ * duplicates (status suppressed): isAliasRow() keeps them out of every count and list. */
+export function isAliasRow(r: { reason?: string | null } | null | undefined): boolean {
+  return String(r?.reason ?? "").startsWith("alias_of:");
+}
+export function eventReasonLabel(reason: string | null | undefined): string {
+  const r = String(reason ?? "").trim();
+  if (!r) return "";
+  if (r === "manual") return "Sent by hand from the tracker";
+  if (r.startsWith("manual_override:")) return `Sent by hand, override: ${r.slice(16).split("+").map((x) => x.replace(/_/g, " ")).join(", ")}`;
+  if (r.startsWith("dept_fallback:")) return `Sent to the ${r.slice(14) || "other"} team: this department has no live row`;
+  if (r === "pass_killed") return "Not sent: the pass was interrupted";
+  if (r === "twilio_auth") return "SMS not sent: Twilio authentication failed";
+  if (r === "dry_run") return "Held: dry run";
+  if (r === "no_value") return "Held: no value";
+  if (r === "recipients_missing") return "No eligible recipients";
+  if (r.startsWith("alias_of:")) return "Duplicate record";
+  return r.replace(/_/g, " ");
 }
 
 // ── The open pixel (C13) ─────────────────────────────────────────────────────────────────────

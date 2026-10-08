@@ -162,6 +162,10 @@ export type GenerateSendSummary = {
   errors: number;
   /** Set by a runner that skips a period it already sent (WS-A). */
   already_sent?: number;
+  /** Held without sending (dry run) — WS-A's name for it; older runners report `suppressed`. */
+  held?: number;
+  /** The period key the runner actually built. */
+  localDate?: string;
   paused?: number;
   churned?: number;
 };
@@ -262,7 +266,7 @@ export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: stri
  * Render a transactional email live (from ClickHouse) and send it to the rooftop's
  * recipients — the per-cell "Send to customer" for a type with no stored event yet.
  */
-export async function generateSendEventNow(opts: { teamId?: string; enterpriseId?: string; department?: DeptKind; emailType: string; eventKey?: string; cronEventKey?: string; rooftopName?: string; tz?: string }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
+export async function generateSendEventNow(opts: { teamId?: string; enterpriseId?: string; department?: DeptKind; emailType: string; eventKey?: string; cronEventKey?: string; cronEventKeys?: string[]; rooftopName?: string; tz?: string }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
   try {
     const actor = await getActorName();
     const r = await sendWithOverridePrompt((o) =>
@@ -271,7 +275,7 @@ export async function generateSendEventNow(opts: { teamId?: string; enterpriseId
         body: JSON.stringify({
           teamId: opts.teamId, enterpriseId: opts.enterpriseId,
           department: opts.department === "service" ? "service" : "sales",
-          emailType: opts.emailType, eventKey: opts.eventKey, cronEventKey: opts.cronEventKey, rooftopName: opts.rooftopName, tz: opts.tz,
+          emailType: opts.emailType, eventKey: opts.eventKey, cronEventKey: opts.cronEventKey, cronEventKeys: opts.cronEventKeys, rooftopName: opts.rooftopName, tz: opts.tz,
           actor,
           ...o,
         }),

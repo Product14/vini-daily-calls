@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
   latestDueKey, liveAnchor, buildCells, summarizeDue, columnStats, rooftopCounts, actionBoard, rowMatchesBoard,
   txKpi, neutralizeTracking, STATE_META, REASON_STATE, classifyCell, dueCellIndex, rowDueKeys,
+  eventReasonLabel, isAliasRow,
 } from "../trackerModel.ts";
 import { periodKeyForColumn } from "../periodBuckets.ts";
 
@@ -185,6 +186,7 @@ test("action board: distinct rooftops, failures vs setup gaps, dry run off the b
     row("C", "sales", {}, [run("2026-10-07", "not_sent", "recipients_missing")]),
     row("D", "sales", { eligible: { daily: 0 } }, []),
     row("E", "sales", { dryRun: true }, [run("2026-10-07", "suppressed", "dry_run")]),
+    { ...row("G", "sales", { dryRun: true }, [run("2026-10-07", "not_sent", "recipients_missing")]), dryRun: true }, // go-live prep, off the board
     row("F", "sales", {}, [run("2026-10-07", "sent")]),
   ];
   const board = actionBoard(rows, "daily", "2026-10-07");
@@ -193,7 +195,7 @@ test("action board: distinct rooftops, failures vs setup gaps, dry run off the b
   assert.deepEqual([chip("missed").rooftops, chip("missed").departments], [1, 2]);
   assert.equal(chip("failed").rooftops, 1);
   assert.equal(chip("recipients_missing").rooftops, 2); // C (cron said so) + D (nobody eligible)
-  assert.equal(board.flatMap((g) => g.chips).some((c) => c.names.includes("E")), false);
+  assert.equal(board.flatMap((g) => g.chips).some((c) => c.names.includes("E") || c.names.includes("G")), false);
   assert.equal(rows.filter((r) => rowMatchesBoard(r, "missed", "daily", "2026-10-07")).length, 2);
 });
 
@@ -237,4 +239,20 @@ test("timezones.ts mirrors sendGates.NA_TIMEZONES exactly", async () => {
   const gates = createRequire(import.meta.url)("../../../server/roi-cron/sendGates.cjs");
   assert.deepEqual(NA_TIMEZONES, gates.NA_TIMEZONES);
   for (const tz of NA_TIMEZONES) assert.equal(gates.timezoneProblem(tz), null, tz);
+});
+
+test("sent cells carry no leftover failure detail; long details are trimmed", () => {
+  const ctx = { ...facts(), cadence: "daily", due: true, periodKey: "2026-10-05", todayIso: "2026-10-08" };
+  assert.equal(classifyCell([run("2026-10-05", "sent", null, { reason_detail: "reporting-api 504 FUNCTION_INVOCATION_TIMEOUT" })], ctx).detail, undefined);
+  const long = classifyCell([run("2026-10-05", "error", "error", { reason_detail: "x\n".repeat(400) })], ctx).detail;
+  assert.ok(long.length <= 220 && !/\n/.test(long));
+});
+
+test("transactional reasons read as words; alias rows are bookkeeping", () => {
+  assert.equal(eventReasonLabel("dept_fallback:service"), "Sent to the service team: this department has no live row");
+  assert.equal(eventReasonLabel("pass_killed"), "Not sent: the pass was interrupted");
+  assert.equal(eventReasonLabel("manual_override:dry_run+already_sent"), "Sent by hand, override: dry run, already sent");
+  assert.equal(eventReasonLabel(null), "");
+  assert.equal(isAliasRow({ reason: "alias_of:call:lead:x:2026-10-07:t1" }), true);
+  assert.equal(isAliasRow({ reason: "dry_run" }), false);
 });

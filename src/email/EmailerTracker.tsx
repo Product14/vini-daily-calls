@@ -21,7 +21,7 @@ import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow } from "./sendDigest";
 import { confirmDialog } from "../ui/dialogs";
 import {
-  STATE_META, liveAnchor, latestDueKey, summarizeDue, columnStats, rooftopCounts, actionBoard, rowMatchesBoard, txKpi, neutralizeTracking,
+  STATE_META, liveAnchor, latestDueKey, summarizeDue, columnStats, rooftopCounts, actionBoard, rowMatchesBoard, txKpi, neutralizeTracking, eventReasonLabel,
   type BoardKey, type BuiltCell, type DueRow, type TxStatusCounts,
 } from "./trackerModel.ts";
 
@@ -226,7 +226,7 @@ export function EmailerTracker() {
 
   const cellsOf = useCallback((r: RooftopRow) => (cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly) as BuiltCell[], [cadence]);
   const dueRowOf = useCallback((r: RooftopRow): DueRow & { name: string } => ({
-    team_id: r.team_id, rooftop_id: r.rooftop_id, department: r.department, name: r.name, cells: cellsOf(r), dueKey: r.dueKeys?.[cadence] ?? "",
+    team_id: r.team_id, rooftop_id: r.rooftop_id, department: r.department, name: r.name, cells: cellsOf(r), dueKey: r.dueKeys?.[cadence] ?? "", dryRun: r.dryRun === true,
   }), [cellsOf, cadence]);
 
   // Search / CSM / product filters: everything on screen and every tile follows these (C4).
@@ -1024,7 +1024,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   useEffect(() => {
     if (!entry) { setRows(null); setPreview(null); setHasMore(false); setDayCounts({}); return; }
     setRows(null); setPreview(null); setSendMsg(""); setGenState("idle"); setHasMore(false); setDayCounts({});
-    void loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction }).then((page) => {
+    void loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset: 0, direction: entry.direction, tz: entry.rooftop.timezone }).then((page) => {
       setRows(page.rows); setHasMore(page.hasMore);
       // Shows ALL eligible events (from ClickHouse, every date) filed under the date each was
       // supposed to go, with real send-status overlaid — not just the sparse generated rows.
@@ -1039,7 +1039,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     setLoadingMore(true);
     try {
       const offset = rows?.length ?? 0;
-      const page = await loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset, direction: entry.direction });
+      const page = await loadEventFeed(entry.rooftop.team_id ?? "", entry.rooftop.department ?? "", entry.type, { limit: EVENT_PAGE_SIZE, offset, direction: entry.direction, tz: entry.rooftop.timezone });
       setRows((prev) => [...(prev ?? []), ...page.rows]);
       setHasMore(page.hasMore);
     } finally { setLoadingMore(false); }
@@ -1187,7 +1187,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     setGenState("sending"); setSendMsg("");
     const r = await generateSendEventNow({
       teamId: entry.rooftop.team_id, enterpriseId: entry.rooftop.enterprise_id, department: entry.rooftop.department,
-      emailType: entry.type, eventKey: preview?.source_event_key ?? preview?.event_key ?? "", cronEventKey: preview?.cron_event_key,
+      emailType: entry.type, eventKey: preview?.source_event_key ?? preview?.event_key ?? "", cronEventKey: preview?.cron_event_key, cronEventKeys: preview?.cron_event_keys,
       rooftopName: entry.rooftop.name, tz: entry.rooftop.timezone,
     });
     if (r.ok) { setGenState("sent"); setSendMsg(`✓ Sent to ${(r.to ?? []).join(", ") || "recipients"}`); }
@@ -1353,7 +1353,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
                         <div className="min-w-0">
                           <div className="truncate text-[13px] font-medium text-text-primary">{r.subject || entry.label}</div>
                           <div className="mt-0.5 text-[11px] text-text-muted">
-                            {fmtTime(rowTime(r))}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}{r.reason ? " · " + r.reason : ""}
+                            {fmtTime(rowTime(r))}{recipientsOf(r) ? " · " + recipientsOf(r) : ""}{r.reason ? " · " + (r.id ? eventReasonLabel(r.reason) : r.reason) : ""}
                           </div>
                         </div>
                         <div className="flex shrink-0 items-center gap-2">

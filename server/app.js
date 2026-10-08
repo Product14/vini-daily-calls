@@ -2725,11 +2725,14 @@ app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) =>
 // Query: ?teamId&department&emailType&sinceDays?&limit?
 app.get("/api/email/roi-event-list", requireTrackerAuth, async (req, res) => {
   try {
-    const { teamId, department, emailType, direction, sinceDays, limit, offset } = req.query;
+    const { teamId, department, emailType, direction, sinceDays, limit, offset, tz } = req.query;
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
     if (!hasClickhouseCreds()) return res.json({ ok: true, events: [], note: "ClickHouse not configured" });
     const { listEventsCH } = await import("./roi-cron/eventPreviewCH.js");
-    const events = await listEventsCH({ teamId, department, emailType, direction, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200, offset: Number(offset) || 0 });
+    // The dealer's zone: the cron's keys for SMS / overdue / chat are dealer-local days. Only a
+    // US/Canadian zone is passed on; otherwise listEventsCH resolves the rooftop's own.
+    const zone = sendGates.timezoneProblem(tz) ? undefined : String(tz);
+    const events = await listEventsCH({ teamId, department, emailType, direction, tz: zone, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200, offset: Number(offset) || 0 });
     // Overlay what the pipeline actually produced for each event. The list's own key (a ClickHouse
     // uuid / sms:<id> / lead:<id>) is never the key the cron files its email under, so matching on it
     // showed 50 of 50 rows "eligible" under a day header that said "1 sent", and invited a duplicate
@@ -2737,19 +2740,23 @@ app.get("/api/email/roi-event-list", requireTrackerAuth, async (req, res) => {
     // back to its own key. Manual sends of the same event (manual-<type>-<key>) count too.
     const sb = _trackerRoiSb();
     if (sb && events.length) {
-      const keyOf = (ev) => String(ev.cronEventKey || ev.eventKey || "");
-      const keys = [...new Set(events.flatMap((ev) => [keyOf(ev), `manual-${emailType}-${ev.eventKey}`]).filter(Boolean))];
+      // One event can map to several cron keys (cronEventKeys); fall back to the row's own key.
+      const keysOf = (ev) => [...new Set([...(Array.isArray(ev.cronEventKeys) ? ev.cronEventKeys : []), ev.cronEventKey, ev.eventKey].map((k) => String(k || "")).filter(Boolean))];
+      const keys = [...new Set(events.flatMap((ev) => [...keysOf(ev), `manual-${emailType}-${ev.eventKey}`]))];
       const byKey = new Map();
       for (let i = 0; i < keys.length; i += 100) {
         const { data, error } = await sb.from("roi_event_emails")
           .select("id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
           .eq("team_id", teamId).eq("email_type", emailType).in("event_key", keys.slice(i, i + 100));
         if (error) { console.warn("[roi-event-list] overlay read failed:", error.message); break; }
-        for (const r of data ?? []) byKey.set(r.event_key, r);
+        // alias_of:<key> rows are bookkeeping duplicates of another row, never an email of their own.
+        for (const r of data ?? []) if (!String(r.reason || "").startsWith("alias_of:")) byKey.set(r.event_key, r);
       }
       for (const ev of events) {
-        // The cron's own row wins over a manual one: it is the email the dealer got first.
-        ev.stored = byKey.get(keyOf(ev)) || byKey.get(`manual-${emailType}-${ev.eventKey}`) || null;
+        // The cron's own row wins over a manual one: it is the email the dealer got first. Among the
+        // cron's keys, a sent row wins over a held or failed one.
+        const cands = keysOf(ev).map((k) => byKey.get(k)).filter(Boolean);
+        ev.stored = cands.find((r) => r.status === "sent") || cands[0] || byKey.get(`manual-${emailType}-${ev.eventKey}`) || null;
       }
     }
     return res.json({ ok: true, events });
@@ -2983,7 +2990,7 @@ const EVENT_SUBJECTS = {
 };
 app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, res) => {
   try {
-    const { teamId, enterpriseId, department, emailType, eventKey, cronEventKey, rooftopName, tz, override, gateOverride, duplicateOverride } = req.body ?? {};
+    const { teamId, enterpriseId, department, emailType, eventKey, cronEventKey, cronEventKeys, rooftopName, tz, override, gateOverride, duplicateOverride } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
     const dept = department === "service" ? "service" : "sales";
     const actor = _actorOf(req);
@@ -3005,12 +3012,12 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     // from the drill-down row), not the ClickHouse id the row is listed by. When the cron (or an
     // earlier manual send) already emailed it, sending again is a duplicate for the dealer, so it
     // takes a typed DANGER duplicateOverride (A4 F13).
-    const priorKeys = [...new Set([cronEventKey, eventKey, `manual-${emailType}-${eventKey || "latest"}`].map((k) => String(k || "").trim()).filter(Boolean))];
+    const priorKeys = [...new Set([...(Array.isArray(cronEventKeys) ? cronEventKeys : []), cronEventKey, eventKey, `manual-${emailType}-${eventKey || "latest"}`].map((k) => String(k || "").trim()).filter(Boolean))].slice(0, 50);
     const { data: prior, error: priorErr } = await sb.from("roi_event_emails")
-      .select("id,status,sent_at,created_at,event_key").eq("team_id", teamId).eq("email_type", emailType)
-      .in("event_key", priorKeys).in("status", ["sent", "queued"]).order("created_at", { ascending: false }).limit(1);
+      .select("id,status,sent_at,created_at,event_key,reason").eq("team_id", teamId).eq("email_type", emailType)
+      .in("event_key", priorKeys).in("status", ["sent", "queued"]).order("created_at", { ascending: false }).limit(5);
     if (priorErr) return res.status(500).json({ error: `duplicate check failed: ${priorErr.message}` });
-    const already = (prior ?? [])[0] || null;
+    const already = (prior ?? []).find((r) => !String(r.reason || "").startsWith("alias_of:")) || null;
     const duplicateOk = EV.overrideOk(duplicateOverride);
     if (already && !duplicateOk) {
       const when = already.sent_at || already.created_at;
@@ -3975,9 +3982,21 @@ app.get("/api/tracker/event-counts", requireTrackerAuth, async (req, res) => {
   try {
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const { data, error } = await sb.from("roi_event_email_counts").select("team_id,department,email_type,total,sent,not_sent,opened,last_at");
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json({ ok: true, rows: data ?? [] });
+    const [viewRes, aliasRes] = await Promise.all([
+      emailHealth.selectTablePaged(sb, "roi_event_email_counts", "team_id,department,email_type,total,sent,not_sent,opened,last_at", { order: ["team_id", "department", "email_type"] }),
+      // alias_of:<key> rows are bookkeeping duplicates (status suppressed), not emails: the view
+      // counts them in total / not_sent, so take them back out.
+      emailHealth.selectTablePaged(sb, "roi_event_emails", "id,team_id,department,email_type", { filter: (q) => q.like("reason", "alias_of:%"), order: ["id"] }),
+    ]);
+    if (viewRes.error) return res.status(500).json({ error: viewRes.error.message });
+    const alias = new Map();
+    if (aliasRes.error) console.warn("[tracker] alias rows read failed (counts include them):", aliasRes.error.message);
+    else for (const r of aliasRes.data ?? []) { const k = `${r.team_id}::${r.department}::${r.email_type}`; alias.set(k, (alias.get(k) || 0) + 1); }
+    const rows = (viewRes.data ?? []).map((r) => {
+      const n = alias.get(`${r.team_id}::${r.department}::${r.email_type}`) || 0;
+      return n ? { ...r, total: Math.max(0, r.total - n), not_sent: Math.max(0, r.not_sent - n) } : r;
+    });
+    return res.json({ ok: true, rows });
   } catch (err) {
     console.error("GET /api/tracker/event-counts error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
@@ -4020,7 +4039,8 @@ app.get("/api/tracker/event-emails", requireTrackerAuth, async (req, res) => {
       .range(offset, offset + limit - 1);
     const { data, error } = await q;
     if (error) return res.status(500).json({ error: error.message });
-    return res.json({ ok: true, rows: data ?? [] });
+    // alias_of:<key> rows are bookkeeping duplicates, never listed.
+    return res.json({ ok: true, rows: (data ?? []).filter((r) => !String(r.reason || "").startsWith("alias_of:")) });
   } catch (err) {
     console.error("GET /api/tracker/event-emails error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
@@ -4109,7 +4129,9 @@ app.post("/api/tracker/event-status-counts", requireTrackerAuth, async (req, res
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const since = new Date(Date.now() - days * 86400000).toISOString();
-    const buckets = ["sent", "not_sent", "error", "suppressed", "queued", "opened"];
+    // "alias" = alias_of:<key> bookkeeping duplicates (status suppressed): counted only to take them
+    // back out of `suppressed`.
+    const buckets = ["sent", "not_sent", "error", "suppressed", "queued", "opened", "alias"];
     const chunks = [];
     for (let i = 0; i < teamIds.length; i += 250) chunks.push(teamIds.slice(i, i + 250));
     const jobs = types.flatMap((t) => buckets.flatMap((b) => chunks.map((ids) => ({ t, b, ids }))));
@@ -4117,13 +4139,16 @@ app.post("/api/tracker/event-status-counts", requireTrackerAuth, async (req, res
       let q = sb.from("roi_event_emails").select("id", { count: "exact", head: true })
         .in("team_id", ids).eq("email_type", t).gte("created_at", since);
       if (department) q = q.eq("department", department);
-      q = b === "opened" ? q.eq("status", "sent").not("opened_at", "is", null) : q.eq("status", b);
+      q = b === "opened" ? q.eq("status", "sent").not("opened_at", "is", null)
+        : b === "alias" ? q.like("reason", "alias_of:%")
+        : q.eq("status", b);
       const { count, error } = await q;
       if (error) throw error;
       return count ?? 0;
     });
-    const out = Object.fromEntries(types.map((t) => [t, empty()]));
+    const out = Object.fromEntries(types.map((t) => [t, { ...empty(), alias: 0 }]));
     jobs.forEach((j, i) => { out[j.t][j.b] += results[i]; });
+    for (const t of types) { out[t].suppressed = Math.max(0, out[t].suppressed - out[t].alias); delete out[t].alias; }
     return res.json({ ok: true, sinceDays: days, types: out });
   } catch (err) {
     console.error("POST /api/tracker/event-status-counts error:", err?.message ?? err);
