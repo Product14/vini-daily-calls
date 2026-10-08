@@ -3180,7 +3180,7 @@ app.post("/api/recipients/toggle", requireTrackerAuth, async (req, res) => {
 // conversational-ai setting the Console's Lead Engagements > Speed to Lead > Email toggle writes
 // (stl-follow-up-config → workflowConfig.stlChannels.email), so the two screens can never
 // disagree. config-hub reads that setting live from conversational-ai too.
-//   GET  /api/stl-email?teamId=&enterpriseId=   → { ok, available, enabled, smsEnabled }
+//   GET  /api/stl-email?teamId=&enterpriseId=   → { ok, available, enabled, smsEnabled, mailbox }
 //   POST /api/stl-email { teamId, enterpriseId, enabled }
 // Needs SPYNE_GATEWAY_BASE_URL (the API gateway in front of conversational-ai, e.g. the one
 // config-hub calls as https://${BASE_URL}/conversation/...) and SPYNE_API_TOKEN (a Spyne token
@@ -3223,6 +3223,11 @@ app.get("/api/stl-email", requireTrackerAuth, async (req, res) => {
       available: data?.stlEmail !== undefined,
       enabled: data?.stlEmail?.enabled === true,
       smsEnabled: data?.stl?.enabled === true,
+      // Whether the rooftop has a connected sending mailbox (null when conversational-ai
+      // doesn't report it yet). Email can't go out without one.
+      mailbox: data?.stlEmail?.mailbox
+        ? { connected: data.stlEmail.mailbox.connected === true, email: data.stlEmail.mailbox.email ?? null }
+        : null,
     });
   } catch (err) {
     console.error("GET /api/stl-email error:", err?.message ?? err);

@@ -1855,6 +1855,18 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
                 <span className="block text-[10px] text-warning">{stlEmailErr}</span>
               ) : stlEmail && !stlEmail.available ? (
                 <span className="block text-[10px] text-text-muted">Not available for this rooftop yet.</span>
+              ) : stlEmail?.mailbox ? (
+                // Shown whether the switch is on or off, so it's clear why email can't go out before turning it on.
+                stlEmail.mailbox.connected ? (
+                  <span className="mt-1 block text-[10px] text-positive">
+                    ● Sending mailbox: {stlEmail.mailbox.email ? <b>{stlEmail.mailbox.email}</b> : "connected"}
+                    {stlEmail.mailbox.email ? " · connected" : ""}
+                  </span>
+                ) : (
+                  <span className="mt-1 block text-[10px] text-warning">
+                    ● No sending mailbox connected. Email can't go out until one is connected.
+                  </span>
+                )
               ) : null}
             </span>
             <button
