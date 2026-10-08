@@ -9,6 +9,8 @@
     "start": "concurrently \"npm run dev\" \"npm run server\"",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "node --test $(find server/roi-cron/__tests__ -name '*.test.mjs' ! -name '*.live.test.mjs' | sort) && node --experimental-strip-types --test src/email/__tests__/*.test.mjs",
+    "test:live": "node --test server/roi-cron/__tests__/*.live.test.mjs",
     "ct:build:email": "node controlTower/scripts/previewAgentsEmail.js",
     "ct:build:slack": "node controlTower/scripts/sendSlackReport.js",
     "ct:send:email": "node controlTower/scripts/sendVinniReport.js",

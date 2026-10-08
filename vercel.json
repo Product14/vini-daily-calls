@@ -28,6 +28,7 @@
     { "path": "/api/cron/roi-events/shard/1/4", "schedule": "*/15 3-11 * * *" },
     { "path": "/api/cron/roi-events/shard/2/4", "schedule": "*/15 3-11 * * *" },
     { "path": "/api/cron/roi-events/shard/3/4", "schedule": "*/15 3-11 * * *" },
+    { "path": "/api/cron/roi-watchdog", "schedule": "17,47 * * * *" },
     { "path": "/api/cron/agents-refresh-incremental", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/tracker-counts",             "schedule": "*/5 * * * *" },
     { "path": "/api/cron/agents-refresh",             "schedule": "0 * * * *"  },
