@@ -14,7 +14,7 @@
 // service-role key) instead of the browser's publishable/anon key — the tables are RLS-protected,
 // so the anon key can no longer read them. isSupabaseConfigured still gates the "connected" state.
 import { isSupabaseConfigured } from "./supabaseClient";
-import { bucketRuns, columnDate, scheduledIsStale } from "./periodBuckets";
+import { buildCells, rowDueKeys, type RowFacts, type RunLite, type TxStatusCounts } from "./trackerModel.ts";
 import { promptDialog } from "../ui/dialogs";
 import {
   type AgentType,
@@ -38,8 +38,12 @@ export type RooftopSource = "supabase" | "unconfigured" | "error";
 export type LoadResult = {
   rooftops: RooftopRow[];
   source: RooftopSource;
-  today: string; // ISO anchor for column labels
+  /** The explicit history anchor that was requested, or "" for live (the grid computes the live
+   * anchor from the rows on screen: trackerModel.liveAnchor). */
+  today: string;
   lastSynced: Date;
+  /** The server holds every send (DRY_RUN). Manual sends will be refused. */
+  serverDryRun?: boolean;
 };
 
 type RunRow = {
@@ -51,6 +55,8 @@ type RunRow = {
   local_date: string;
   status: SendStatus;
   reason: string | null;
+  reason_detail?: string | null;
+  trigger?: string | null;
   recipients: { email: string; name?: string; received?: boolean; bounced?: boolean; opened?: boolean; opened_at?: string }[] | null;
   message_id: string | null;
   sent_at: string | null;
@@ -67,7 +73,9 @@ type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: 
   arr_bucket: string | null; enterprise_name: string | null; team_name: string | null;
   contracted_date: string | null; onboarding_date: string | null; ob_live_date: string | null; live_date: string | null; churn_date: string | null;
   calls_30d: number | null; sms_30d: number | null; last_activity_at: string | null;
-  ae_poc: string | null; ob_poc: string | null };
+  ae_poc: string | null; ob_poc: string | null;
+  chat_enabled?: boolean | null; post_conversation_template?: string | null; post_conversation_mode?: string | null;
+  post_conversation_outbound_requires_reply?: boolean | null; sms_post_conversation_cadence?: string | null; working_hours?: unknown };
 
 /** roi_rooftop_config → the tracker's LifecycleStatus, defaulting to "live" for rooftops the
  * lifecycle sync hasn't classified yet — never hides an already-visible rooftop.
@@ -97,60 +105,29 @@ type RecipientRow = {
 };
 type LiveRow = { team_id: string; department: DeptKind; is_live: boolean; dry_run?: boolean };
 
-const CADENCE_LEN: Record<Cadence, number> = { daily: 14, weekly: 8, monthly: 6 };
-
-/* ── reason mapping: backend canonical → tracker NotSentReason ─────────────── */
-const TRACKER_REASONS = new Set<NotSentReason>([
-  "recipients_missing", "tag_missing", "recipient_placeholder",
-  "smtp_timeout", "scheduler_skipped", "silent_day", "bounced", "spyne_preview", "send_failed",
-]);
-function normReason(r: string | null): NotSentReason {
-  if (r && TRACKER_REASONS.has(r as NotSentReason)) return r as NotSentReason;
-  switch (r) {
-    case "not_eligible": return "tag_missing";
-    case "before_send_hour": return "scheduler_skipped";
-    case "no_data":
-    case "not_actionable":
-    case "guardrail_failed": return "silent_day";
-    case "not_subscribed": return "recipients_missing";
-    case "mail_error":
-    case "error": return "send_failed";
-    default: return "scheduler_skipped";
-  }
+/** A department is churned on a date the way the cron's isChurned reads it: the ledger stage is
+ * churn, or a churn_date on or before that date. */
+function churnTest(cfg: ConfigRow | undefined): (isoDate: string) => boolean {
+  const stage = String(cfg?.lifecycle_status ?? "").toLowerCase();
+  const effective = String(cfg?.lifecycle_effective ?? "").toLowerCase();
+  const churnDate = cfg?.churn_date ? String(cfg.churn_date).slice(0, 10) : "";
+  return (d: string) => stage === "churn" || effective === "churn" || (!!churnDate && !!d && churnDate <= d);
 }
 
-/** Aggregate all department runs on one date into one rooftop-level cell. */
-function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell {
-  const cellRuns: CellRun[] = runs.map(r => ({
-    department: r.department,
-    status: r.status,
-    reason: r.reason ?? undefined,
-    localDate: r.local_date,
-    runId: r.id != null ? String(r.id) : undefined,
-    openedAt: r.opened_at ?? undefined,
-    openCount: r.open_count ?? undefined,
-    recipients: (r.recipients ?? undefined)?.map(rec => ({
-      email: rec.email, name: rec.name, received: rec.received, bounced: rec.bounced,
-      opened: rec.opened, openedAt: rec.opened_at,
-    })),
-  }));
-  const cell = (status: SendStatus, reason?: NotSentReason): SendCell => ({
-    date, cadence, status, reason, runs: cellRuns,
-  });
-
-  if (!runs.length) return cell("not_subscribed");
-  if (runs.some(r => r.status === "sent")) return cell("sent");
-  // A genuine send FAILURE — surfaced as "Failed" (distinct from a deliberate not_sent hold). Matches both
-  // the new status="error" rows and legacy failures stored as status="not_sent" with reason="error".
-  const err = runs.find(r => r.status === "error" || (r.status === "not_sent" && r.reason === "error"));
-  if (err) return cell("error", normReason(err.reason ?? "error"));
-  if (runs.some(r => r.status === "suppressed")) {
-    const s = runs.find(r => r.status === "suppressed");
-    return cell("suppressed", normReason(s?.reason ?? null));
-  }
-  if (runs.some(r => r.status === "scheduled")) return cell("scheduled");
-  const ns = runs.find(r => r.status === "not_sent");
-  return cell("not_sent", normReason(ns?.reason ?? null));
+/** Cells for one department row, anchored at `anchor` (the right-most column). The tracker builds
+ * these per tab: the anchor comes from the rows on screen, never from one far-off rooftop (A4 F1). */
+export function anchorRow(r: RooftopRow, anchor: string, now: Date): RooftopRow {
+  if (r.lifecycleOnly || !r.facts || !anchor) return r;
+  const timing = { timezone: r.timezone, sendHour: r.sendHour, sendMinute: r.sendMinute, weeklySendDow: r.weeklySendDow, monthlySendDay: r.monthlySendDay };
+  const dueKeys = rowDueKeys(timing, now);
+  const runs = r.digestRuns ?? [];
+  return {
+    ...r,
+    dueKeys,
+    daily: buildCells(runs, "daily", anchor, r.facts, timing, now, dueKeys.daily),
+    weekly: buildCells(runs, "weekly", anchor, r.facts, timing, now, dueKeys.weekly),
+    monthly: buildCells(runs, "monthly", anchor, r.facts, timing, now, dueKeys.monthly),
+  };
 }
 
 /** Use the response index.html's inline script started for `url` before the bundle loaded, once;
@@ -177,6 +154,9 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   // 4 queries (windowed digest_runs + config + recipients + live depts) and returns identical
   // rows/columns, so every mapping below is unchanged. A failed fetch → "error" (same as before).
   let runs: RunRow[]; let configs: ConfigRow[]; let recipients: RecipientRow[]; let lives: LiveRow[];
+  let eligibility: Array<{ team_id: string; department: string; daily: number; weekly: number; monthly: number }> | null = null;
+  let everSentKeys: Set<string> | null = null;
+  let serverDryRun: boolean | undefined;
   try {
     const init: RequestInit = { cache: "no-store", headers: trackerAuthHeaders() };
     const res = await (anchorReq ? fetch(`/api/tracker/rooftops-data?anchor=${anchorReq}`, init) : prefetchedOr("/api/tracker/rooftops-data", init));
@@ -189,6 +169,9 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     configs = (j.configs ?? []) as ConfigRow[];
     recipients = (j.recipients ?? []) as RecipientRow[];
     lives = (j.lives ?? []) as LiveRow[];
+    eligibility = Array.isArray(j.eligibility) ? j.eligibility : null;
+    everSentKeys = Array.isArray(j.everSent) ? new Set<string>(j.everSent) : null;
+    serverDryRun = typeof j.serverDryRun === "boolean" ? j.serverDryRun : undefined;
   } catch (e) {
     console.warn("[tracker] rooftops-data read error:", e);
     return { rooftops: [], source: "error", today: todayIso, lastSynced: new Date() };
@@ -209,28 +192,8 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     arr.push(r); runsByTeam.set(r.team_id, arr);
   }
 
-  // anchor "today" (the right-most / "live" column) = the most recent of {latest daily run, real
-  // yesterday UTC}. Anchoring to the latest run ALONE froze the calendar whenever the cron fell
-  // behind (a 3-day-old run made the UI look like that day was "today"). Daily digests carry
-  // yesterday's local_date, so real-yesterday keeps the live column populated while still advancing
-  // every day; a fresher same-day run (local_date === today) still wins via the max.
-  const isoYesterday = (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); })();
-  const dailyDates = runs.filter(r => r.cadence === "daily").map(r => r.local_date).sort();
-  const latestRun = dailyDates.length ? dailyDates[dailyDates.length - 1] : "";
-  // Explicit history anchor wins (user jumped to a past date); else the live anchor (latest run / yesterday).
-  const today = anchorReq ?? (latestRun > isoYesterday ? latestRun : isoYesterday);
-
-  // anchor recomputed above; build cells for ONE department's runs. A weekly/monthly column is a
-  // period, not a date: see periodBuckets.ts for why matching by exact date left those grids blank.
-  // A run still "scheduled" after the day it was due was never sent (no pass came back for it, e.g.
-  // the 2026-10-01 monthly and 16 daily rows on 2026-09-30), so it shows as the miss it is.
-  function buildCells(deptRuns: RunRow[], cadence: Cadence, monthlySendDay?: number | null): SendCell[] {
-    return bucketRuns(deptRuns, cadence, today, CADENCE_LEN[cadence]).map((runs, i) =>
-      aggregateCell(columnDate(today, cadence, i), cadence, runs.map((r) =>
-        r.status === "scheduled" && scheduledIsStale(cadence, r.local_date, todayIso, monthlySendDay ?? 1)
-          ? { ...r, status: "not_sent" as const, reason: r.reason ?? "before_send_hour" }
-          : r)));
-  }
+  const eligByKey = new Map((eligibility ?? []).map((e) => [`${e.team_id}::${e.department}`, e]));
+  const now = new Date();
 
   // ONE ROW PER (team, department) — separate tracking per department.
   const rooftops: RooftopRow[] = liveEntries.map((live) => {
@@ -241,28 +204,29 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     const enterpriseId = cfg?.enterprise_id ?? deptRuns[0]?.enterprise_id ?? undefined;
     const agents: AgentType[] = [dept === "service" ? "service_ib" : "sales_ib"];
 
-    // received map from the latest run carrying recipients
-    const recvMap = new Map<string, boolean>();
-    const latestWithRecips = deptRuns
-      .filter(r => Array.isArray(r.recipients))
-      .sort((a, b) => (a.local_date < b.local_date ? 1 : -1))[0];
-    for (const rec of latestWithRecips?.recipients ?? []) {
-      recvMap.set(rec.email.toLowerCase(), rec.received === true && rec.bounced !== true);
-    }
-    // every recipient routed to this department (incl. disabled) → view + toggle
+    // every recipient routed to this department (incl. disabled) → view + toggle. "Received" is
+    // filled per cell from that cell's own run (RecipientManager), never from another run.
     const recipsAll: Recipient[] = (recByTeam.get(teamId) ?? [])
       .filter(r => (dept === "sales" ? r.receives_sales : r.receives_service))
-      .map(r => ({ email: r.email, name: r.name ?? undefined, received: recvMap.get(r.email.toLowerCase()) ?? false, enabled: r.email_enabled, phone: r.phone ?? undefined, smsEnabled: r.sms_enabled === true }));
+      .map(r => ({ email: r.email, name: r.name ?? undefined, received: false, enabled: r.email_enabled, phone: r.phone ?? undefined, smsEnabled: r.sms_enabled === true }));
     // ENABLED subset → used for sending
     const recips: Recipient[] = recipsAll.filter(r => r.enabled);
 
     const departments: Department[] = [{ kind: dept, live: true, agents, recipients: recips, allRecipients: recipsAll }];
-    // Lifecycle status (by send history): a real email is one with a "sent" run in ANY cadence.
-    const everSent = deptRuns.some(r => r.status === "sent");
-    const isDry = live.dry_run !== false; // dry-run held when unset or true
+    // Lifecycle status: "Paused" = held now but has sent before, ever (the server's lifetime count;
+    // the loaded window alone called 20 previously-live departments "Not started", A4 F19).
+    const everSent = deptRuns.some(r => r.status === "sent") || !!everSentKeys?.has(`${teamId}::${dept}`);
+    // Only dry_run === true holds, exactly as the crons read it: a null dry_run SENDS (C25).
+    const isDry = live.dry_run === true;
     const liveStatus: RooftopRow["liveStatus"] = !isDry ? "live" : everSent ? "paused" : "not_started";
-    const daily = buildCells(deptRuns, "daily");
-    const current_block = daily[0] && daily[0].status === "not_sent" ? daily[0].reason ?? null : null;
+    const elig = eligByKey.get(`${teamId}::${dept}`);
+    const facts: RowFacts = {
+      dryRun: isDry,
+      churnedOn: churnTest(cfg),
+      toggleOn: { daily: cfg?.daily_enabled !== false, weekly: cfg?.weekly_enabled === true, monthly: cfg?.monthly_enabled === true },
+      configured: !!cfg,
+      eligible: elig ? { daily: elig.daily, weekly: elig.weekly, monthly: elig.monthly } : undefined,
+    };
 
     return {
       rooftop_id: `${teamId}::${dept}`,
@@ -270,8 +234,20 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
       enterprise_id: enterpriseId,
       team_id: teamId,
       department: dept,
-      dryRun: live.dry_run !== false, // default true (dry-run on) when unset
+      dryRun: isDry,
       liveStatus,
+      unconfigured: !cfg,
+      eligible: facts.eligible,
+      facts,
+      digestRuns: deptRuns as unknown as RunLite[],
+      readOnly: cfg ? {
+        chatEnabled: cfg.chat_enabled ?? null,
+        postConversationTemplate: cfg.post_conversation_template ?? null,
+        postConversationMode: cfg.post_conversation_mode ?? null,
+        outboundRequiresReply: cfg.post_conversation_outbound_requires_reply ?? null,
+        smsPostConversationCadence: cfg.sms_post_conversation_cadence ?? null,
+        workingHours: cfg.working_hours ?? null,
+      } : undefined,
       lifecycleStatus: toLifecycleStatus(cfg?.lifecycle_effective ?? cfg?.lifecycle_status),
       lifecycleOverride: (cfg?.lifecycle_status_override ?? null) as RooftopRow["lifecycleOverride"],
       lifecycleLedger: cfg?.lifecycle_status ?? null,
@@ -292,16 +268,18 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
       weeklySendDow: cfg?.weekly_send_dow ?? undefined,
       monthlySendDay: cfg?.monthly_send_day ?? undefined,
       // CSM is sourced from roi_rooftop_config.cs_poc (authoritative — synced from
-      // Metabase Q12071's cs_poc_email per team_id). Fall back to the stored
-      // csm_name, then "Unassigned".
+      // Metabase Q12071's cs_poc_email per team_id). The tracker's "Change CSM" writes cs_poc too
+      // (POST /api/csm), so a change shows immediately; the nightly sync replaces it if Metabase
+      // names someone else. Fall back to the stored csm_name, then "Unassigned".
       csm: nameFromEmail(cfg?.cs_poc) || cfg?.csm_name?.trim() || "Unassigned",
       group: enterpriseId ? `Ent ${enterpriseId.slice(0, 6)}` : undefined,
       agents_live: agents,
       departments,
-      current_block,
-      daily,
-      weekly: buildCells(deptRuns, "weekly"),
-      monthly: buildCells(deptRuns, "monthly", cfg?.monthly_send_day),
+      current_block: null,
+      // Built per anchor by anchorRow().
+      daily: [],
+      weekly: [],
+      monthly: [],
       config: {
         daily_enabled: cfg?.daily_enabled !== false,            // default on
         weekly_enabled: cfg?.weekly_enabled === true,
@@ -325,7 +303,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     (a.department ?? "").localeCompare(b.department ?? "")
   );
 
-  return { rooftops, source: "supabase", today, lastSynced: new Date() };
+  return { rooftops, source: "supabase", today: anchorReq ?? "", lastSynced: now, serverDryRun };
 }
 
 /** ONE digest run's heavy fields, fetched when the cell drawer opens: its stored metrics and the
@@ -347,13 +325,14 @@ export async function loadDigestRun(runId: string): Promise<DigestRunDetail> {
  * or genuinely unclassified). */
 export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
   if (!isSupabaseConfigured) return [];
-  let configs: ConfigRow[]; let liveTeamIds: string[];
+  let configs: ConfigRow[]; let liveTeamIds: string[]; let removed: Set<string>;
   try {
     const res = await prefetchedOr(`/api/tracker/lifecycle-rooftops`, { cache: "no-store", headers: trackerAuthHeaders() });
     if (!res.ok) { console.warn("[tracker] lifecycle-only read failed: HTTP", res.status); return []; }
     const j = await res.json();
     configs = (j.configs ?? []) as ConfigRow[];
     liveTeamIds = (j.liveTeamIds ?? []) as string[];
+    removed = new Set((j.removedTeamIds ?? []) as string[]);
   } catch (e) { console.warn("[tracker] lifecycle-only read error:", e); return []; }
   const haveGridRow = new Set(liveTeamIds);
   return configs
@@ -372,6 +351,7 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
       ae: nameFromEmail(c.ae_poc) || undefined,
       ob: nameFromEmail(c.ob_poc) || undefined,
       lifecycleOnly: true,
+      removedFromEmailer: removed.has(c.team_id),
       csm: nameFromEmail(c.cs_poc) || c.csm_name?.trim() || "Unassigned",
       group: c.enterprise_id ? `Ent ${c.enterprise_id.slice(0, 6)}` : (c.enterprise_name ?? undefined),
       timezone: c.timezone ?? undefined,
@@ -401,7 +381,10 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
 }
 
 /* ── Transactional emails (roi_event_emails) — per-event sends, monitored per rooftop ───── */
-export type EventTypeCount = { total: number; sent: number; notSent: number; opened?: number; lastAt?: string | null; byDir?: { inbound: number; outbound: number } };
+/** Per (rooftop, dept, type). total / sent / notSent / opened all come from the ledger
+ * (roi_event_email_counts, all time) so a cell never divides one source by another. chEvents is
+ * the separate ClickHouse event count (120 days), shown as information only. */
+export type EventTypeCount = { total: number; sent: number; notSent: number; opened?: number; lastAt?: string | null; chEvents?: number; byDir?: { inbound: number; outbound: number } };
 /** counts keyed by `${team_id}::${department}` → { [email_type]: EventTypeCount } */
 export type EventCounts = Map<string, Record<string, EventTypeCount>>;
 export type EventEmailRow = {
@@ -409,6 +392,9 @@ export type EventEmailRow = {
   subject: string | null; recipients: { email: string; received?: boolean; opened?: boolean; opened_at?: string }[] | null;
   sent_at: string | null; created_at: string; opened_at: string | null; open_count?: number | null;
   reason: string | null; rendered_html: string | null; event_key: string; message_id: string | null;
+  /** Drill-down rows: the ClickHouse event's own key and the cron's key for it. */
+  source_event_key?: string;
+  cron_event_key?: string;
 };
 
 /** Per-(rooftop, dept, type) counts. TOTAL comes live from ClickHouse (all real events,
@@ -453,9 +439,13 @@ export async function loadEventCounts(): Promise<EventCounts> {
       for (const [k, a] of agg) {
         const sep = k.split("::"); const email_type = sep.pop() as string; const key = sep.join("::");
         const rec = m.get(key) ?? {};
-        const sent = rec[email_type]?.sent ?? 0;
-        const opened = rec[email_type]?.opened ?? 0; // preserve the view's opened count through the CH total override
-        rec[email_type] = { total: a.total, sent, notSent: Math.max(0, a.total - sent), opened, lastAt: a.lastAt ?? rec[email_type]?.lastAt ?? null, byDir: { inbound: a.inbound, outbound: a.outbound } };
+        const prev = rec[email_type];
+        // The ledger's numbers stay as they are; ClickHouse adds its own count beside them. (It used
+        // to REPLACE `total`, so every cell and KPI divided ledger emails by raw events: 205%.)
+        rec[email_type] = {
+          total: prev?.total ?? 0, sent: prev?.sent ?? 0, notSent: prev?.notSent ?? 0, opened: prev?.opened ?? 0,
+          lastAt: prev?.lastAt ?? a.lastAt ?? null, chEvents: a.total, byDir: { inbound: a.inbound, outbound: a.outbound },
+        };
         m.set(key, rec);
       }
     }
@@ -518,28 +508,73 @@ export async function loadEventEmails(
  * per-day analytics modal (the plain EventEmailRow drops both). */
 export type EventEmailDayRow = EventEmailRow & { team_id: string; department: string };
 
-/** Every produced transactional email of ONE type across the given teams — newest first,
- * bounded. Powers the transactional Sent/Opened analytics modal: its per-day trend and the
- * per-day drill-down. Reads roi_event_emails directly, the same "what actually got produced"
- * record the Sent (status='sent') and Opened (opened_at) KPI numerators are computed from, so
- * the modal's counts reconcile with the KPI chips. `direction` is intentionally NOT filtered —
- * roi_event_emails has no direction column and the `sent`/`opened` numerators aren't
- * direction-split either (see loadEventEmails). */
-export async function loadEventEmailsByType(
+/** Per-day counts of ONE type's sent (or opened) emails across the given teams, for the last `days`
+ * calendar days in `tz`. Exact counts from the server: the old single read was capped at 1,000
+ * rows, about two days of post-conversation history (A4 F15). */
+export async function loadEventDayCountsByType(
   teamIds: string[], emailType: string,
-  opts: { department?: string | null; limit?: number } = {},
-): Promise<EventEmailDayRow[]> {
+  opts: { department?: string | null; metric?: "sent" | "opened"; days?: number; tz?: string } = {},
+): Promise<{ day: string; count: number }[] | null> {
   if (!isSupabaseConfigured || teamIds.length === 0) return [];
   try {
     const res = await fetch(`/api/tracker/event-emails-by-type`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ teamIds, emailType, department: opts.department ?? null, limit: opts.limit ?? 3000 }),
+      body: JSON.stringify({ teamIds, emailType, department: opts.department ?? null, metric: opts.metric ?? "sent", days: opts.days ?? 30, tz: opts.tz }),
     });
-    if (!res.ok) { console.warn("[tracker] event emails by type read failed: HTTP", res.status); return []; }
+    if (!res.ok) { console.warn("[tracker] event day counts read failed: HTTP", res.status); return null; }
     const j = await res.json();
-    return (j.rows ?? []) as EventEmailDayRow[];
-  } catch (e) { console.warn("[tracker] event emails by type read error:", e); return []; }
+    return (j.days ?? []) as { day: string; count: number }[];
+  } catch (e) { console.warn("[tracker] event day counts read error:", e); return null; }
+}
+
+/** ONE day's sent (or opened) emails of a type across the given teams (up to 2,000). */
+export async function loadEventEmailsForDay(
+  teamIds: string[], emailType: string, day: string,
+  opts: { department?: string | null; metric?: "sent" | "opened"; tz?: string } = {},
+): Promise<{ rows: EventEmailDayRow[]; total: number } | null> {
+  if (!isSupabaseConfigured || teamIds.length === 0) return { rows: [], total: 0 };
+  try {
+    const res = await fetch(`/api/tracker/event-emails-by-type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamIds, emailType, department: opts.department ?? null, metric: opts.metric ?? "sent", tz: opts.tz, day }),
+    });
+    if (!res.ok) { console.warn("[tracker] event day rows read failed: HTTP", res.status); return null; }
+    const j = await res.json();
+    return { rows: (j.rows ?? []) as EventEmailDayRow[], total: Number(j.total ?? 0) };
+  } catch (e) { console.warn("[tracker] event day rows read error:", e); return null; }
+}
+
+/** The transactional KPI strip's counts: roi_event_emails by status for these teams over the last
+ * `sinceDays` days (C6: one source, one grain, one window). null = the read failed. */
+export async function loadEventStatusCounts(
+  teamIds: string[], opts: { department?: string | null; sinceDays?: number } = {},
+): Promise<Record<string, TxStatusCounts> | null> {
+  if (!isSupabaseConfigured) return {};
+  try {
+    const res = await fetch(`/api/tracker/event-status-counts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
+      body: JSON.stringify({ teamIds, department: opts.department ?? null, sinceDays: opts.sinceDays ?? 30 }),
+    });
+    if (!res.ok) { console.warn("[tracker] event status counts read failed: HTTP", res.status); return null; }
+    const j = await res.json();
+    return (j.types ?? {}) as Record<string, TxStatusCounts>;
+  } catch (e) { console.warn("[tracker] event status counts read error:", e); return null; }
+}
+
+/** Who the cron would email for (department, type), and why everyone else on the list is held. */
+export type EligibleRecipients = { eligible: { email: string; name: string | null }[]; held: { email: string; name: string | null; why: string }[] };
+export async function loadEligibleRecipients(teamId: string, department: string, type: string): Promise<EligibleRecipients | null> {
+  if (!teamId) return null;
+  try {
+    const qs = new URLSearchParams({ teamId, department, type });
+    const res = await fetch(`/api/tracker/eligible-recipients?${qs.toString()}`, { cache: "no-store", headers: trackerAuthHeaders() });
+    if (!res.ok) { console.warn("[tracker] eligible recipients read failed: HTTP", res.status); return null; }
+    const j = await res.json();
+    return { eligible: j.eligible ?? [], held: j.held ?? [] };
+  } catch (e) { console.warn("[tracker] eligible recipients read error:", e); return null; }
 }
 
 /** Per-day mini-report counts for ONE (team×dept×type): Created / Closed (action items only) /
@@ -595,8 +630,10 @@ export async function countEventByMetric(teamIds: string[], emailType: string, m
   } catch (e) { console.warn("[tracker] lifetime event count error:", e); return 0; }
 }
 
-/** One eligible event from ClickHouse (history + live), via /api/email/roi-event-list. */
-type CHEvent = { eventKey: string; customer?: string; phone?: string; createdAt: string; direction?: string; label?: string; sub?: string };
+/** One eligible event from ClickHouse (history + live), via /api/email/roi-event-list. `cronEventKey`
+ * is the key the events cron files this event's email under; `stored` is the email the pipeline
+ * produced for it, matched on that key by the server (null when none). */
+type CHEvent = { eventKey: string; cronEventKey?: string; customer?: string; phone?: string; createdAt: string; direction?: string; label?: string; sub?: string; stored?: (EventEmailRow & { department?: string }) | null };
 
 /** The transactional drill-down FEED: every eligible event from ClickHouse (all dates, history
  * included), each filed under the date it was supposed to go, with real send-status overlaid from
@@ -623,18 +660,18 @@ export async function loadEventFeed(
     if (r.ok && Array.isArray((j as { events?: unknown }).events)) ch = (j as { events: CHEvent[] }).events;
   } catch { /* fall through to stored-only */ }
   if (ch === null) return loadEventEmails(teamId, department, emailType, { limit, offset, direction });
-  // 2) overlay real send-status from roi_event_emails, matched by event_key
-  const stored = (await loadEventEmails(teamId, department, emailType, { limit: 200, offset: 0, direction })).rows;
-  const byKey = new Map(stored.map((s) => [s.event_key, s]));
+  // 2) The server already matched each event to the email the pipeline produced for it, on the
+  // cron's key (A4 F13: matching on the list's own key never hit, so every row read "eligible").
   const rows: EventEmailRow[] = ch.map((ev) => {
-    const s = byKey.get(ev.eventKey);
-    if (s) return s; // a real generated/sent email — keep its exact status / html / opens
+    const cronKey = ev.cronEventKey || ev.eventKey;
+    if (ev.stored) return { ...ev.stored, source_event_key: ev.eventKey, cron_event_key: cronKey };
     return {
-      id: "", email_type: emailType, status: "eligible",
+      id: "", email_type: emailType, status: "not_emailed",
       subject: ev.label || null, recipients: null, sent_at: null,
       created_at: (ev.createdAt || "").replace(" ", "T"), // CH DateTime → ISO-ish for Date()
       opened_at: null, open_count: 0, reason: ev.sub || null,
       rendered_html: null, event_key: ev.eventKey, message_id: null,
+      source_event_key: ev.eventKey, cron_event_key: cronKey,
     };
   });
   return { rows, hasMore: ch.length === limit };
