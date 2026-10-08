@@ -92,3 +92,22 @@ export function periodLabel(cadence: PeriodCadence, colDate: string): string {
   if (cadence === "weekly") return `${fmt(new Date(end.getTime() - 6 * DAY_MS))} – ${fmt(end)}`;
   return fmt(end);
 }
+
+/** The cron's own key for the period a column shows (cron convention: the local_date it stamps).
+ *   daily   → the column date (the report date);
+ *   weekly  → the day before the weekly send day, inside the column's 7 days (runner cadenceWindow
+ *             stamps "yesterday" on the send day, and a 7-day column holds exactly one such day);
+ *   monthly → the 1st of the column's month.
+ * This is the key "Generate & send" passes as localDate so a missed period is rebuilt AS that period. */
+export function periodKeyForColumn(cadence: PeriodCadence, colDate: string, weeklySendDow = 1): string {
+  const end = toUtc(colDate);
+  if (bad(end)) return "";
+  if (cadence === "daily") return toIso(end);
+  if (cadence === "monthly") return toIso(new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1)));
+  const dow = ((Number(weeklySendDow) % 7) + 7) % 7;
+  for (let back = 0; back < 7; back++) {
+    const d = new Date(end.getTime() - back * DAY_MS);
+    if (new Date(d.getTime() + DAY_MS).getUTCDay() === dow) return toIso(d);
+  }
+  return toIso(end);
+}
