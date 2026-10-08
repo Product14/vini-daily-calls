@@ -3927,10 +3927,14 @@ app.post("/api/tracker/dry-run", requireTrackerAuth, async (req, res) => {
 // at each rooftop's local send-hour (idempotent: one send per rooftop per day).
 // Vercel sends `Authorization: Bearer <CRON_SECRET>` when CRON_SECRET is configured.
 app.get("/api/cron/roi-email", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: "roi-email-daily" });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   try {
     const { runOnce } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
     // Daily only. Weekly/monthly used to run here AFTER runOnce, in the same 300s function, so on
@@ -3954,12 +3958,16 @@ app.get("/api/cron/roi-email", async (req, res) => {
 // or by the other. Off its send day a pass is a cheap no-op (gated on weekly_send_dow /
 // monthly_send_day + the send hour before any metrics are fetched).
 app.get("/api/cron/roi-digest/:cadence", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   const cadence = req.params.cadence;
   if (cadence !== "weekly" && cadence !== "monthly") return res.status(404).json({ error: "cadence must be weekly or monthly" });
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: `roi-digest-${cadence}` });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   const Cad = cadence === "weekly" ? "Weekly" : "Monthly";
   try {
     const { runCadence } = require("./roi-cron/runner.cjs");
@@ -4001,8 +4009,8 @@ app.get("/api/email/roi-render-preview", requireTrackerAuth, async (req, res) =>
 // write roi_digest_runs. Guarded by CRON_SECRET like the cron routes.
 //   GET /api/cron/roi-backfill?start=2026-06-23&end=2026-06-24
 app.get("/api/cron/roi-backfill", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   const { start, end } = req.query;
@@ -4011,6 +4019,10 @@ app.get("/api/cron/roi-backfill", async (req, res) => {
     return res.status(400).json({ ok: false, error: "start and end are required as YYYY-MM-DD (e.g. ?start=2026-06-23&end=2026-06-24)" });
   }
   if (start > end) return res.status(400).json({ ok: false, error: "start must be <= end" });
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: "roi-backfill" });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   try {
     const { backfill } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
     const summary = await backfill(start, end);
@@ -4025,10 +4037,14 @@ app.get("/api/cron/roi-backfill", async (req, res) => {
 // Sends the per-event emails (post-appointment / post-conversation / action-item / overdue)
 // for rooftops that enabled them in roi_rooftop_config. Dedup via roi_event_emails.
 app.get(["/api/cron/roi-events", "/api/cron/roi-events/shard/:shard/:shards"], async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: (req.params.shards ? `roi-events-shard-${req.params.shard}-of-${req.params.shards}` : "roi-events") });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   try {
     const { runOnce } = require("./roi-cron/eventRunner.cjs");
     // vercel.json runs this as N shards (/api/cron/roi-events/shard/<i>/<N>), each with its own
@@ -4053,8 +4069,8 @@ app.get(["/api/cron/roi-events", "/api/cron/roi-events/shard/:shard/:shards"], a
 // roi_rooftop_config.cs_poc — the authoritative CSM the Email Tracker reads.
 // Idempotent; safe on a schedule. Vercel sends Authorization: Bearer <secret>.
 app.get("/api/cron/csm-sync", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
@@ -4071,8 +4087,8 @@ app.get("/api/cron/csm-sync", async (req, res) => {
 // new ones to roi_live_departments (held: is_live=true, dry_run=true → no email).
 // Scheduled daily in vercel.json. Same CRON_SECRET auth as the send cron.
 app.get("/api/cron/sync-live", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
@@ -4089,8 +4105,8 @@ app.get("/api/cron/sync-live", async (req, res) => {
 // contracting / live / churn) from ClickHouse into roi_rooftop_config, so the tracker
 // can show rooftops that aren't technically live yet. Scheduled daily in vercel.json.
 app.get("/api/cron/sync-lifecycle", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
@@ -4122,8 +4138,8 @@ app.get("/api/cron/sync-lifecycle", async (req, res) => {
 //   run in this long; SYNC_DATA_STALE_DAYS (default 2) — newest aggregated day
 //   is this far behind today (the user-visible "reports frozen" symptom).
 app.get("/api/cron/sync-health", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   const alert = async (title, detail) => {
@@ -4316,8 +4332,8 @@ app.get("/api/metrics", async (req, res) => {
 // roi_cron_runs so "when did each tier last sync" is always answerable.
 function makeAgentsRefreshRoute(mode, { rooftop: rooftopFn, overall: overallFn }) {
   return async (req, res) => {
-    const secret = process.env.CRON_SECRET;
-    if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+    if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
       return res.status(401).json({ error: "unauthorized" });
     }
     const ranAt = new Date().toISOString();
@@ -4353,8 +4369,8 @@ function makeAgentsRefreshRoute(mode, { rooftop: rooftopFn, overall: overallFn }
 
 // Keeps the tracker's transactional event totals precomputed (see /api/email/roi-event-counts).
 app.get("/api/cron/tracker-counts", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   if (!hasClickhouseCreds()) return res.status(200).json({ ok: false, error: "ClickHouse creds not set" });
