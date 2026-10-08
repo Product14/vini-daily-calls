@@ -32,14 +32,17 @@ const T = require("../../src/email/transactionalTemplates.cjs");
 const emailValue = require("./emailValue.cjs");
 // SMS channel — the Twilio companion to sendMail(). Gated per rooftop by roi_rooftop_config.sms_enabled
 // and per recipient by roi_recipients.sms_enabled + phone. Its own dedupe ledger (roi_event_sms).
-const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
+const { sendSms, SMS_DRY_RUN, isAuthError: isSmsAuthError } = require("./sendSms.cjs");
 // Per-recipient subscription matrix. pickTieredRecipients is a pass-through: role never excludes.
 const { isSubscribed, pickTieredRecipients, isChurned } = require("./subscriptions.cjs");
 const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 // Self-healing dealer-timezone lookup (live Spyne working-hours API) — see resolveTz.cjs for why.
-const { resolveTz, resolveWorkingHours, primeTeamDetails } = require("./resolveTz.cjs");
+const { resolveTz, resolveWorkingDay, primeTeamDetails } = require("./resolveTz.cjs");
 // Lead-capture field enrichment (ClickHouse) for rooftops on post_conversation_template='lead_capture'.
 const leadCaptureCH = require("./leadCaptureCH.cjs");
+// The ONE definition of every ledger event key, shared with the tracker's drill-down (eventPreviewCH)
+// so a sent row and its drill-down row carry the same key. See leadCaptureCH.eventKeys.
+const { eventKeys, asUtcDate, isOptOutBody } = leadCaptureCH;
 // Deliverability gate (shared with the digest runner) — an address that is malformed, mistyped or
 // already bouncing is never mailed, because its bounces are scored against the sending domain.
 const emailHealth = require("./emailHealth.cjs");
@@ -93,9 +96,23 @@ function shardOf(teamId, shards) {
   return h % shards;
 }
 // meetings.meta.source values that mean "this appointment row is not one Vini booked" — no
-// post_appointment email, on either channel. Kept as a set so a sibling value can be muted with a
-// one-word change; 'callback' is deliberately NOT in here (it hasn't been asked for or verified).
-const NON_VINI_META_SOURCES = new Set(["warm_transfer"]);
+// post_appointment email, on either channel. 'callback' joined 'warm_transfer' on 2026-10-09: the
+// reporting-vini live meetings path already drops both (meetings.ts PULLED_IN_META_SOURCES), and two
+// callback rows were emailed as new bookings in the 10-05..10-08 window (A3 §2.1).
+const NON_VINI_META_SOURCES = new Set(["warm_transfer", "callback"]);
+// The ONLY cancel states the meetings table carries — the same list as reporting-vini
+// src/lib/reports/appointmentStatus.ts CANCELLED_MEETING_STATUSES. 'noshow' and 'completed' are NOT
+// cancellations (they were real bookings). Change both lists together.
+const CANCELLED_MEETING_STATUSES = new Set(["cancelled", "cancellation_requested"]);
+const isCancelledStatus = (s) => CANCELLED_MEETING_STATUSES.has(String(s || "").trim().toLowerCase());
+// How far PAST its start time an appointment may still trigger a "new appointment" email. A booking
+// made this morning for a slot that has just passed is still news; a row whose slot was days or years
+// ago is not (the DMS-history flood documented at apptSkipReason). Absolute age, not dealer-local:
+// 6h keeps same-day bookings and blocks anything from a previous day.
+const APPT_PAST_GRACE_MS = Number(process.env.EVENT_APPT_PAST_GRACE_MIN || 360) * 60000;
+// Meetings looked at per rooftop·dept per pass. Was a silent slice(0, 50); a rooftop booking more than
+// this inside one look-back is now counted as a capped feed in the pass summary.
+const APPT_FEED_MAX = Number(process.env.EVENT_APPT_FEED_MAX || 200);
 // SMS post-conversation is batched to END OF DAY (the thread runs all day, so one email per lead/day
 // instead of one per message). Fires once the dealer-local hour reaches this (default 8pm). Calls stay instant.
 const SMS_EOD_HOUR = Number(process.env.EVENT_SMS_EOD_HOUR || 20);
@@ -216,32 +233,98 @@ function localHourMin(tz) {
     return { h, m: g("minute") };
   } catch { return { h: 0, m: 0 }; }
 }
-// Appointment time in the dealer's local zone, e.g. "Mon, Jun 23 · 2:30 PM".
-function fmtSched(iso, tz) {
-  if (!iso) return "";
-  const d = new Date(iso); if (isNaN(d.getTime())) return "";
+// Everything the post-appointment path needs to know about a start time, from ONE parse (ported from
+// 5fd5046, which was lost when the events cron was rewritten):
+//   when    — dealer-local "Mon, Jun 23 · 2:30 PM", carrying the YEAR when it's not this year
+//   ts/past — is this appointment already in the past (the "new appointment" gate below)
+//   offYear — the appointment is not in the dealer's current calendar year
+// offYear exists because a year-LESS date is indistinguishable from a future one: Honda of Downtown
+// LA (Aug 2026) received "Sat, Dec 21 · 11:00 AM" for a 2024-12-21 appointment and read it as
+// something in the future. Zone-less start times ("2026-08-14 17:43:06") are read as UTC explicitly.
+function schedInfo(iso, tz) {
+  const d = asUtcDate(iso);
+  if (!d) return { ts: null, past: false, offYear: false, when: "" };
   const z = tz || "America/New_York";
+  const yearOf = (x) => { try { return new Intl.DateTimeFormat("en-US", { timeZone: z, year: "numeric" }).format(x); } catch { return ""; } };
+  const offYear = yearOf(d) !== yearOf(new Date());
+  let when = "";
   try {
-    const dp = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: z }).format(d);
+    const dp = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", ...(offYear ? { year: "numeric" } : {}), timeZone: z }).format(d);
     const tp = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: z }).format(d);
-    return `${dp} · ${tp}`;
-  } catch { return ""; }
+    when = `${dp} · ${tp}`;
+  } catch { when = ""; }
+  return { ts: d.getTime(), past: d.getTime() < Date.now(), offYear, when };
+}
+// Appointment time in the dealer's local zone, e.g. "Mon, Jun 23 · 2:30 PM" (+ year when off-year).
+function fmtSched(iso, tz) { return schedInfo(iso, tz).when; }
+// `relDay` ("Today" / "Tomorrow" / "Fri, Sep 27") is what the appointment email LEADS with, and it
+// never carries a year — so it may only be used when it cannot mislead.
+const safeRelDay = (sched, relDay) => (sched.offYear || sched.past ? "" : relDay);
+// ── APPOINTMENT-EMAIL GATES ────────────────────────────────────────────────────────────────────
+// Is this meetings-feed row a genuine NEW appointment? Returns a skip reason ('past' | 'cancelled' |
+// 'slot_dupe') or null to send. `seenSlots` is a per-pass, per-rooftop+dept Set (mutated here).
+//
+// Honda of Downtown Los Angeles, 2026-08-14: ONE call produced 7 rows — the dealer's DMS appointment
+// HISTORY written back as fresh source='spyne'/status='scheduled' meetings (start times Jul-2024 →
+// Jan-2026, each with its own meeting id) → 7 "New appointment" emails in 6 seconds. A reschedule
+// arrives the same way: a 'cancelled' row plus a new 'scheduled' one for the SAME slot, 2 seconds
+// apart (Toronto Honda) → 2 emails, one of them announcing a cancelled slot.
+function apptSkipReason(m, sched, seenSlots, now = Date.now()) {
+  // (1) Already happened → not a new appointment, whatever the row claims.
+  if (sched.ts !== null && sched.ts < now - APPT_PAST_GRACE_MS) return "past";
+  // (2) A cancelled row is not a booking (reporting-vini's list — see CANCELLED_MEETING_STATUSES).
+  if (isCancelledStatus(m.status)) return "cancelled";
+  // (3) Same lead + same start time = ONE booking however many meeting ids it arrives under.
+  const slotKey = `${m.leadId || m.customer || m.phone || m.id}|${sched.ts ?? m.when ?? ""}`;
+  if (seenSlots.has(slotKey)) return "slot_dupe";
+  seenSlots.add(slotKey);
+  return null;
+}
+// The cross-PASS half of gate (3): a different, still-valid Vini booking for the same lead and the same
+// start minute was created before this one, so this row is the duplicate (the first one was announced
+// when it arrived). A cancelled twin does not count — that is a reschedule, and this row is the booking.
+// `rows` are the ClickHouse truth rows for this rooftop's leads (fetchMeetingsTruth).
+function hasEarlierTwin(t, rows) {
+  if (!t || !t.leadId || !t.startTime) return false;
+  const minute = (x) => { const d = asUtcDate(x); return d ? Math.floor(d.getTime() / 60000) : null; };
+  const slot = minute(t.startTime);
+  if (slot === null) return false;
+  const idOf = (r) => String(r.meetingId || r.rowId || "");
+  return (rows || []).some((o) => o.rowId !== t.rowId && o.leadId === t.leadId && o.source === "spyne"
+    && !NON_VINI_META_SOURCES.has(o.metaSource) && !isCancelledStatus(o.status)
+    && Number(o.isActive) !== 0 && Number(o.deleted) !== 1 && minute(o.startTime) === slot
+    && (String(o.createdAt) < String(t.createdAt) || (String(o.createdAt) === String(t.createdAt) && idOf(o) < idOf(t))));
 }
 // A customer-originated SMS (vs an AI/agent outbound) — the anchor for "the customer responded".
 const isInboundSms = (mm) => !!mm && (mm.direction === "in" || mm.direction === "inbound" || mm.authorType === "human");
-// Split a lead's SMS messages into SESSIONS: a new session begins after a lull of > gapMin minutes
-// of silence. Returns [{ startAt, _lastT, msgs, hasReply }] in order. Powers the 'session' cadence.
-function smsSessions(msgs, gapMin) {
-  const sorted = (msgs || []).filter((x) => x && x.at).slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
-  const out = [];
-  for (const mm of sorted) {
-    const t = new Date(mm.at).getTime();
-    if (isNaN(t)) continue;
-    const cur = out[out.length - 1];
-    if (!cur || (t - cur._lastT) > gapMin * 60000) out.push({ startAt: mm.at, _lastT: t, msgs: [mm], hasReply: isInboundSms(mm) });
-    else { cur._lastT = t; cur.msgs.push(mm); cur.hasReply = cur.hasReply || isInboundSms(mm); }
-  }
-  return out;
+// A REAL customer reply: inbound and not just an opt-out keyword ("STOP" is the customer leaving, not
+// engaging — canonical rule, same list as reporting-vini agentBaseFact.sql). SMS only: in a website chat
+// "no" is an ordinary answer.
+const isRealSmsReply = (mm) => isInboundSms(mm) && !isOptOutBody(mm.body);
+// Thread-level: the feed's `hasReply` (reporting-vini will exclude opt-out-only replies itself, WS-D);
+// until then the visible bubbles are checked. A thread whose visible customer bubbles are all opt-out
+// keywords is not a conversation. With no visible customer bubble the feed's flag is all there is.
+function smsThreadHasRealReply(cv) {
+  if (!cv || cv.hasReply === false) return false;
+  const human = (cv.sms || []).filter(isInboundSms);
+  if (!human.length) return !!cv.hasReply;
+  return human.some((b) => !isOptOutBody(b.body));
+}
+// Split a lead's SMS messages into SESSIONS (shared definition — see leadCaptureCH.eventKeys).
+const smsSessions = eventKeys.smsSessions;
+// A call the model flagged as spam (report.spam). Accepts the shapes a feed may use.
+const isSpamCall = (cv) => !!cv && (cv.spam === true || /^(yes|true)$/i.test(String(cv.spam == null ? "" : cv.spam).trim()));
+// The call's own direction, by the spine's rule when the feed carries the raw fields: callType
+// 'outboundPhoneCall', or a call-back to the outbound line (isCallbackFromOutbound / callbackCampaignId),
+// is OUTBOUND. Otherwise the feed's `direction` — which reporting-vini derives from report_inOutType, blank
+// or 'inbound' on 48% of outboundPhoneCall rows (A3-16) until WS-D switches it to callType + callback flip.
+function callDirection(cv) {
+  if (!cv) return "inbound";
+  const ct = String(cv.callType || "").toLowerCase();
+  if (ct === "outboundphonecall") return "outbound";
+  if (cv.isCallbackFromOutbound === true || Number(cv.isCallbackFromOutbound) === 1 || cv.callbackCampaignId) return "outbound";
+  if (ct === "inboundphonecall" || ct === "webcall") return "inbound";
+  return String(cv.direction || "").toLowerCase() === "outbound" ? "outbound" : "inbound";
 }
 // The reporting-vini read API now requires a credential (it returns per-customer PII). Forward the
 // trusted service secret (preferred) or the Spyne token so these server-to-server calls authorize;
@@ -266,17 +349,76 @@ let _feedDegraded = false;
 // `_feedDegraded` above, whose alert text specifically names ClickHouse/conversations/action-items.
 let _meetingsFeedDegraded = false;
 let _meetingsFeedDegradedDetail = "";
-async function apiJson(path) {
+// ── The Spyne token travels in a HEADER, not the URL (2026-10-09, A3-20) ───────────────────────────
+// It used to ride every meetings call as `&auth_key=<token>`, so it sat in reporting-vini's request logs
+// and in any shared-cache key. Now:
+//   • no service secret → the token IS the bearer (reporting-vini reads it there as both the credential
+//     and the downstream Spyne token — spyneTokenFrom skips only the CRON_SECRET);
+//   • service secret present → the secret is the bearer and the token goes in `X-Spyne-Token`
+//     (reporting-vini reads it once WS-D lands; until then it falls back to its own SPYNE_API_TOKEN).
+// Backward compatible: REPORTING_TOKEN_IN_URL=1 restores the old query param, and if a meetings read
+// comes back degraded while the token was header-only, it is retried once with the old param and, if that
+// one is healthy, the old form is kept for the rest of this instance (logged), so deploying this before
+// reporting-vini reads the header can never take appointment emails down.
+const TOKEN_IN_URL_ENV = /^(1|true|yes)$/i.test(String(process.env.REPORTING_TOKEN_IN_URL || "").trim());
+let _tokenInUrlFallback = false;
+function feedHeaders(withToken) {
   const headers = REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {};
-  const res = await fetch(`${REPORTING_API_BASE}${path}`, { headers, signal: AbortSignal.timeout(12000) });
+  if (withToken && SPYNE_TOKEN && REPORTING_AUTH !== SPYNE_TOKEN) headers["X-Spyne-Token"] = SPYNE_TOKEN;
+  return headers;
+}
+const tokenNeedsUrl = () => !!SPYNE_TOKEN && REPORTING_AUTH !== SPYNE_TOKEN;
+async function apiJsonOnce(path, withToken, tokenInUrl) {
+  const full = tokenInUrl ? `${path}${path.includes("?") ? "&" : "?"}auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : path;
+  const res = await fetch(`${REPORTING_API_BASE}${full}`, { headers: feedHeaders(withToken), signal: AbortSignal.timeout(12000) });
   if (!res.ok) throw new Error(`reporting-api ${res.status} ${path}`);
-  const j = await res.json();
+  return res.json();
+}
+// opts.spyneToken: forward the dealer-side Spyne token (the meetings feed calls the live Spyne API).
+async function apiJson(path, opts = {}) {
+  const withToken = !!opts.spyneToken;
+  const urlToken = withToken && tokenNeedsUrl() && (TOKEN_IN_URL_ENV || _tokenInUrlFallback);
+  let j = await apiJsonOnce(path, withToken, urlToken);
+  if (j && j.meetingsFeedDegraded && withToken && tokenNeedsUrl() && !urlToken) {
+    const retry = await apiJsonOnce(path, withToken, true).catch(() => null);
+    if (retry && !retry.meetingsFeedDegraded) {
+      _tokenInUrlFallback = true;
+      console.warn("[events] reporting-vini ignored X-Spyne-Token (live meetings degraded without ?auth_key) — using the query param for the rest of this instance. Ship reporting-vini's X-Spyne-Token read (spyneTokenFrom) to retire this.");
+      j = retry;
+    }
+  }
   if (j && (j.degraded || j.note === "clickhouse not configured")) _feedDegraded = true;
   if (j && j.meetingsFeedDegraded && !_meetingsFeedDegraded) {
     _meetingsFeedDegraded = true;
     _meetingsFeedDegradedDetail = String(j.meetingsFeedError || "").slice(0, 200);
   }
   return j;
+}
+// ── Feed paging (2026-10-09, A3-05) ───────────────────────────────────────────────────────────────
+// The conversations feed returned `ORDER BY createdAt DESC LIMIT n` BEFORE any gate ran, so a burst
+// pushed the older rows off the page for good (Lumos Acura, 116 actionable calls in 10 min against a
+// LIMIT 50; I 40 Autos, 410+ SMS threads a day against a LIMIT 200). When the feed says `hasMore`
+// (reporting-vini WS-D adds hasMore/nextOffset and accepts `offset`) every page is read. An older feed
+// that just fills its page with no paging fields is reported as CAPPED in the pass summary, never silent.
+const FEED_MAX_PAGES = Number(process.env.EVENT_FEED_MAX_PAGES || 10);
+async function fetchFeedPages(path, listKey, limit, opts = {}) {
+  const seen = new Map();
+  let offset = 0;
+  for (let page = 0; page < FEED_MAX_PAGES; page++) {
+    const j = await apiJson(`${path}&limit=${limit}${offset ? `&offset=${offset}` : ""}`, opts);
+    const rows = (j && j[listKey]) || [];
+    for (const r of rows) { const k = r && r.id != null ? String(r.id) : `#${seen.size}`; if (!seen.has(k)) seen.set(k, r); }
+    if (j && j.hasMore === true && rows.length) {
+      const next = j.nextOffset != null ? Number(j.nextOffset) : offset + rows.length;
+      if (!(next > offset)) return { rows: [...seen.values()], capped: true };
+      offset = next;
+      continue;
+    }
+    // No paging contract and a full page → there may be more rows the feed would not give us.
+    const capped = j && j.hasMore === undefined && rows.length >= limit;
+    return { rows: [...seen.values()], capped: !!capped };
+  }
+  return { rows: [...seen.values()], capped: true };
 }
 // The /api/action-items feed hard-caps `limit` at 200 server-side regardless of what's requested —
 // a single fetch with a fixed limit silently truncates any rooftop whose backlog (recent/open/overdue)
@@ -309,11 +451,19 @@ async function fetchAllActionItems(qs) {
 // Fetch + shape the ROOFTOP-WIDE overdue digest payload (one email per team·dept·slot, not per
 // lead). Shared by runOnce and previewEvent so the scheduled email and the tracker's re-render
 // can never drift apart.
+//
+// HEADLINE COUNTS (2026-10-09, A3-07): the "N pending" number is ONE uncapped lead-grain COUNT straight
+// from ClickHouse with the NON_ACTIONABLE intent filter applied per item in SQL (leadCaptureCH
+// countActionItemLeads) — not the length of up to 2,000 paged feed rows filtered after the feed's
+// per-lead collapse (I 40 Autos read 1,037 against 4,138). The list below the headline still comes from
+// the feed (oldest-due first). Without ClickHouse the old paged count is the fallback, flagged `capped`
+// when it hit the page cap so the pass summary says the number may be short.
 async function overdueDigestPayload(teamId, dept) {
-  const [ov, open] = await Promise.all([
+  const [ov, counts] = await Promise.all([
     fetchAllActionItems(`team_id=${teamId}&serviceType=${dept}&scope=overdue`),
-    fetchAllActionItems(`team_id=${teamId}&serviceType=${dept}&scope=open`),
+    leadCaptureCH.countActionItemLeads(teamId, dept, NON_ACTIONABLE_INTENTS),
   ]);
+  const open = counts ? { total: counts.open } : await fetchAllActionItems(`team_id=${teamId}&serviceType=${dept}&scope=open`);
   const overdue = ov.actionItems || [];
   // Oldest-due-first = most overdue, so the top-10 list always keeps the most urgent items visible.
   const topItems = overdue.slice().sort((a, b) => {
@@ -322,8 +472,12 @@ async function overdueDigestPayload(teamId, dept) {
     return adue - bdue;
   }).slice(0, 10);
   return {
-    topItems, totalOverdueCount: overdue.length, totalPendingAllLeads: open.total,
-    capped: !!(ov.capped || open.capped),
+    topItems,
+    totalOverdueCount: counts ? counts.overdue : overdue.length,
+    totalPendingAllLeads: open.total,
+    countSource: counts ? "clickhouse" : "feed",
+    // Only a short HEADLINE is worth flagging: with the ClickHouse count, a capped list is just a list.
+    capped: counts ? false : !!(ov.capped || open.capped),
   };
 }
 
@@ -332,10 +486,19 @@ function links(team, ent, dept) {
   return { appointment: `${CONSOLE_BASE}/appointments${q}`, conversations: `${CONSOLE_BASE}/conversations${q}`, actionItems: `${CONSOLE_BASE}/action-items${q}`, console: CONSOLE_BASE };
 }
 
-// MTD appointment count for the post-appointment "additional value" strip.
-async function apptMTD(team, dept) {
+// MTD appointment count for the post-appointment "additional value" strip. STORE-LOCAL month to date,
+// INCLUDING today — the same window as reporting-vini's `mtd` bucket (liveData.ts rangeFor: start = the
+// 1st of the store's month, end EXCLUSIVE = store-local tomorrow). It used to send the UTC month with
+// end=today, which /api/reports treats as exclusive, so the strip left out the very booking the email
+// announced and read 0 on the 1st (A3-10).
+const shiftDayISO = (day, n) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+function mtdWindow(tz, now) {
+  const today = eventKeys.localDay(now == null ? new Date().toISOString() : now, tz) || todayISO();
+  return { start: `${today.slice(0, 7)}-01`, end: shiftDayISO(today, 1) };
+}
+async function apptMTD(team, dept, tz) {
   try {
-    const start = todayISO().slice(0, 8) + "01", end = todayISO();
+    const { start, end } = mtdWindow(tz);
     const j = await apiJson(`/api/reports?team_id=${team}&start=${start}&end=${end}`);
     const D = dept === "service" ? "Service" : "Sales";
     const byName = {}; for (const a of j.agents || []) byName[a.name] = a;
@@ -419,19 +582,137 @@ async function claim(base, eventKey) {
   return data && data[0] ? data[0].id : null;
 }
 const finish = (id, patch) => sb.from("roi_event_emails").update(patch).eq("id", id);
+// Has this event already been handled under ANY of its ids? An appointment's canonical key is its
+// meeting_id, but before 2026-10-09 the same meeting could be keyed by its Mongo _id instead (A3-01) —
+// a booking emailed under the old id just before a deploy must not go out again under the new one.
+async function alreadyHandled(teamId, type, keys) {
+  const ks = [...new Set((keys || []).filter(Boolean).map(String))];
+  if (!ks.length) return false;
+  try {
+    const { data, error } = await sb.from("roi_event_emails").select("event_key").eq("team_id", teamId).eq("email_type", type).in("event_key", ks).limit(1);
+    if (error) return false; // the canonical claim's unique key still guards
+    return !!(data && data.length);
+  } catch { return false; }
+}
+// Reserve an event's OTHER id, so a path that still keys by it (an in-flight pre-deploy pass, a manual
+// resend) collides instead of emailing the same meeting twice. Recorded as suppressed with the
+// canonical key in `reason`; it never carries a send. Best-effort: a conflict means it is already held.
+async function claimAlias(base, aliasKey, canonicalKey) {
+  try {
+    await sb.from("roi_event_emails").insert({ ...base, event_key: String(aliasKey), status: "suppressed", reason: `alias_of:${canonicalKey}` }).select("id");
+  } catch { /* conflict or transient — the pre-claim check above already covers the common case */ }
+}
 
 // SMS ledger equivalents (roi_event_sms) — same claim-first dedupe, independent of the email row
 // so an event can be both emailed and texted without either blocking the other.
+// An SMS that could not go out because OUR Twilio credential was rejected is recorded with this reason
+// and stays RE-CLAIMABLE: the next pass that sees the same event (still inside its look-back) takes the
+// row back atomically and tries again. A send that failed for any other reason keeps its claim, as before.
+// Nothing re-sends past events: only an event a normal pass produces again is retried (A3-02 / A5-05).
+const SMS_AUTH_HOLD_REASON = "twilio_auth";
 async function claimSms(base, eventKey) {
   const { data, error } = await sb.from("roi_event_sms")
     .insert({ ...base, event_key: eventKey, status: "queued" })
     .select("id");
-  if (error) { if ((error.code || "") === "23505" || /duplicate|unique/i.test(error.message || "")) return null; throw error; }
+  if (error) {
+    if ((error.code || "") === "23505" || /duplicate|unique/i.test(error.message || "")) {
+      // Conditional update = atomic re-claim: only a row still sitting in the auth hold flips back.
+      const re = await sb.from("roi_event_sms").update({ status: "queued", reason: null })
+        .eq("team_id", base.team_id).eq("email_type", base.email_type).eq("event_key", eventKey)
+        .eq("status", "error").eq("reason", SMS_AUTH_HOLD_REASON).select("id");
+      return re && !re.error && re.data && re.data[0] ? re.data[0].id : null;
+    }
+    throw error;
+  }
   return data && data[0] ? data[0].id : null;
 }
 const finishSms = (id, patch) => sb.from("roi_event_sms").update(patch).eq("id", id);
 
+// ── PostgREST caps every response at 1,000 rows (A1 F14): roi_recipients is at 737, so the 1,001st
+// recipient would silently vanish from every send. Every config read in this pass pages, ordered by a
+// stable key so pages neither skip nor repeat rows.
+const PAGE_ROWS = 1000;
+async function pageAll(build) {
+  const all = [];
+  for (let from = 0; ; from += PAGE_ROWS) {
+    const res = await build().range(from, from + PAGE_ROWS - 1);
+    if (res.error) return { data: null, error: res.error };
+    const rows = res.data || [];
+    all.push(...rows);
+    if (rows.length < PAGE_ROWS) return { data: all, error: null };
+  }
+}
+async function selectRecipientsPaged(cols) {
+  const all = [];
+  for (let from = 0; ; from += PAGE_ROWS) {
+    const res = await selectRecipients(sb, cols, (q) => q.order("id", { ascending: true }).range(from, from + PAGE_ROWS - 1));
+    if (res.error) return { data: null, error: res.error };
+    const rows = res.data || [];
+    all.push(...rows);
+    if (rows.length < PAGE_ROWS) return { data: all, error: null };
+  }
+}
+
+// ── Orphan reaper (2026-10-09, A3-18 / A5-07) ──────────────────────────────────────────────────────
+// The claim row is written BEFORE the send, so a pass killed between the two leaves a `queued` row that
+// consumes the event forever and reads as nothing in the tracker. A queued row this old can only be an
+// orphan (a live pass finishes a claim in seconds; the pass budget is < 4 min), so it is marked
+// not_sent / pass_killed. It is NEVER resent: the email may or may not have left before the kill, and a
+// duplicate customer email is worse than an honest "not sent". Scoped to this shard's rooftops.
+const REAP_QUEUED_AFTER_MS = Number(process.env.EVENT_REAP_QUEUED_AFTER_MIN || 15) * 60000;
+async function reapOrphanedClaims(teamIds, now = Date.now()) {
+  const ids = [...new Set((teamIds || []).filter(Boolean))];
+  if (!ids.length) return 0;
+  const cutoff = new Date(now - REAP_QUEUED_AFTER_MS).toISOString();
+  let reaped = 0;
+  for (const table of ["roi_event_emails", "roi_event_sms"]) {
+    try {
+      const { data, error } = await sb.from(table).update({ status: "not_sent", reason: "pass_killed" })
+        .eq("status", "queued").lt("created_at", cutoff).in("team_id", ids).select("id");
+      if (error) console.warn(`[roi-event] reaper skipped ${table}: ${String(error.message || error).slice(0, 140)}`);
+      else reaped += (data || []).length;
+    } catch (e) { console.warn(`[roi-event] reaper skipped ${table}: ${String(e).slice(0, 140)}`); }
+  }
+  return reaped;
+}
+
+// ── roi_cron_runs (2026-10-09, A5-06) — one row per events pass, read by the safety dead-man check ──
+// source: roi-events-shard-<i>-of-<N> (0-based i, as in /api/cron/roi-events/shard/<i>/<N>) or roi-events.
+const cronRunSource = (shard, shards) => (shards > 1 ? `roi-events-shard-${shard}-of-${shards}` : "roi-events");
+async function recordCronRun(source, ok, summary) {
+  try {
+    const { error } = await sb.from("roi_cron_runs").insert({ source, ok, summary });
+    if (error) console.warn(`[roi-event] roi_cron_runs write failed: ${String(error.message || error).slice(0, 140)}`);
+  } catch (e) { console.warn(`[roi-event] roi_cron_runs write failed: ${String(e).slice(0, 140)}`); }
+}
+
 async function runOnce(opts = {}) {
+  const startedAt = new Date();
+  const shards = Math.max(1, Math.floor(Number(opts.shards)) || 1);
+  const shard = Math.min(shards - 1, Math.max(0, Math.floor(Number(opts.shard)) || 0));
+  const source = cronRunSource(shard, shards);
+  let out;
+  try {
+    out = await runPass(opts);
+  } catch (e) {
+    const finishedAt = new Date();
+    await recordCronRun(source, false, {
+      startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(), elapsedMs: finishedAt - startedAt,
+      error: String(e && e.message ? e.message : e).slice(0, 500),
+    });
+    throw e;
+  }
+  const finishedAt = new Date();
+  await recordCronRun(source, true, {
+    ...out,
+    startedAt: startedAt.toISOString(), finishedAt: finishedAt.toISOString(), elapsedMs: finishedAt - startedAt,
+    targets: out.targets, unreached: out.unreached, sent: out.sent, errors: out.errors,
+    capped: out.feeds_capped || [],
+  });
+  return out;
+}
+
+async function runPass(opts = {}) {
   const passStart = Date.now();
   const shards = Math.max(1, Math.floor(Number(opts.shards)) || 1);
   const shard = Math.min(shards - 1, Math.max(0, Math.floor(Number(opts.shard)) || 0));
@@ -443,12 +724,17 @@ async function runOnce(opts = {}) {
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const [liveRes, cfgRes, recRes] = await Promise.all([
     // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — read it from cfg, like runner.cjs.
-    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,chat_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,post_conversation_template,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date"),
-    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
+    // Ordered (team, department) for paging. Visit order no longer routes anything: SMS summaries
+    // follow the lead's own department since 2026-10-09 (see the SMS block).
+    pageAll(() => sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true).order("team_id", { ascending: true }).order("department", { ascending: true })),
+    pageAll(() => sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,post_appointment_enabled,post_conversation_enabled,chat_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_mode,post_conversation_outbound_requires_reply,post_conversation_template,action_item_sla_minutes,sms_enabled,sms_post_conversation_cadence,working_hours,lifecycle_status,churn_date").order("team_id", { ascending: true })),
+    selectRecipientsPaged("id,team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
   ]);
   if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
   const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+  // Every live department row by (team, department) — a job that carries its OWN department (SMS thread,
+  // website chat) is held or sent by THAT department's row, not whichever row the pass is visiting.
+  const liveOf = new Map((liveRes.data ?? []).map((L) => [`${L.team_id}:${L.department}`, L]));
   const recOf = new Map();
   for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
   // `held` = deliberate business holds (no-value gate / v2 lock / nobody deliverable). Kept apart
@@ -456,7 +742,13 @@ async function runOnce(opts = {}) {
   const out = { sent: 0, suppressed: 0, held: 0, skipped_dupe: 0, no_recipients: 0, errors: 0, email_batches: 0, sms_sent: 0, sms_suppressed: 0, sms_dupe: 0, sms_no_recipients: 0, sms_errors: 0, sms_batches: 0, action_items_feed_capped: 0, post_conversation_suppressed: 0, churned_skipped: 0,
     // Appointment rows dropped because meta.source says Vini didn't book them. Counted (not silent)
     // so a rooftop whose feed is full of warm_transfer rows shows up in the pass summary.
-    appt_skipped_not_ours: 0 };
+    appt_skipped_not_ours: 0,
+    // 2026-10-09 gates (each counted, never silent): B1 ClickHouse truth (fail closed), B2 port of 5fd5046.
+    appt_skipped_unverified: 0, appt_skipped_not_spyne: 0, appt_skipped_inactive: 0,
+    appt_skipped_past: 0, appt_skipped_cancelled: 0, appt_skipped_slot_dupe: 0,
+    overdue_skipped_closed: 0, dept_fallback: 0, sms_reply_optout_only: 0,
+    sms_held_no_value: 0, sms_held_auth: 0, reaped_orphans: 0, feeds_capped: [] };
+  let smsAuthDown = false; // Twilio rejected OUR credential this pass → stop texting, keep events re-claimable
   const failures = []; // genuine transactional-email send failures this pass → shared Slack breakage alert
   const smsFailures = []; // genuine SMS send failures this pass → shared Slack breakage alert (SMS)
   const feedFailures = []; // upstream FEED errors (per rooftop/dept) — the pass couldn't even fetch events.
@@ -476,6 +768,7 @@ async function runOnce(opts = {}) {
     .filter((L) => shards === 1 || shardOf(L.team_id, shards) === shard);
   const resumeIdx = Math.max(0, ordered.findIndex((L) => targetKey(L) === _resumeAt.get(shardKey)));
   const targets = ordered.slice(resumeIdx).concat(ordered.slice(0, resumeIdx));
+  out.reaped_orphans = await reapOrphanedClaims(targets.map((L) => L.team_id));
   // Timezone + working hours for every rooftop missing them in config, in ONE read, before the loop.
   await primeTeamDetails(targets.filter((L) => { const c = cfgOf.get(L.team_id) || {}; return !c.timezone || !c.working_hours; }).map((L) => L.team_id));
   let unreached = [];
@@ -503,10 +796,16 @@ async function runOnce(opts = {}) {
     // rooftop's hours are the same for sales/service), resolved once per (team,dept) target;
     // harmless if it re-resolves live once more for the rooftop's second dept in the same pass
     // (persists on the first success either way, so only the very first pass ever pays this twice).
-    const workingHours = await resolveWorkingHours(sb, L.team_id, c.working_hours, name, tz);
+    // CLOSED today (the dealer's own schedule says is_working=false) → no overdue digest at all. Only an
+    // UNKNOWN schedule uses the fallback hours; 28 digests went out on Sunday 10-05 because a closed day
+    // and an unknown one both came back null (A3-17).
+    const workingDay = await resolveWorkingDay(sb, L.team_id, c.working_hours, name, tz);
+    const workingHours = workingDay.status === "open" ? workingDay : null;
     const overdueMorningHour = (workingHours && parseHour(workingHours.startTime)) ?? OVERDUE_MORNING_FALLBACK_HOUR;
     const overdueEodHour = (workingHours && parseHour(workingHours.endTime)) ?? OVERDUE_EOD_FALLBACK_HOUR;
-    const overdueSlot = (() => { const { h } = localHourMin(tz); return h >= overdueEodHour ? "eod" : (h === overdueMorningHour ? "am" : null); })();
+    const overdueSlotRaw = (() => { const { h } = localHourMin(tz); return h >= overdueEodHour ? "eod" : (h === overdueMorningHour ? "am" : null); })();
+    const overdueSlot = workingDay.status === "closed" ? null : overdueSlotRaw;
+    if (overdueSlotRaw && !overdueSlot && c.action_item_overdue_enabled) out.overdue_skipped_closed++;
     const dept = L.department; // 'sales' | 'service'
     // FORMAT of this rooftop's per-conversation email (roi_rooftop_config.post_conversation_template).
     // 'lead_capture' also DEFINES THE EMAIL SET: the lead sheet is the only per-event email these
@@ -533,24 +832,36 @@ async function runOnce(opts = {}) {
     // those bounces are charged to the sending domain and cost every other rooftop its placement.
     const emailsForType = (type, d) =>
       pickTieredRecipients(recs.filter((r) => r.verified_at && canEmail(r) && deptOk(r, d) && r.email_enabled && isSubscribed(r, type, "email"))).map((r) => r.email);
-    // Recipients for a job that carries its OWN department (chat). Try that department first, and
-    // fall back to this pass's department when nobody at the rooftop receives it — a sales chat at a
-    // rooftop staffed only for service still has to reach a human, just labelled correctly. Without
-    // the fallback, fixing the label would turn those into silent recipients_missing rows.
-    const emailsForJob = (job) => {
-      const t = job.subscriptionType || job.type;
-      if (!job.department || job.department === dept) return emailsForType(t);
-      const own = emailsForType(t, job.department);
-      if (own.length) return own;
-      console.log(`  · ${name} no ${job.department} recipient → ${job.type} falls back to [${dept}]`);
-      return emailsForType(t);
-    };
-    const smsForType = (type) =>
+    const smsForType = (type, d) =>
       c.sms_enabled
-        ? pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
+        ? pickTieredRecipients(recs.filter((r) => r.verified_at && deptOk(r, d) && r.sms_enabled && r.phone && isSubscribed(r, type, "sms"))).map((r) => ({ phone: r.phone, role: r.role }))
         : [];
     const base = { team_id: L.team_id, enterprise_id: c.enterprise_id, department: dept };
     const dry = DRY_RUN || L.dry_run === true;
+    // ROUTING for a job that carries its OWN department (an SMS thread or a website chat follows the
+    // lead's department, not the pass that happened to poll it). Decides, per job: whose recipients get
+    // it, whose dry_run holds it, and which department the ledger row records.
+    //   • own department live and HELD (dry_run) → held, by that department's own flag. Chat used to take
+    //     the visiting pass's flag, so 32 chats reached departments a CSM had held (A5-04).
+    //   • own department live → its recipients; if it has nobody for this type, the visiting department's
+    //     (the chat rule: a lead still reaches a human, labelled with its own department).
+    //   • own department not live at this rooftop → the visiting department, recorded on the row.
+    // Jobs without a department of their own route exactly as before.
+    const routeJob = (job) => {
+      const t = job.subscriptionType || job.type;
+      const own = job.department;
+      if (!own || own === dept) return { dept, emails: emailsForType(t), dry, fallback: null };
+      const row = liveOf.get(`${L.team_id}:${own}`);
+      if (row && row.dry_run === true) return { dept: own, emails: emailsForType(t, own), dry: true, fallback: null };
+      if (row) {
+        const mine = emailsForType(t, own);
+        if (mine.length) return { dept: own, emails: mine, dry: DRY_RUN, fallback: null };
+        console.log(`  · ${name} no ${own} recipient → ${job.type} falls back to [${dept}]`);
+        return { dept, emails: emailsForType(t), dry, fallback: `dept_fallback:no_${own}_recipient` };
+      }
+      console.log(`  · ${name} ${own} is not live → ${job.type} falls back to [${dept}]`);
+      return { dept, emails: emailsForType(t), dry, fallback: `dept_fallback:${own}_not_live` };
+    };
     const L_ = links(L.team_id, c.enterprise_id, dept);
 
     // Build the list of (type, eventKey, render, subject) jobs for the enabled types.
@@ -561,43 +872,20 @@ async function runOnce(opts = {}) {
         // This ensures booked-but-future-scheduled appointments (e.g. booked today, appointment next month)
         // still trigger an email. scope=recent + minutes=25 means: fetch meeting records where createdAt
         // is within the last 25 minutes, regardless of when the meeting is scheduled.
-        const j = await apiJson(`/api/meetings?scope=recent&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&minutes=${POLL_MINUTES}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
+        const j = await apiJson(`/api/meetings?scope=recent&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&minutes=${POLL_MINUTES}`, { spyneToken: true });
         // The MTD count only appears INSIDE an appointment email, so it's fetched the first time one is
         // actually built. It's /api/reports — never CDN-cached, 2.6-18s of server time — and it used
         // to run for every rooftop on every pass whether or not anything was booked: ~195 calls a pass,
         // the bulk of why the pass overran 300s (2026-10-08).
         let mtd = null;
-        const candidates = (j.meetings || []).slice(0, 50);
-        // meta.source per meeting — the feed doesn't carry it, so it's resolved from ClickHouse.
-        // See NON_VINI_META_SOURCES for what it's for. Best-effort: no creds / lookup failure →
-        // empty Map → nothing is gated, exactly as before.
-        const metaSrc = await leadCaptureCH.fetchMeetingMetaSource(L.team_id, candidates.map((m) => m && m.id));
-        // REASON FOR SERVICE per lead — the meetings feed carries only the booking intent
-        // ('schedule_appointment'), never the work the customer asked for, so it comes from the
-        // lead's call report. Service only: `report_service` is empty on a sales call, so a sales
-        // rooftop would pay for a query that can only return nothing. Best-effort, same as above —
-        // a failure gives an empty Map and the email falls back to the booking intent.
-        const svcReasons = dept === "service"
-          ? await leadCaptureCH.fetchServiceReasonsByLead(L.team_id, candidates.map((m) => m && m.leadId))
-          : new Map();
-        for (const m of candidates) {
-          if (!m.id) continue;
-          // Only surface VINI-booked appointments (source='spyne'). Skip known BDC/CRM bookings —
-          // a "Vini booked you an appointment" email about the dealer's own booking is noise.
-          // (When the feed doesn't report source yet, keep firing with a generic label.)
-          if (m.source && m.source !== "spyne") continue;
-          // …and `source='spyne'` alone is NOT proof Vini made the booking. meta.source says how the
-          // row came to exist: 'warm_transfer' rows are appointments Vini did not create, pulled in
-          // around a transfer, so an email about one announces a booking that never happened.
-          // Honda of Downtown Los Angeles, 2026-08-14: all 7 of the "New appointment" emails a
-          // manager received for ONE customer in 6 seconds were warm_transfer rows (start times
-          // Jul-2024 → Jan-2026 — her own past service visits).
-          const meta = String(metaSrc.get(String(m.id)) || "").toLowerCase();
-          if (NON_VINI_META_SOURCES.has(meta)) {
-            out.appt_skipped_not_ours++;
-            console.log(`  · ${name} [${dept}] appointment ${m.id} skipped — meta.source=${meta} (not booked by Vini)`);
-            continue;
-          }
+        const feedMeetings = j.meetings || [];
+        if (feedMeetings.length > APPT_FEED_MAX) out.feeds_capped.push(`${name} [${dept}] meetings`);
+        // Feed-level gates first (no ClickHouse needed): a row the feed itself says is not Vini's, or that
+        // belongs to the other department, never reaches the truth lookup.
+        const candidates = [];
+        for (const m of feedMeetings.slice(0, APPT_FEED_MAX)) {
+          if (!m || !(m.id || m.meetingId || m.mongoId)) continue;
+          if (m.source && String(m.source).toLowerCase() !== "spyne") { out.appt_skipped_not_spyne++; continue; }
           // The feed is asked for this department only, so a booking from the other one should never
           // arrive — but if it did, it would go to THIS pass's recipients under THIS pass's label. Leave
           // it to its own department's pass instead (Stillwell Ford, 2026-10-07: service bookings in a
@@ -608,26 +896,97 @@ async function runOnce(opts = {}) {
             console.warn(`  ⚠ ${name} [${dept}] appointment ${m.id} is ${ownDept} — left for the ${ownDept} pass`);
             continue;
           }
-          const byVini = m.source === "spyne";
-          const svc = svcReasons.get(String(m.leadId || "")) || null;
-          if (mtd === null) mtd = await apptMTD(L.team_id, dept);
+          candidates.push(m);
+        }
+        // ── VINI-BOOKED, FROM CLICKHOUSE TRUTH (A3-01 / A5-03) ─────────────────────────────────────
+        // Whether Vini booked it is decided by dealer_leads.meetings FINAL — source='spyne' and meta.source
+        // not warm_transfer/callback — never by the feed, whose snapshot path carries the dealer's own BDC
+        // bookings with no `source` at all. FAIL CLOSED: a meeting ClickHouse can't confirm (not replicated
+        // yet, or ClickHouse unreachable) is NOT emailed this pass. Nothing is claimed, so the next pass
+        // (4 min later, still inside the 25-min look-back) picks it up once it is visible.
+        const idsOf = (m) => [m.meetingId, m.mongoId, m.id].filter(Boolean).map(String);
+        const truth = candidates.length
+          ? await leadCaptureCH.fetchMeetingsTruth(L.team_id, candidates.flatMap(idsOf), candidates.map((m) => m.leadId))
+          : { ok: true, byId: new Map(), rows: [] };
+        if (!truth.ok && candidates.length) {
+          out.appt_truth_unavailable = (out.appt_truth_unavailable || 0) + candidates.length;
+          console.error(`  ✗ ${name} [${dept}] ${candidates.length} appointment(s) held — ClickHouse meeting lookup unavailable (${truth.error || "no detail"})`);
+        }
+        // REASON FOR SERVICE per lead — the meetings feed carries only the booking intent
+        // ('schedule_appointment'), never the work the customer asked for, so it comes from the
+        // lead's call report. Service only: `report_service` is empty on a sales call, so a sales
+        // rooftop would pay for a query that can only return nothing. Best-effort — a failure gives
+        // an empty Map and the email falls back to the booking intent.
+        const svcReasons = dept === "service" && candidates.length
+          ? await leadCaptureCH.fetchServiceReasonsByLead(L.team_id, candidates.map((m) => m && m.leadId))
+          : new Map();
+        // One email per booked SLOT per pass — see apptSkipReason gate (3).
+        const apptSlots = new Set();
+        for (const m of candidates) {
+          const t = idsOf(m).map((x) => truth.byId.get(x)).find(Boolean);
+          if (!t) {
+            out.appt_skipped_unverified++;
+            console.log(`  · ${name} [${dept}] appointment ${m.id || m.meetingId} not confirmed in ClickHouse yet — held for the next pass`);
+            continue;
+          }
+          if (t.source !== "spyne") {
+            out.appt_skipped_not_spyne++;
+            console.log(`  · ${name} [${dept}] appointment ${t.meetingId || t.rowId} skipped — source=${t.source || "blank"} (not booked by Vini)`);
+            continue;
+          }
+          // `source='spyne'` alone is NOT proof Vini made the booking. meta.source says how the row came
+          // to exist: 'warm_transfer'/'callback' rows are appointments Vini did not create, pulled in
+          // around a transfer. Honda of Downtown Los Angeles, 2026-08-14: all 7 "New appointment" emails
+          // for ONE customer in 6 seconds were warm_transfer rows (her own past service visits).
+          if (NON_VINI_META_SOURCES.has(t.metaSource)) {
+            out.appt_skipped_not_ours++;
+            console.log(`  · ${name} [${dept}] appointment ${t.meetingId || t.rowId} skipped — meta.source=${t.metaSource} (not booked by Vini)`);
+            continue;
+          }
+          if (Number(t.isActive) === 0 || Number(t.deleted) === 1) { out.appt_skipped_inactive++; continue; }
+          // The feed omitted the department → ClickHouse's own service_type decides (same rule as above).
+          const chDept = String(t.serviceType || "").startsWith("service") ? "service" : String(t.serviceType || "").startsWith("sales") ? "sales" : "";
+          if (!m.serviceType && chDept && chDept !== dept) {
+            out.appt_skipped_other_dept = (out.appt_skipped_other_dept || 0) + 1;
+            continue;
+          }
+          // ONE key per meeting: meeting_id (the snapshot's id space), whichever id the feed handed back.
+          // The other id is reserved as an alias at claim time (see the send loop).
+          const key = eventKeys.appointment(t.meetingId || t.rowId);
+          const aliasKeys = [...new Set([t.rowId, t.meetingId, ...idsOf(m)].filter((x) => x && String(x) !== key).map(String))];
+          const sched = schedInfo(m.when || t.startTime, m.tz || tz);
+          // Past / cancelled (feed OR ClickHouse status) / duplicate-slot rows are never a "new appointment".
+          const status = isCancelledStatus(t.status) ? t.status : (m.status || t.status);
+          const skip = apptSkipReason({ ...m, status, leadId: m.leadId || t.leadId }, sched, apptSlots)
+            || (hasEarlierTwin(t, truth.rows) ? "slot_dupe" : null);
+          if (skip) {
+            out[`appt_skipped_${skip}`]++;
+            console.log(`  · ${name} [${dept}] appointment ${key} skipped (${skip})${sched.when ? ` — ${sched.when}` : ""}`);
+            continue;
+          }
+          // Every row that gets here is ClickHouse-confirmed source='spyne', so the email says so: the
+          // "Booked by Vini" chip and subject (A3-14 — neither feed path ever carried `source`, so 273 of
+          // 273 subjects read "New appointment").
+          const byVini = true;
+          const svc = svcReasons.get(String(m.leadId || t.leadId || "")) || null;
+          if (mtd === null) mtd = await apptMTD(L.team_id, dept, tz);
           const apptData = {
-            customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
+            customer: m.customer, phone: m.phone, when: sched.when, time: m.time, relDay: safeRelDay(sched, m.relDay),
             type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
             transportation: m.transportation || m.transportationOption, status: m.status, byVini, recordingUrl: m.recordingUrl,
             bookedAt: m.bookedAt,  // when the appointment was created
             assignedTo: m.assignedTo,  // who booked it
-            leadId: m.leadId,  // link to the lead for context
+            leadId: m.leadId || t.leadId,  // link to the lead for context
             // the reason for service — drives the card's "For" row (see fmtServiceReason)
             services: svc ? svc.services : null,
             serviceIntent: svc ? svc.intent : "",
             serviceVehicle: svc ? svc.vehicleName : "",
           };
-          jobs.push({ type: "post_appointment", key: m.id,
-            subject: `${byVini ? "Vini booked an appointment" : "New appointment"} — ${name}`,
+          jobs.push({ type: "post_appointment", key, aliasKeys,
+            subject: `Vini booked an appointment · ${name}`,
             html: T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: apptData }),
             smsBody: T.renderPostAppointmentSms({ rooftopName: name, dept, links: L_, appointment: apptData }),
-            leadMatchKey: leadMatchKey({ leadId: m.leadId, customer: m.customer, phone: m.phone }) });
+            leadMatchKey: leadMatchKey({ leadId: m.leadId || t.leadId, customer: m.customer, phone: m.phone }) });
         }
       }
       if (c.action_item_enabled && !leadCapture) {
@@ -675,8 +1034,8 @@ async function runOnce(opts = {}) {
             lead.requestedTimeBooked = ask.booked; // "Booked for" vs "Customer asked for"
           }
           // dedupe per lead per newest-arrived item, so a fresh item re-triggers the lead view once
-          const newestId = arrived.map((x) => x.id).filter(Boolean).sort().slice(-1)[0] || k;
-          jobs.push({ type: "action_item", key: `lead:${k}:${newestId}`,
+          const newestId = eventKeys.newestItemId(arrived.map((x) => x.id)) || k;
+          jobs.push({ type: "action_item", key: eventKeys.actionItem(k, newestId),
             subject: `Action items — ${lead.customer || name}`,
             html: T.renderActionItem({ rooftopName: name, dept, tz, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, mtdOpen: open.total, links: L_ }),
             smsBody: T.renderActionItemSms({ rooftopName: name, dept, lead, items, totalOpen: leadOpen.length || items.length, justArrived: arrived.length, links: L_ }),
@@ -703,10 +1062,11 @@ async function runOnce(opts = {}) {
           console.warn(`  ⚠ ${name} [${dept}] overdue feed hit cap — some items may be invisible`);
         }
         if (totalOverdueCount > 0) {
-          // ONE digest per team·dept·slot (not per lead) — shows count + top ~10 most-urgent items
+          // ONE digest per team·dept·slot (not per lead) — shows count + top ~10 most-urgent items.
+          // The count is LEADS (one uncapped ClickHouse count — see overdueDigestPayload).
           const dayKey = localDateISO(tz);
-          jobs.push({ type: "action_item_overdue", key: `rooftop:${L.team_id}:${dept}:overdue:${dayKey}:${overdueSlot}`,
-            subject: `Overdue items — ${totalOverdueCount} pending · ${name}`,
+          jobs.push({ type: "action_item_overdue", key: eventKeys.overdue(L.team_id, dept, dayKey, overdueSlot),
+            subject: `Overdue follow-ups: ${totalOverdueCount} lead${totalOverdueCount === 1 ? "" : "s"} pending · ${name}`,
             html: T.renderOverdueActionItemsDigest({ rooftopName: name, dept, tz, topItems, totalOverdueCount, totalPendingAllLeads, links: L_ }),
             smsBody: T.renderOverdueActionItemsDigestSms({ rooftopName: name, dept, topItems, totalOverdueCount, links: L_ }),
             // Rooftop-level digest (not per-lead) — no leadMatchKey
@@ -733,7 +1093,10 @@ async function runOnce(opts = {}) {
         };
         // CALLS → instant. One email per call as soon as the poll sees it (channel=call, the default).
         const actionableOnly = (c.post_conversation_mode || "actionable") === "actionable";
-        const j = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&channel=call&minutes=${POLL_MINUTES}&limit=50${actionableOnly ? "&actionableOnly=1" : ""}`);
+        // Paged when the feed supports it; a full page from an older feed is counted as capped (A3-05).
+        const callFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&channel=call&minutes=${POLL_MINUTES}${actionableOnly ? "&actionableOnly=1" : ""}`, "conversations", 50);
+        if (callFeed.capped) out.feeds_capped.push(`${name} [${dept}] calls`);
+        const j = { conversations: callFeed.rows };
         // Roll multiple same-day calls for ONE lead into a single email — a lead phoned three times
         // in a day shouldn't generate three alerts (~30% of call emails were this redundancy). The
         // dedupe key carries an outcome TIER (plain=0, actionItem=1, appointment=2), so the first
@@ -742,6 +1105,8 @@ async function runOnce(opts = {}) {
         // EVENT_CALL_ROLLUP=false to fall back to one-email-per-conversation.
         const callRollup = process.env.EVENT_CALL_ROLLUP !== "false";
         const callDay = localDateISO(tz);
+        // Keyed per lead PER the call's own dealer-local day (A1 F23): the 25-min look-back straddles
+        // midnight, and a call at 11:58 PM belongs to the day it happened, not the day the pass ran.
         const bestByLead = new Map();
         const chosen = []; // [{ key, cv, subject }] — one entry per email this pass, in either mode
         for (const cv of j.conversations || []) {
@@ -760,8 +1125,9 @@ async function runOnce(opts = {}) {
           // appointment and 0 resolved a query, so nothing of value is suppressed.
           if (T.isNoConversation(cv.endedReason)) continue;
           // OUTBOUND REPLY GATE (applies to BOTH sales and service): only email if customer responded.
-          // when enabled (default), skip outbound calls with no action items / appointments.
-          if (cv.direction === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
+          // when enabled (default), skip outbound calls with no action items / appointments. Direction is
+          // the call's own (callType + the callback flip) when the feed provides it — see callDirection.
+          if (callDirection(cv) === "outbound" && c.post_conversation_outbound_requires_reply !== false && !(cv.hasActionItem || cv.appointmentScheduled)) continue;
           // SUBSTANCE GATE — there must be something a human can actually read or act on.
           //
           // The summary check MUST go through T.cleanSummary(). `report_summary` is never literally
@@ -775,19 +1141,20 @@ async function runOnce(opts = {}) {
           // A transcript deliberately does NOT count: a screener/IVR call transcribes the machine's
           // words ("please record your message"), which is exactly the empty email being stopped.
           if (!(T.cleanSummary(cv.summary) || cv.hasActionItem || cv.appointmentScheduled || cv.queryResolved === true)) continue;
-          // spam gate — a call the model flagged as spam is never a real conversation. No-op until
-          // the conversations feed surfaces `spam`; harmless when absent.
-          if (cv.spam === true || cv.spam === "Yes") continue;
+          // spam gate — a call the model flagged as spam is never a real conversation (the spine requires
+          // report.spam='No'). Live once the conversations feed surfaces `spam` (WS-D); harmless when absent.
+          if (isSpamCall(cv)) { out.post_conversation_spam = (out.post_conversation_spam || 0) + 1; continue; }
           if (isCovered(cv)) { out.post_conversation_suppressed++; continue; }
           if (!callRollup) { chosen.push({ key: cv.id, cv, subject: `Conversation summary — ${name}` }); continue; }
           const k = cv.leadId || cv.id;
-          const rank = cv.appointmentScheduled ? 2 : cv.hasActionItem ? 1 : 0;
-          const prev = bestByLead.get(k);
+          const day = eventKeys.localDay(cv.at, tz) || callDay;
+          const rank = eventKeys.callRank(cv);
+          const prev = bestByLead.get(`${k}|${day}`);
           // keep the highest-outcome call for the lead; tie-break on the most recent.
-          if (!prev || rank > prev.rank || (rank === prev.rank && String(cv.at || "") > String(prev.cv.at || ""))) bestByLead.set(k, { cv, rank });
+          if (!prev || rank > prev.rank || (rank === prev.rank && String(cv.at || "") > String(prev.cv.at || ""))) bestByLead.set(`${k}|${day}`, { k, day, cv, rank });
         }
-        for (const [k, { cv, rank }] of bestByLead) {
-          chosen.push({ key: `call:lead:${k}:${callDay}:t${rank}`, cv, subject: `Conversation summary — ${cv.customer || name}` });
+        for (const { k, day, cv, rank } of bestByLead.values()) {
+          chosen.push({ key: eventKeys.call(k, day, rank), cv, subject: `Conversation summary — ${cv.customer || name}` });
         }
         // 'lead_capture' rooftops want a lead sheet, not a conversation summary — the extra fields
         // (requested vehicle, financing/trade-in flags, preferred time + store, the ZIP the caller
@@ -865,15 +1232,31 @@ async function runOnce(opts = {}) {
         if (runSmsNow) {
           smsDoneTeams.add(L.team_id);
           const sinceMin = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
-          const js = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=sms&minutes=${sinceMin}&limit=200`);
+          const smsFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=sms&minutes=${sinceMin}`, "conversations", 200);
+          if (smsFeed.capped) out.feeds_capped.push(`${name} sms`);
+          const requiresReply = c.post_conversation_outbound_requires_reply !== false;
           const byLead = new Map(); // one lead's SMS threads for the day
-          for (const cv of js.conversations || []) {
-            // No customer reply → nothing to report (an all-AI outbound blast isn't a "conversation").
-            if (!cv.hasReply && c.post_conversation_outbound_requires_reply !== false) continue;
+          for (const cv of smsFeed.rows) {
+            // No REAL customer reply → nothing to report (an all-AI outbound blast isn't a
+            // "conversation", and neither is a lone "STOP" — A3-11).
+            if (requiresReply && !smsThreadHasRealReply(cv)) {
+              if (cv && cv.hasReply) out.sms_reply_optout_only++;
+              continue;
+            }
             if (isCovered(cv)) { out.post_conversation_suppressed++; continue; }
             const k = cv.leadId || cv.id;
             const g = byLead.get(k) || []; g.push(cv); byLead.set(k, g);
           }
+          // DEPARTMENT PER LEAD, not per pass (A3-03 / A5-23). This poll runs once per team, inside
+          // whichever department row the pass reached first, and every summary used to go to THAT
+          // department: 105 of 468 SMS summaries (22%) landed in the other team's inbox. The lead's own
+          // department comes from the feed (`dept`, once reporting-vini returns it for SMS — WS-D) or
+          // else dealer_leads.leads.service_type in ONE batched lookup. A lead with neither keeps the
+          // visiting department. Routing, recipients and dry_run then follow routeJob().
+          const feedDeptOf = (threads) => { const d = threads.map((t) => t && t.dept).find((x) => x === "sales" || x === "service"); return d || null; };
+          const needDept = [...byLead.values()].filter((th) => !feedDeptOf(th)).map((th) => th[0] && th[0].leadId).filter(Boolean);
+          const leadDepts = needDept.length ? await leadCaptureCH.fetchLeadDepts(L.team_id, needDept) : new Map();
+          const smsDeptOf = (threads) => feedDeptOf(threads) || leadDepts.get(String((threads[0] && threads[0].leadId) || "")) || dept;
           const nowT = Date.now();
           // LEAD-CAPTURE (same rooftop flag as the call path): a text reply is shown as the dealer's
           // lead sheet too, not a second email format. The thread itself carries no sales sub-report,
@@ -882,45 +1265,49 @@ async function runOnce(opts = {}) {
           const smsLeadFields = leadCapture
             ? await leadCaptureCH.fetchLeadFieldsByLead(L.team_id, [...byLead.keys()])
             : new Map();
-          // Build one SMS post_conversation job from a slice of a lead's messages.
-          const pushSms = (seed, msgs, key, label, leadKey) => {
+          // Build one SMS post_conversation job from a slice of a lead's messages. `sDept` is the LEAD's
+          // department: it labels the email, picks the console link, and routes the job (routeJob).
+          const pushSms = (seed, msgs, key, label, leadKey, sDept) => {
             const sms = msgs.slice(-12);
             const cv = { ...seed, channel: "sms", sms, smsFailed: sms.filter((b) => ["failed", "undelivered", "error"].includes(b.status)).length };
+            const sLinks = sDept === dept ? L_ : links(L.team_id, c.enterprise_id, sDept);
             if (leadCapture) {
               const lead = leadCaptureCH.buildSmsLead(smsLeadFields.get(String(leadKey)) || null, seed, cv.sms);
               const vehLabel = [lead.vehicleType, lead.vehicle].filter(Boolean).join(" ").trim();
-              jobs.push({ type: "post_conversation", key,
+              jobs.push({ type: "post_conversation", key, department: sDept,
                 subject: `Text reply — ${lead.customer || name}${vehLabel ? ` · ${vehLabel}` : ""}`,
-                html: T.renderLeadCapture({ rooftopName: name, dept, tz, lead, links: L_ }),
-                smsBody: T.renderPostConversationSms({ rooftopName: name, dept, conversation: cv, links: L_ }) });
+                html: T.renderLeadCapture({ rooftopName: name, dept: sDept, tz, lead, links: sLinks }),
+                smsBody: T.renderPostConversationSms({ rooftopName: name, dept: sDept, conversation: cv, links: sLinks }) });
               return;
             }
-            jobs.push({ type: "post_conversation", key,
+            jobs.push({ type: "post_conversation", key, department: sDept,
               subject: `SMS ${label} — ${seed.customer || name}`,
-              html: T.renderPostConversation({ rooftopName: name, dept, tz, conversation: cv, links: L_ }),
-              smsBody: T.renderPostConversationSms({ rooftopName: name, dept, conversation: cv, links: L_ }) });
+              html: T.renderPostConversation({ rooftopName: name, dept: sDept, tz, conversation: cv, links: sLinks }),
+              smsBody: T.renderPostConversationSms({ rooftopName: name, dept: sDept, conversation: cv, links: sLinks }) });
           };
+          const realReply = requiresReply ? isRealSmsReply : isInboundSms;
           for (const [k, threads] of byLead) {
             threads.sort((a, b) => String(a.at).localeCompare(String(b.at)));
             const seed = threads[threads.length - 1];
+            const sDept = smsDeptOf(threads);
             const allMsgs = threads.flatMap((t) => t.sms || []).filter((x) => x && x.at).sort((a, b) => String(a.at).localeCompare(String(b.at)));
             if (smsCadence === "session") {
-              // one email per SETTLED burst (quiet for > gapMin) that had a customer reply; at EOD,
+              // one email per SETTLED burst (quiet for > gapMin) that had a real customer reply; at EOD,
               // flush any still-open burst so nothing is dropped.
               for (const s of smsSessions(allMsgs, gapMin)) {
-                if (!s.hasReply) continue;
+                if (!s.msgs.some(realReply)) continue;
                 if ((nowT - s._lastT) <= gapMin * 60000 && !isEod) continue; // still active → wait
-                pushSms(seed, s.msgs, `sms:${k}:${day}:s${s.startAt}`, "conversation", k);
+                pushSms(seed, s.msgs, eventKeys.sms(k, day, "session", s.startAt), "conversation", k, sDept);
               }
             } else if (smsCadence === "first_plus_digest") {
-              // instant: the lead's FIRST customer reply of the day (fires the pass we first see it).
-              const firstIdx = allMsgs.findIndex(isInboundSms);
-              if (firstIdx >= 0) pushSms(seed, allMsgs.slice(0, firstIdx + 1), `sms:${k}:${day}:first`, "reply", k);
+              // instant: the lead's FIRST real customer reply of the day (fires the pass we first see it).
+              const firstIdx = allMsgs.findIndex(realReply);
+              if (firstIdx >= 0) pushSms(seed, allMsgs.slice(0, firstIdx + 1), eventKeys.sms(k, day, "first"), "reply", k, sDept);
               // digest: the full day's thread, at EOD only.
-              if (isEod) pushSms(seed, allMsgs, `sms:${k}:${day}:digest`, "summary", k);
+              if (isEod) pushSms(seed, allMsgs, eventKeys.sms(k, day, "digest"), "summary", k, sDept);
             } else {
               // 'daily' (default): one digest per lead/day.
-              pushSms(seed, allMsgs, `sms:${k}:${day}`, "summary", k);
+              pushSms(seed, allMsgs, eventKeys.sms(k, day), "summary", k, sDept);
             }
           }
         }
@@ -959,7 +1346,9 @@ async function runOnce(opts = {}) {
         const isEod = h >= SMS_EOD_HOUR;
         const day = localDateISO(tz);
         const sinceMinChat = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
-        const jc = await apiJson(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=chat&minutes=${sinceMinChat}&limit=200`);
+        const chatFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=chat&minutes=${sinceMinChat}`, "conversations", 200);
+        if (chatFeed.capped) out.feeds_capped.push(`${name} chat`);
+        const jc = { conversations: chatFeed.rows };
         const nowC = Date.now();
         // Defer to a same-pass appointment/action-item email for the same lead (same rule as the
         // call/SMS paths) — that email already carries the chat lead's context.
@@ -986,7 +1375,7 @@ async function runOnce(opts = {}) {
             if (!s.hasReply) continue;
             if ((nowC - s._lastT) <= chatGapMin * 60000 && !isEod && !done) continue; // still active → wait
             const conv = { ...cv, channel: "chat", sms: s.msgs.slice(-12) };
-            jobs.push({ type: "post_conversation", subscriptionType: "chat", key: `chat:${cv.id}:${day}:s${s.startAt}`,
+            jobs.push({ type: "post_conversation", subscriptionType: "chat", key: eventKeys.chat(cv.id, day, s.startAt),
               department: cDept,
               subject: `Website chat — ${cv.customer || name}`,
               html: T.renderPostConversation({ rooftopName: name, dept: cDept, tz, conversation: conv, links: cLinks }) });
@@ -1012,31 +1401,41 @@ async function runOnce(opts = {}) {
       if (BATCH_EMAIL_TYPES.has(job.type)) continue;
       let id;
       try {
-        // job.department overrides the pass's for a channel that carries its own (chat). The dedupe
-        // key is (team_id, email_type, event_key) — department is not part of it, so a job recording
-        // its real department can't double-send.
-        id = await claim({ ...base, department: job.department || base.department, email_type: job.type }, job.key);
+        // A job that carries its own department (SMS thread, chat) is routed, held and recorded by THAT
+        // department — see routeJob. Everything else routes by this pass's department, as before.
+        const route = routeJob(job);
+        job._route = route;
+        if (route.fallback) { out.dept_fallback++; }
+        // An appointment may have been handled under its other id before 2026-10-09 (A3-01).
+        if (job.aliasKeys && job.aliasKeys.length && await alreadyHandled(base.team_id, job.type, [job.key, ...job.aliasKeys])) { out.skipped_dupe++; continue; }
+        // The dedupe key is (team_id, email_type, event_key) — department is not part of it, so a job
+        // recording its real department can't double-send.
+        id = await claim({ ...base, department: route.dept, email_type: job.type }, job.key);
         if (!id) { out.skipped_dupe++; continue; } // already handled in a prior pass
+        for (const a of job.aliasKeys || []) await claimAlias({ ...base, department: route.dept, email_type: job.type }, a, job.key);
         // Recipients are chosen PER TYPE (subscription matrix + role tier), not per rooftop.
         // subscriptionType overrides the matrix key when a job's audience differs from its stored
         // email_type — chat jobs store as post_conversation (tracker/dedupe grain) but match the
         // 'chat' key so a recipient's call-noise opt-out doesn't silence chat.
-        const emails = emailsForJob(job);
+        const emails = route.emails;
         // Inject the open-tracking pixel now that we have the row id, so the stored
         // HTML and the sent bytes both carry it (id keys the open back to this row).
         const html = withPixel(job.html, id);
         // Always store the generated HTML — even when we can't send (no recipient) — so the tracker
         // always has a copy to view and you can send it manually later.
         if (!emails.length) { await finish(id, { status: "not_sent", reason: "recipients_missing", subject: job.subject, rendered_html: html }); out.no_recipients++; continue; }
-        if (dry) { await finish(id, { status: "suppressed", reason: "dry_run", subject: job.subject, rendered_html: html, recipients: emails.map((e) => ({ email: e })) }); out.suppressed++; continue; }
+        if (route.dry) { await finish(id, { status: "suppressed", reason: "dry_run", subject: job.subject, rendered_html: html, recipients: emails.map((e) => ({ email: e })) }); out.suppressed++; continue; }
         const sentAt = new Date().toISOString();
         const messageId = await sendMailAttributed(emails, job.subject, html);
-        await finish(id, { status: "sent", subject: job.subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
+        // A routed fallback is recorded on the row itself (reason), so the tracker shows WHY a lead's
+        // summary reached the other department.
+        await finish(id, { status: "sent", ...(route.fallback ? { reason: route.fallback } : {}), subject: job.subject, rendered_html: html, message_id: messageId || `evt-${sentAt}`, sent_at: sentAt, recipients: emails.map((e) => ({ email: e, received: true })) });
         out.sent++;
       } catch (e) {
         // A deliberate hold (no-value gate, v2 lock, nobody deliverable) is NOT a failure: record
         // it as not_sent and keep it OUT of the Slack breakage alert. See holdReason().
         const held = holdReason(e);
+        if (held) job._emailHeld = held;
         const detail = String(e && e.message ? e.message : e).slice(0, 200);
         if (held) out.held++; else { out.errors++; failures.push({ rooftop: name, dept: job.type || dept, error: detail }); }
         if (id) {
@@ -1114,6 +1513,7 @@ async function runOnce(opts = {}) {
       // A deliberate hold is not a failure. This path pushes one alert entry PER LEAD, so without
       // this a single held batch was guaranteed to trip the crit threshold. See holdReason().
       const heldReason = sendErr ? holdReason(sendErr) : null;
+      if (heldReason) for (const { job } of claimed) job._emailHeld = heldReason;
 
       // Fan the SAME outcome back to EVERY claimed lead row — none silently vanish. A row's
       // `rendered_html` is what ACTUALLY went out (the full batch), not a per-lead reconstruction.
@@ -1146,8 +1546,33 @@ async function runOnce(opts = {}) {
     if (c.sms_enabled) {
       // SMS is its OWN channel — gated by SMS_DRY_RUN, NOT the email pipeline's global DRY_RUN
       // (emails may be deliberately held in dry-run while SMS is live). Per-dealer dry_run still
-      // holds both channels for that rooftop.
-      const smsDry = SMS_DRY_RUN || L.dry_run === true;
+      // holds both channels for that rooftop — and for a job routed to its own department (an SMS
+      // thread summary), THAT department's hold applies, exactly as for its email.
+      const smsDryFor = (d) => SMS_DRY_RUN || (d === dept ? L.dry_run === true : (liveOf.get(`${L.team_id}:${d}`) || { dry_run: true }).dry_run === true);
+      // The SAME content verdict as the email (A5-14): a job whose email was held as no-value (or whose
+      // rendered email is no-value-marked, whether or not the email path got as far as the gate) sends
+      // no text either. Texting what the email refused would bypass the anti-churn gate entirely.
+      const smsHeldByEmail = (job) => job._emailHeld === "no_value" || emailValue.isNoValue(job.html);
+      // Text every recipient; stop at the first AUTH failure (it is our credential, every other number
+      // would fail identically). Returns { results, anySent, auth }.
+      const textAll = async (recips, body) => {
+        const results = [];
+        let auth = false;
+        for (const r of recips) {
+          await sleep(SMS_SEND_STAGGER_MS);
+          try { const msid = await sendSms(r.phone, body, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
+          catch (e) {
+            results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) });
+            if (isSmsAuthError(e)) { auth = true; break; }
+          }
+        }
+        return { results, anySent: results.some((x) => x.sent), auth };
+      };
+      const noteAuthDown = (results) => {
+        if (!smsAuthDown) smsFailures.push({ rooftop: name, dept: "sms", error: `Twilio rejected the credential (auth) — SMS held and left re-claimable: ${(results.find((x) => x.error) || {}).error || ""}`.slice(0, 240) });
+        smsAuthDown = true;
+        out.sms_auth_failed = true;
+      };
       // action_item is BATCHED across leads below (one text can otherwise become 40+
       // near-simultaneous texts to the same phone when a rooftop's backlog is large — see the
       // Jones Chrysler Dodge Jeep Ram incident). post_appointment / post_conversation stay on this
@@ -1163,22 +1588,27 @@ async function runOnce(opts = {}) {
       // ── 1) unchanged path — one SMS per job ──
       for (const job of jobs) {
         if (!job.smsBody || BATCH_SMS_TYPES.has(job.type)) continue;
-        const smsRecipients = smsForType(job.type);
+        if (smsHeldByEmail(job)) { out.sms_held_no_value++; continue; }
+        const sDept = (job._route && job._route.dept) || dept;
+        const smsRecipients = smsForType(job.type, sDept);
         if (!smsRecipients.length) { out.sms_no_recipients++; continue; } // nobody subscribed to this type on SMS
-        if (smsDry) { out.sms_suppressed++; continue; }
+        if (smsDryFor(sDept)) { out.sms_suppressed++; continue; }
+        // Twilio already rejected our credential this pass → don't claim (the event stays fresh for the
+        // pass after the credential is fixed) and don't hammer Twilio with more 401s.
+        if (smsAuthDown) { out.sms_held_auth++; continue; }
         let sid;
         try {
-          sid = await claimSms({ ...base, email_type: job.type }, job.key);
+          sid = await claimSms({ ...base, department: sDept, email_type: job.type }, job.key);
           if (!sid) { out.sms_dupe++; continue; } // already texted in a prior pass
           const sentAt = new Date().toISOString();
-          const results = [];
-          for (const r of smsRecipients) {
-            await sleep(SMS_SEND_STAGGER_MS);
-            try { const msid = await sendSms(r.phone, job.smsBody, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
-            catch (e) { results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) }); }
+          const { results, anySent, auth } = await textAll(smsRecipients, job.smsBody);
+          if (!anySent && auth) {
+            await finishSms(sid, { status: "error", reason: SMS_AUTH_HOLD_REASON, body: job.smsBody, recipients: results });
+            out.sms_held_auth++;
+            noteAuthDown(results);
+            continue;
           }
           const firstSid = (results.find((x) => x.sid) || {}).sid || null;
-          const anySent = results.some((x) => x.sent);
           await finishSms(sid, { status: anySent ? "sent" : "error", reason: anySent ? null : "all_recipients_failed", body: job.smsBody, message_sid: firstSid, sent_at: anySent ? sentAt : null, recipients: results });
           if (anySent) out.sms_sent++; else { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: (results.find((x) => x.error) || {}).error || "all recipients failed" }); }
         } catch (e) { out.sms_errors++; smsFailures.push({ rooftop: name, dept: job.type, error: String(e && e.message ? e.message : e).slice(0, 200) }); if (sid) { try { await finishSms(sid, { status: "error", reason: String(e).slice(0, 300), body: job.smsBody }); } catch { /* ignore */ } } }
@@ -1188,10 +1618,14 @@ async function runOnce(opts = {}) {
       // freshly-claimed lead this pass, not one text per lead ──
       const batchTypes = new Set(jobs.filter((j) => j.smsBody && BATCH_SMS_TYPES.has(j.type)).map((j) => j.type));
       for (const type of batchTypes) {
-        const typeJobs = jobs.filter((j) => j.type === type);
+        const allTypeJobs = jobs.filter((j) => j.type === type);
+        const typeJobs = allTypeJobs.filter((j) => !smsHeldByEmail(j));
+        out.sms_held_no_value += allTypeJobs.length - typeJobs.length;
+        if (!typeJobs.length) continue;
         const smsRecipients = smsForType(type); // type-scoped, computed once — not per lead
         if (!smsRecipients.length) { out.sms_no_recipients += typeJobs.length; continue; }
-        if (smsDry) { out.sms_suppressed += typeJobs.length; continue; } // dry-run: claim nothing, as today
+        if (smsDryFor(dept)) { out.sms_suppressed += typeJobs.length; continue; } // dry-run: claim nothing, as today
+        if (smsAuthDown) { out.sms_held_auth += typeJobs.length; continue; }
 
         // Claim EVERY lead's row first — this is what preserves per-lead dedupe + the tracker's
         // per-lead audit rows. Only jobs that come back freshly-claimed (not a dupe from a prior
@@ -1217,13 +1651,17 @@ async function runOnce(opts = {}) {
         });
 
         const sentAt = new Date().toISOString();
-        const results = [];
-        for (const r of smsRecipients) {
-          await sleep(SMS_SEND_STAGGER_MS);
-          try { const msid = await sendSms(r.phone, smsBody, { dryRun: false }); results.push({ phone: r.phone, role: r.role, sid: msid, sent: true }); }
-          catch (e) { results.push({ phone: r.phone, role: r.role, error: String(e.message || e).slice(0, 200) }); }
+        const { results, anySent, auth } = await textAll(smsRecipients, smsBody);
+        if (!anySent && auth) {
+          // Credential rejected: every claimed row goes into the re-claimable auth hold, not "failed".
+          for (const { sid } of claimed) {
+            try { await finishSms(sid, { status: "error", reason: SMS_AUTH_HOLD_REASON, body: smsBody, recipients: results }); }
+            catch (e) { console.warn(`  ⚠ finishSms failed for a batched row (${type}): ${String(e).slice(0, 140)}`); }
+          }
+          out.sms_held_auth += claimed.length;
+          noteAuthDown(results);
+          continue;
         }
-        const anySent = results.some((x) => x.sent);
         const firstSid = (results.find((x) => x.sid) || {}).sid || null;
         const reason = anySent
           ? (claimed.length > 1 ? `batched (${claimed.length} leads this pass)` : null)
@@ -1331,17 +1769,19 @@ async function previewEvent(opts) {
 
   if (emailType === "post_appointment") {
     const day = localDateISO(tz);
-    const j = await apiJson(`/api/meetings?scope=window&team_id=${teamId}&enterprise_id=${encodeURIComponent(ent)}&serviceType=${dept}&start=${day}&end=${day}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
+    const j = await apiJson(`/api/meetings?scope=window&team_id=${teamId}&enterprise_id=${encodeURIComponent(ent)}&serviceType=${dept}&start=${day}&end=${day}`, { spyneToken: true });
     const list = j.meetings || [];
-    const m = list.find((x) => String(x.id) === eventKey) || (keyed ? null : list[0]);
+    // The ledger key is the meeting_id since 2026-10-09; older rows (and the live feed) use the Mongo _id.
+    const m = list.find((x) => [x.id, x.meetingId, x.mongoId].some((v) => v != null && String(v) === eventKey)) || (keyed ? null : list[0]);
     if (!m) return null;
-    const mtd = await apptMTD(teamId, dept).catch(() => 0);
+    const mtd = await apptMTD(teamId, dept, tz).catch(() => 0);
+    const sched = schedInfo(m.when, m.tz || tz);
     // Same reason-for-service lookup the send path does, so this preview matches what went out.
     const svc = dept === "service"
       ? (await leadCaptureCH.fetchServiceReasonsByLead(teamId, [m.leadId]).catch(() => new Map())).get(String(m.leadId || "")) || null
       : null;
     return T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: {
-      customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
+      customer: m.customer, phone: m.phone, when: sched.when, time: m.time, relDay: safeRelDay(sched, m.relDay),
       // the booking's own department wins (the template labels the whole email from this)
       type: m.type || ((m.serviceType || dept) === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
       transportation: m.transportation || m.transportationOption, status: m.status, byVini: m.source === "spyne", recordingUrl: m.recordingUrl,
@@ -1393,8 +1833,14 @@ async function previewEvent(opts) {
 }
 
 // holdReason is exported for its test — the hold/failure line is what keeps the Slack breakage
-// alert meaningful, so it gets pinned rather than left to a code reading.
-module.exports = { runOnce, previewEvent, isUSActiveWindow, holdReason };
+// alert meaningful, so it gets pinned rather than left to a code reading. The appointment gates,
+// reply/direction rules and window helpers are exported for theirs (server/roi-cron/__tests__/).
+// eventKeys is re-exported so a caller that already loads the runner gets the ledger's key builder.
+module.exports = {
+  runOnce, previewEvent, isUSActiveWindow, holdReason,
+  schedInfo, safeRelDay, apptSkipReason, hasEarlierTwin, isCancelledStatus, mtdWindow,
+  smsThreadHasRealReply, isRealSmsReply, callDirection, isSpamCall, fetchFeedPages, eventKeys,
+};
 if (IS_CLI) {
   (async () => {
     await runOnce();
