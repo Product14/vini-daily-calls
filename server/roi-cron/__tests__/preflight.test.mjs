@@ -213,7 +213,7 @@ test("app.js: no cron route is left failing open, and the email-tracker crons ru
   assert.ok(routes.length >= 9, `found ${routes.length} inline cron routes`);
   for (const [, path, body] of routes) assert.match(body, /cronAuthorized\(req\)/, `${path} checks cronAuthorized`);
   assert.match(src, /function makeAgentsRefreshRoute[\s\S]{0,400}cronAuthorized\(req\)/);
-  for (const p of ['"/api/cron/roi-email"', '"/api/cron/roi-digest/:cadence"', '"/api/cron/roi-backfill"', '"/api/cron/roi-events/shard/:shard/:shards"']) {
+  for (const p of ['"/api/cron/roi-email"', '"/api/cron/roi-digest/:cadence"', '"/api/cron/roi-backfill"', '"/api/cron/roi-events/shard/:shard/:shards"', '"/api/cron/roi-watchdog"']) {
     const hit = routes.find(([, path]) => path.includes(p));
     assert.ok(hit, p);
     assert.match(hit[2], /preflightGate\(/, `${p} runs preflight`);

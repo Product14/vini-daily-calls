@@ -4064,6 +4064,34 @@ app.get(["/api/cron/roi-events", "/api/cron/roi-events/shard/:shard/:shards"], a
   }
 });
 
+// ── GET /api/cron/roi-watchdog — dead-man switch for the email tracker (every 30 min) ─────────
+// Independent of the send passes, so a pass killed at 300s (which never reaches its own end-of-pass
+// alerts) is still noticed: reads roi_digest_runs / roi_event_emails / roi_event_sms / roi_cron_runs
+// and posts ONE consolidated Slack alert of new problems (each problem at most once per 6h). Writes
+// nothing but its own roi_cron_runs row. See server/roi-cron/watchdog.cjs for the checks.
+app.get("/api/cron/roi-watchdog", async (req, res) => {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused.
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: "roi-watchdog" });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
+  try {
+    const { runWatchdog } = require("./roi-cron/watchdog.cjs");
+    const out = await runWatchdog();
+    return res.status(200).json({ ranAt: new Date().toISOString(), ...out });
+  } catch (err) {
+    console.error("GET /api/cron/roi-watchdog error:", err?.message ?? err);
+    try {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      await postSystemicAlert({ source: "Email tracker watchdog", title: "watchdog CRASHED", detail: `runWatchdog threw: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: "30-min email-tracker watchdog" });
+    } catch { /* best-effort */ }
+    return res.status(500).json({ ok: false, error: err?.message ?? "watchdog failed" });
+  }
+});
+
 // ── GET /api/cron/csm-sync — refresh the CSM (cs_poc) mapping ────────────────
 // Pulls Metabase Q12071's cs_poc_email per team_id and upserts it into
 // roi_rooftop_config.cs_poc — the authoritative CSM the Email Tracker reads.
