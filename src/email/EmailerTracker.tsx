@@ -21,6 +21,7 @@ import {
 } from "./mockData";
 import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, updateRooftopDryRun, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, trackerAuthHeaders, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
 import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
+import { columnDate, periodLabel } from "./periodBuckets";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
 import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
 import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow } from "./sendDigest";
@@ -946,7 +947,7 @@ export function EmailerTracker() {
               {view === "digests"
                 ? Array.from({ length: colCount }).map((_, i) => (
                     <Th key={i} minW={104}>
-                      <div>{formatColLabel(cadence, i, today)}</div>
+                      <div title={cadence === "daily" ? undefined : periodLabel(cadence, columnDate(today, cadence, i))}>{formatColLabel(cadence, i, today)}</div>
                       <div
                         className="mt-1 flex items-center gap-1.5 text-[11px] font-bold tabular"
                         title={`${colStats[i].sent} sent · ${colStats[i].notSent} not sent · ${colStats[i].notEligible} not eligible`}
@@ -3000,17 +3001,12 @@ function MultiSelect({
   );
 }
 
+// Same column dates the cells are built on (periodBuckets.columnDate): the old setUTCMonth here rolled
+// Mar 31 − 1 month into March, so on the 31st a monthly header could name the wrong month.
 function formatColLabel(cadence: Cadence, i: number, today: string): string {
-  const [y, m, d] = today.split("-").map(Number);
+  const [y, m, d] = columnDate(today, cadence, i).split("-").map(Number);
   const date = new Date(Date.UTC(y, m - 1, d));
-  if (cadence === "daily") {
-    date.setUTCDate(date.getUTCDate() - i);
-    return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-  }
-  if (cadence === "weekly") {
-    date.setUTCDate(date.getUTCDate() - i * 7);
-    return `Wk ${date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
-  }
-  date.setUTCMonth(date.getUTCMonth() - i);
+  if (cadence === "daily") return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  if (cadence === "weekly") return `Wk ${date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
   return date.toLocaleDateString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" });
 }

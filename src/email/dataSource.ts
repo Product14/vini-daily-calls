@@ -14,6 +14,7 @@
 // service-role key) instead of the browser's publishable/anon key — the tables are RLS-protected,
 // so the anon key can no longer read them. isSupabaseConfigured still gates the "connected" state.
 import { isSupabaseConfigured } from "./supabaseClient";
+import { bucketRuns, columnDate, scheduledIsStale } from "./periodBuckets";
 import { promptDialog } from "../ui/dialogs";
 import {
   type AgentType,
@@ -118,31 +119,13 @@ function normReason(r: string | null): NotSentReason {
   }
 }
 
-/* ── date helpers (UTC, anchored) ──────────────────────────────────────────── */
-function shift(anchor: string, unit: Cadence, n: number): string {
-  const [y, m, d] = anchor.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  if (unit === "daily") dt.setUTCDate(dt.getUTCDate() - n);
-  else if (unit === "weekly") dt.setUTCDate(dt.getUTCDate() - n * 7);
-  else {
-    // Subtract n months WITHOUT day-overflow: setUTCMonth on a day the target month
-    // lacks (e.g. Mar 31 − 1mo) silently rolls into the next month. Clamp to the
-    // target month's last valid day instead.
-    const day = dt.getUTCDate();
-    dt.setUTCDate(1);
-    dt.setUTCMonth(dt.getUTCMonth() - n);
-    const lastDay = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 0)).getUTCDate();
-    dt.setUTCDate(Math.min(day, lastDay));
-  }
-  return dt.toISOString().slice(0, 10);
-}
-
 /** Aggregate all department runs on one date into one rooftop-level cell. */
 function aggregateCell(date: string, cadence: Cadence, runs: RunRow[]): SendCell {
   const cellRuns: CellRun[] = runs.map(r => ({
     department: r.department,
     status: r.status,
     reason: r.reason ?? undefined,
+    localDate: r.local_date,
     runId: r.id != null ? String(r.id) : undefined,
     openedAt: r.opened_at ?? undefined,
     openCount: r.open_count ?? undefined,
@@ -237,18 +220,16 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   // Explicit history anchor wins (user jumped to a past date); else the live anchor (latest run / yesterday).
   const today = anchorReq ?? (latestRun > isoYesterday ? latestRun : isoYesterday);
 
-  // anchor recomputed above; build cells for ONE department's runs
-  function buildCells(deptRuns: RunRow[], cadence: Cadence): SendCell[] {
-    const byDate = new Map<string, RunRow[]>();
-    for (const r of deptRuns) {
-      if (r.cadence !== cadence) continue;
-      const arr = byDate.get(r.local_date) ?? [];
-      arr.push(r); byDate.set(r.local_date, arr);
-    }
-    return Array.from({ length: CADENCE_LEN[cadence] }, (_, i) => {
-      const date = shift(today, cadence, i);
-      return aggregateCell(date, cadence, byDate.get(date) ?? []);
-    });
+  // anchor recomputed above; build cells for ONE department's runs. A weekly/monthly column is a
+  // period, not a date: see periodBuckets.ts for why matching by exact date left those grids blank.
+  // A run still "scheduled" after the day it was due was never sent (no pass came back for it, e.g.
+  // the 2026-10-01 monthly and 16 daily rows on 2026-09-30), so it shows as the miss it is.
+  function buildCells(deptRuns: RunRow[], cadence: Cadence, monthlySendDay?: number | null): SendCell[] {
+    return bucketRuns(deptRuns, cadence, today, CADENCE_LEN[cadence]).map((runs, i) =>
+      aggregateCell(columnDate(today, cadence, i), cadence, runs.map((r) =>
+        r.status === "scheduled" && scheduledIsStale(cadence, r.local_date, todayIso, monthlySendDay ?? 1)
+          ? { ...r, status: "not_sent" as const, reason: r.reason ?? "before_send_hour" }
+          : r)));
   }
 
   // ONE ROW PER (team, department) — separate tracking per department.
@@ -320,7 +301,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
       current_block,
       daily,
       weekly: buildCells(deptRuns, "weekly"),
-      monthly: buildCells(deptRuns, "monthly"),
+      monthly: buildCells(deptRuns, "monthly", cfg?.monthly_send_day),
       config: {
         daily_enabled: cfg?.daily_enabled !== false,            // default on
         weekly_enabled: cfg?.weekly_enabled === true,

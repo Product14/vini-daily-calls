@@ -13,6 +13,7 @@ import { isPipelineConfigured, runDryPipeline } from "./pipeline";
 import { renderDigestEmail } from "./renderDigest";
 import { sendDigestNow, generateAndSendNow, generatePreviewNow, renderStoredPreview, addRecipientNow, toggleRecipientNow, setRecipientPhoneNow, updateRooftopConfigNow, addCsmNow } from "./sendDigest";
 import { loadDigestRun, type DigestRunDetail } from "./dataSource";
+import { periodLabel } from "./periodBuckets";
 import { confirmDialog } from "../ui/dialogs";
 
 /**
@@ -168,10 +169,17 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
   const runHtml = primary?.renderedHtml ?? detail?.html ?? undefined;
   const metrics = primary?.metrics ?? detail?.metrics ?? undefined;
   const dept = primary?.department;
+  // The stored run's own local_date — the key every read/re-send of that run must use. Same as the
+  // cell date for daily; a weekly/monthly cell is a period whose run can be dated anywhere inside it.
+  const runDate = primary?.localDate ?? cell.date;
   const rawReason = primary?.reason;
   const reason = cell.reason ?? "scheduler_skipped";
   const isSent = status === "sent";
   const isSuppressed = status === "suppressed";
+  // No run at all for this period / still waiting for today's send time. Neither is a scheduler miss,
+  // and labelling them "Scheduler skipped" read as a failure on cells that never had a run.
+  const isEmpty = status === "not_subscribed";
+  const isPending = status === "scheduled";
   // Weekly/monthly digests are generated on demand (rolling window) → preview-then-send flow.
   const isPeriodic = cell.cadence !== "daily";
   // Department for the generate/send call: the cell's run dept, else the rooftop's first department.
@@ -197,18 +205,21 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
     if (tpl === null) { setPreviewHtml(null); return; }
     if (!rooftop.team_id || !effDept) { setTplErr("Missing rooftop/department"); setTplActive(null); return; }
     setTplBusy(true);
-    const r = await renderStoredPreview({ teamId: rooftop.team_id, dept: effDept, localDate: cell.date, cadence: cell.cadence, tpl });
+    const r = await renderStoredPreview({ teamId: rooftop.team_id, dept: effDept, localDate: runDate, cadence: cell.cadence, tpl });
     setTplBusy(false);
     if (r.ok && r.html) setPreviewHtml(r.html);
     else { setTplErr(r.error || "Preview failed"); setTplActive(null); }
   };
 
-  const statusLabel = isSent ? "Sent" : isSuppressed ? "Suppressed" : NOT_SENT_REASON_LABEL[reason];
+  const statusLabel = isSent ? "Sent" : isSuppressed ? "Suppressed" : isEmpty ? "No run" : isPending ? "Scheduled" : NOT_SENT_REASON_LABEL[reason];
   const statusChip = isSent
     ? "bg-positive/10 text-positive"
-    : isSuppressed
+    : isSuppressed || isPending
     ? "bg-warning-soft text-warning"
+    : isEmpty
+    ? "bg-surface-subtle text-text-muted"
     : "bg-negative-soft text-negative";
+  const periodName = cell.cadence === "daily" ? "day" : cell.cadence === "weekly" ? "week" : "month";
 
   // Portal + high z-index so this overlays the host shell's sidebar instead of opening below it.
   return createPortal(
@@ -222,7 +233,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
       <header className="flex flex-shrink-0 items-center justify-between gap-4 border-b border-border-subtle bg-surface-card px-6 py-3">
         <div className="min-w-0">
           <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-            {cell.cadence} · {formatHumanDate(cell.date)}{dept ? ` · ${dept}` : ""}
+            {cell.cadence} · {cell.cadence === "daily" ? formatHumanDate(cell.date) : periodLabel(cell.cadence, cell.date)}{dept ? ` · ${dept}` : ""}
           </div>
           <div className="flex items-center gap-2">
             <h2 className="truncate text-[16px] font-bold leading-tight text-text-primary">{rooftop.name}</h2>
@@ -274,13 +285,17 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
       {!isSent ? (
         <div
           className={`flex-shrink-0 border-b border-border-subtle px-6 py-2 text-[12px] leading-snug ${
-            isSuppressed ? "bg-warning-soft text-warning" : "bg-negative-soft text-negative"
+            isSuppressed || isPending ? "bg-warning-soft text-warning" : isEmpty ? "bg-surface-subtle text-text-muted" : "bg-negative-soft text-negative"
           }`}
         >
           {isSuppressed
             ? rawReason === "dry_run"
               ? "Held by dry-run mode — the digest was generated but emails are OFF. “Re-run (dry-run)” regenerates it; no email is sent."
               : `Suppressed${rawReason ? ` · ${rawReason}` : ""}`
+            : isEmpty
+            ? `No ${cell.cadence} digest was generated for this ${periodName}. Nothing was sent.`
+            : isPending
+            ? "Scheduled · waiting for this rooftop's send time. Nothing has been sent yet."
             : `Not sent · ${NOT_SENT_REASON_LABEL[reason]} — ${REASON_HELPER[reason]}`}
         </div>
       ) : null}
@@ -351,10 +366,12 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
             {/* ALWAYS show the recipient list + chooser + per-recipient (re)send — every status */}
             <Section eyebrow="Recipients" title={isSent ? "Recipients · choose & retrigger" : "Recipients · choose & send"}>
               <RecipientManager
+                key={`${rooftop.rooftop_id}::${cell.cadence}::${cell.date}`}
+                periodic={isPeriodic}
                 rooftop={rooftop}
                 dept={dept}
                 metrics={metrics}
-                reportDate={cell.date}
+                reportDate={runDate}
                 sentRecipients={primary?.recipients}
                 isSent={isSent}
                 onSend={() => onSend(rooftop.rooftop_id, cell.date, cell.cadence)}
@@ -415,7 +432,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
                     recipients={primary?.recipients}
                     metrics={metrics}
                     dept={dept}
-                    reportDate={cell.date}
+                    reportDate={runDate}
                     cadence={cell.cadence}
                     onSent={() => {
                       onReload?.();
@@ -434,7 +451,7 @@ export function RooftopCellDrawer({ rooftop, cell, onClose, onSend, onReload, na
                     reason={reason}
                     dept={dept}
                     metrics={metrics}
-                    localDate={cell.date}
+                    localDate={runDate}
                     onSent={() => {
                       onReload?.();
                       onClose();
@@ -649,6 +666,7 @@ function RecipientManager({
   reportDate,
   sentRecipients,
   isSent,
+  periodic = false,
   onSend,
   onReload,
 }: {
@@ -658,6 +676,8 @@ function RecipientManager({
   reportDate?: string;
   sentRecipients?: { email: string; received?: boolean; bounced?: boolean }[];
   isSent: boolean;
+  /** Weekly/monthly cell: this list's sends render the DAILY template, so they stay off. */
+  periodic?: boolean;
   onSend: () => void;
   onReload?: () => void;
 }) {
@@ -673,7 +693,10 @@ function RecipientManager({
   // "Sent" row always lists who got it — even if they aren't in the configured roi_recipients.
   const [depts, setDepts] = useState(() =>
     rooftop.departments.map((d) => {
-      const base = (d.allRecipients ?? d.recipients).map((r) => ({ ...r, received: r.received || recvByEmail.get(r.email.toLowerCase()) || false }));
+      // "Received" comes from THIS cell's run only. The department-level r.received is the rooftop's
+      // latest run of ANY cadence, so a monthly cell with no run showed every weekly recipient as
+      // "✓ Received" (Sport Durst, 2026-10-08) — read as proof a monthly went out that never did.
+      const base = (d.allRecipients ?? d.recipients).map((r) => ({ ...r, received: recvByEmail.get(r.email.toLowerCase()) ?? false }));
       if (dept && d.kind === dept) {
         for (const sr of sentRecipients ?? []) {
           if (!base.some((b) => b.email.toLowerCase() === sr.email.toLowerCase())) {
@@ -770,7 +793,11 @@ function RecipientManager({
     return <p className="text-[12px] text-text-muted">No departments classified for this rooftop.</p>;
   }
 
-  const noData = !hasSendableData(metrics);
+  // Sends from this list render the DAILY template from the cell's stored numbers (sendDigestNow).
+  // A weekly/monthly cell now carries its run's numbers too, and sending them through here would email
+  // the dealer a "Daily Digest" of a whole month. Those cadences send from "Generate & send", which
+  // builds the email for the period server-side.
+  const noData = periodic || !hasSendableData(metrics);
 
   return (
     <div className="space-y-4">
@@ -791,7 +818,11 @@ function RecipientManager({
           {smsRooftopOn ? "On" : "Off"}
         </button>
       </div>
-      {noData ? (
+      {periodic ? (
+        <p className="rounded-md border border-border-subtle bg-surface-subtle px-3 py-1.5 text-[11px] leading-snug text-text-muted">
+          Weekly and monthly digests are sent from Generate &amp; send, which builds the email for the whole period. You can still add or enable recipients here.
+        </p>
+      ) : noData ? (
         <p className="rounded-md border border-warning/40 bg-warning-soft px-3 py-1.5 text-[11px] leading-snug text-warning">
           No data for this day — there’s nothing to send, so sending is disabled. You can still add/enable recipients; they’ll receive on the next day with activity.
         </p>
@@ -853,7 +884,7 @@ function RecipientManager({
                     type="button"
                     onClick={() => void sendSelected(d.kind, emails)}
                     disabled={bulk === "sending" || chosenCount === 0 || noData}
-                    title={noData ? "No data for this day — nothing to send" : undefined}
+                    title={periodic ? "Weekly and monthly digests are sent from Generate & send" : noData ? "No data for this day — nothing to send" : undefined}
                     className={`mt-2 w-full rounded-md px-3 py-2 text-[12px] font-semibold ${
                       noData
                         ? "cursor-not-allowed bg-surface-subtle text-text-muted"
@@ -1267,6 +1298,15 @@ function DigestEmail({
   const exact = !!renderedHtml;
   if (isSent) {
     html = renderedHtml || null;
+  } else if (cell.cadence !== "daily" && !renderedHtml) {
+    // renderDigestEmail is the DAILY template ("yesterday", "daily report"). A weekly/monthly body
+    // comes from the server preview (PeriodicGenerateSection), so wait for it instead of showing a
+    // daily-worded stand-in built from this period's stored numbers.
+    return (
+      <div className="rounded-xl border border-border-subtle bg-surface-card px-4 py-10 text-center text-[12px] text-text-muted">
+        The {cell.cadence} email is built on demand. Its preview appears here once generated.
+      </div>
+    );
   } else {
     html = renderedHtml || renderDigestEmail((metrics ?? {}) as DigestMetrics, {
       rooftopName: rooftop.name, dept, teamId: rooftop.team_id, enterpriseId: rooftop.enterprise_id,

@@ -65,6 +65,9 @@ export type CellRun = {
   department: DeptKind;
   status: SendStatus;
   reason?: string; // raw backend reason (e.g. 'dry_run', 'no_data')
+  /** The run's own roi_digest_runs.local_date. Equals the cell date for daily; a weekly/monthly cell
+   * spans a period, so its run can carry any date inside it (e.g. the 1st for the cron's monthly). */
+  localDate?: string;
   /** Stored digest payload. The grid load no longer carries it (see loadDigestRun); the cell drawer
    * fetches it by runId. Set only where a caller already has it. */
   metrics?: DigestMetrics;
