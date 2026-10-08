@@ -68,20 +68,28 @@ const chEsc = (s) => String(s).replace(/'/g, "''");
 
 const nextDay = (d) => { const [y, m, day] = d.split("-").map(Number); const nd = new Date(Date.UTC(y, m - 1, day + 1)); return `${nd.getUTCFullYear()}-${String(nd.getUTCMonth() + 1).padStart(2, "0")}-${String(nd.getUTCDate()).padStart(2, "0")}`; };
 
-// Recompute action items for one (team, dept, day) window — identical logic to runner.cjs apiActionItems.
+// Recompute action items for one (team, dept, day) window — identical logic to runner.cjs apiActionItems:
+// the rooftop's own enterprise_id on the call, and every page (offset + hasMore), not just the first 200.
 const _cache = new Map();
-async function recompute(teamId, dept, localDate) {
+const PAGE = 200, MAX_PAGES = 10;
+async function recompute(teamId, dept, localDate, entId) {
   const key = `${teamId}|${dept}|${localDate}`;
   if (_cache.has(key)) return _cache.get(key);
   const svc = dept === "service" ? "service" : "sales";
-  const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=created&start=${localDate}&end=${nextDay(localDate)}&limit=200`;
-  const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {} });
-  if (!res.ok) throw new Error(`action-items ${res.status} (${teamId} ${localDate})`);
-  const j = await res.json();
-  if (j && j.degraded) throw new Error(`action-items degraded (${teamId})`);
-  if (j && j.scope !== "created") throw new Error(`scope degraded to '${j.scope}' — is reporting-vini deployed with scope=created?`);
+  const rows = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=created&start=${localDate}&end=${nextDay(localDate)}&limit=${PAGE}&offset=${page * PAGE}${entId ? `&enterprise_id=${encodeURIComponent(entId)}` : ""}`;
+    const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(60000) });
+    if (!res.ok) throw new Error(`action-items ${res.status} (${teamId} ${localDate})`);
+    const j = await res.json();
+    if (j && j.degraded) throw new Error(`action-items degraded (${teamId})`);
+    if (j && j.scope !== "created") throw new Error(`scope degraded to '${j.scope}' — is reporting-vini deployed with scope=created?`);
+    const got = j.actionItems || [];
+    rows.push(...got);
+    if (!j.hasMore || !got.length) break;
+  }
   const byIntent = new Map();
-  for (const it of j.actionItems || []) { const k = (it.intent || "").trim(); if (!k) continue; byIntent.set(k, (byIntent.get(k) || 0) + 1); }
+  for (const it of rows) { const k = (it.intent || "").trim(); if (!k) continue; byIntent.set(k, (byIntent.get(k) || 0) + 1); }
   const items = [...byIntent.entries()].map(([intent, count]) => ({ intent, count })).sort((a, b) => b.count - a.count);
   const out = { total: items.reduce((s, i) => s + i.count, 0), items };
   _cache.set(key, out);
@@ -92,7 +100,7 @@ async function loadDailyRuns() {
   const rows = [];
   const PAGE = 1000;
   for (let from = 0; ; from += PAGE) {
-    let q = sb.from("roi_digest_runs").select("id,team_id,department,local_date,status,metrics").eq("cadence", "daily").not("metrics", "is", null).order("local_date", { ascending: true }).range(from, from + PAGE - 1);
+    let q = sb.from("roi_digest_runs").select("id,team_id,enterprise_id,department,local_date,status,metrics").eq("cadence", "daily").not("metrics", "is", null).order("local_date", { ascending: true }).range(from, from + PAGE - 1);
     if (ONLY_TEAM) q = q.eq("team_id", ONLY_TEAM);
     if (SINCE) q = q.gte("local_date", SINCE);
     const { data, error } = await q;
@@ -167,7 +175,7 @@ const sameItems = (a, b) => { a = a || []; b = b || []; if (a.length !== b.lengt
     try {
       fresh = DIRECT
         ? (directMap.get(`${r.team_id}|${r.department}|${r.local_date}`) || { total: 0, items: [] })
-        : await recompute(r.team_id, r.department, r.local_date);
+        : await recompute(r.team_id, r.department, r.local_date, r.enterprise_id);
     }
     catch (e) { errors++; console.warn(`  ! skip ${r.team_id} ${r.department} ${r.local_date}: ${String(e.message).slice(0, 100)}`); return; }
     const oldTotal = Number(r.metrics.actionItemsTotal) || 0;

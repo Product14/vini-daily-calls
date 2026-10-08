@@ -14,8 +14,11 @@
  *         Set DRY_RUN=false to actually email. A rooftop with roi_live_departments.dry_run=true is
  *         always held even when DRY_RUN=false.
  *
- *   node runner.cjs            # one pass
- *   node runner.cjs --loop     # run now, then every hour
+ *   node runner.cjs                    # one pass
+ *   node runner.cjs --loop             # run now, then every hour
+ *   node runner.cjs --cadence weekly   # one weekly (or monthly) pass
+ *   Operator knobs (ONLY_TEAMS, IGNORE_SEND_HOUR, IGNORE_SEND_DAY, RUN_LOCAL_DATE, FORCE_RESEND) are
+ *   honoured ONLY from this CLI; the scheduled cron ignores them.
  */
 const { createClient } = require("@supabase/supabase-js");
 // Single source of truth for the digest HTML — the SAME module the SPA preview
@@ -32,7 +35,7 @@ const { isSubscribed, isChurned } = require("./subscriptions.cjs");
 // Self-healing rooftop-timezone resolver (live Spyne API, persisted back) — already used by
 // eventRunner.cjs; the digest cron used to hardcode America/New_York for any rooftop with a
 // blank roi_rooftop_config.timezone.
-const { resolveTz, primeTeamDetails } = require("./resolveTz.cjs");
+const { resolveTz, primeTeamDetails, fetchTeamDetailsCH } = require("./resolveTz.cjs");
 
 // Deliverability gate — malformed / typo'd / already-bounced addresses are never mailed, because
 // their bounces are charged to the sending domain and cost every OTHER rooftop its inbox placement.
@@ -107,6 +110,97 @@ const REPORTING_TIMEOUT_MS = Number(process.env.REPORTING_TIMEOUT_MS || 60000);
 // what it didn't reach, and the next hourly pass starts with the work that is still due.
 const DIGEST_PASS_BUDGET_MS = Number(process.env.DIGEST_PASS_BUDGET_MS || 180000);
 
+// ── Weekly / monthly catch-up bounds (2026-10-09) ─────────────────────────────────────────────
+// A weekly/monthly digest used to go out ONLY on its exact send day: one bad day (a 504, a killed
+// pass) lost the whole period. Now a period stays due from its send day until a 'sent' row exists,
+// for at most this many days. Weekly can never be more than 6 days late (the next period starts),
+// monthly gives up after 10 and records not_sent/missed_send_day so the tracker shows the gap.
+const WEEKLY_MAX_LATE_DAYS = 6;
+const MONTHLY_MAX_LATE_DAYS = 10;
+// Internal test rooftops that discovery must never configure (in addition to any name matching /test/i
+// and eventila's is_test_account flag).
+const TEST_TEAM_IDS = new Set(["3769f9d53b"]);
+
+// Period-over-period % the way the Overview computes it (liveData.ts pctDelta): null, never 0, when the
+// prior window is empty, so the chip renders nothing instead of a fabricated "+100%".
+function pctDelta(curr, prev) {
+  const p = Number(prev) || 0;
+  return p ? Math.round(((Number(curr) || 0) - p) / p * 100) : null;
+}
+// Calendar arithmetic on a YYYY-MM-DD string (UTC-anchored, so no zone can shift the date).
+function addDaysISO(iso, n) {
+  const [y, m, d] = String(iso).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+}
+// A malformed IANA zone ("America/New York") makes Intl throw a RangeError. Checked per row so one bad
+// config value fails that row, not the whole pass.
+function isValidTz(tz) {
+  if (!tz || typeof tz !== "string") return false;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }).format(new Date()); return true; } catch { return false; }
+}
+function assertValidTz(tz) {
+  if (isValidTz(tz)) return;
+  const e = new Error(`invalid timezone "${tz}" in roi_rooftop_config; fix it in the tracker (an IANA name like America/Chicago)`);
+  e.code = "INVALID_TZ";
+  throw e;
+}
+// The dealer-local report date ("yesterday") without ever throwing: an invalid zone falls back to ET.
+// Used only to ORDER work and key error rows, never to compute a window that is sent.
+function safeLocalDate(tz) {
+  try { return localParts(isValidTz(tz) ? tz : "America/New_York").localDate; } catch { return localParts("America/New_York").localDate; }
+}
+// PostgREST caps a select at 1000 rows. roi_rooftop_config (647) and roi_live_departments (401) are under
+// it today; a silent cap would drop rooftops from every send with no error, so every fleet read pages.
+async function readAll(table, cols, opts = {}) {
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    let q = sb.from(table).select(cols);
+    if (opts.filter) q = opts.filter(q);
+    for (const c of opts.order || ["team_id"]) q = q.order(c, { ascending: true });
+    const { data, error } = await q.range(from, from + 999);
+    if (error) return { data: null, error };
+    out.push(...(data || []));
+    if (!data || data.length < 1000) return { data: out, error: null };
+  }
+}
+async function selectRecipientsAll(cols) {
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    const res = await selectRecipients(sb, cols, (q) => q.order("team_id", { ascending: true }).order("email", { ascending: true }).range(from, from + 999));
+    if (res.error) return res;
+    out.push(...(res.data || []));
+    if (!res.data || res.data.length < 1000) return { data: out, error: null };
+  }
+}
+const LIVE_COLS = "team_id,department,dry_run";
+const LIVE_FILTER = { filter: (q) => q.eq("is_live", true), order: ["team_id", "department"] };
+const RECIP_COLS = "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at";
+// Live rows + config + recipients for a pass, paged, with enterprise_id attached to every live row.
+async function loadFleet(cfgCols) {
+  const [liveRes, cfgRes, recRes] = await Promise.all([
+    readAll("roi_live_departments", LIVE_COLS, LIVE_FILTER),
+    readAll("roi_rooftop_config", cfgCols),
+    selectRecipientsAll(RECIP_COLS),
+  ]);
+  if (liveRes.error || cfgRes.error || recRes.error) {
+    const e = liveRes.error || cfgRes.error || recRes.error;
+    throw new Error(`Supabase read failed (check ROI_SUPABASE_URL/ROI_SUPABASE_SERVICE_KEY): ${e.message}`);
+  }
+  const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
+  // enterprise_id lives on roi_rooftop_config (not roi_live_departments): attach it to each live row so
+  // the stored row, console links, reporting calls and enrichment all carry the rooftop's own enterprise.
+  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || "";
+  const recOf = new Map();
+  for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
+  return { live: liveRes.data ?? [], cfgOf, recOf };
+}
+// Recipients who would get this cadence if they subscribed: verified, deliverable, on this department's
+// list, email on. Lets a pass tell "nobody subscribed to the weekly" (unsubscribed) from "no recipients at
+// all" (recipients_missing) — the tracker labels the two differently.
+function eligibleButUnsubscribed(recips, dept) {
+  return (recips ?? []).some((r) => r.verified_at && canEmail(r) && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled);
+}
+
 // ── Per-appointment dollar value (whiteboard spec) ───────────────────────────
 // Same per-category rates as the Programs dashboard (src/agents/AgentsDashboard.tsx):
 //   Sales Inbound $200 · Sales Outbound $250 · Service Inbound $100 · Service Outbound $200.
@@ -178,11 +272,17 @@ function localParts(tz) {
 // success served the numbers read at midnight to the 7am send.
 const _apiCache = new Map();
 const resetApiCache = () => _apiCache.clear();
-async function apiReport(teamId, start, end) {
-  const k = `${teamId}|${start}|${end}`;
+// Every reporting-vini call carries the rooftop's OWN enterprise_id. Without it the route fell back to the
+// env token's enterprise, and the dealer-leads action-item stats came back all zero for every rooftop
+// from 2026-10-01 (audit F1/F18). Older reporting-vini deploys ignore the param.
+const entQS = (entId) => (entId ? `&enterprise_id=${encodeURIComponent(String(entId))}` : "");
+// Resolves { j, byName }: the whole /api/reports response (the digest's appointment list, rooftop rungs and
+// prior basis are read from the SAME response the KPI numbers come from) plus the agents keyed by name.
+async function apiReport(teamId, start, end, entId) {
+  const k = `${teamId}|${start}|${end}|${entId || ""}`;
   if (_apiCache.has(k)) return _apiCache.get(k);
   const p = (async () => {
-    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}`, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
+    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}${entQS(entId)}`, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`reporting-api ${res.status} (${teamId} ${start}..${end}): ${(await res.text()).slice(0, 120)}`);
     const j = await res.json();
     // The reporting API returns a zeroed report with `degraded:true` on a backend read failure.
@@ -191,28 +291,89 @@ async function apiReport(teamId, start, end) {
     if (j && j.degraded) throw new Error(`reporting-api degraded (${teamId} ${start}..${end}) — holding digest`);
     const byName = {};
     for (const a of j.agents || []) byName[a.name] = a;
-    return byName;
+    return { j, byName };
   })();
   _apiCache.set(k, p);
   p.catch(() => { if (_apiCache.get(k) === p) _apiCache.delete(k); });
   return p;
 }
-const apiPickDept = (byName, dept) => {
+const apiPickDept = (rep, dept) => {
+  const byName = (rep && rep.byName) || {};
   const D = dept === "service" ? "Service" : "Sales";
   return { ib: byName[`${D} Inbound`] || {}, ob: byName[`${D} Outbound`] || {} };
 };
-async function apiMetrics(teamId, dept, start, end) {
-  const { ib, ob } = apiPickDept(await apiReport(teamId, start, end), dept);
+
+// ── Ports of the Overview's own roll-up rules (reporting-vini src/components/reports/liveData.ts) ──
+// The digest must print the number the dealer finds on the Overview for the same window. These mirror
+// rooftopRungsFor / unattributedApptsFor / assistedApptsFor / hasAgentActivity line for line; keep them
+// in step with that file.
+const AGENT_ID = { "Sales Inbound": "sales_ib", "Sales Outbound": "sales_ob", "Service Inbound": "service_ib", "Service Outbound": "service_ob" };
+const agentIdOf = (a) => (a && (a.id || AGENT_ID[a.name])) || null;
+function hasAgentActivity(a) {
+  const m = (a && a.metrics) || {};
+  const lf = a && a.leadFunnel;
+  const leads = lf && lf.contacted != null ? lf.contacted : ((a && a.report && a.report.leadsAttempted) ?? 0);
+  return N(m.calls) + N(m.conversations) + N(m.qualified) + N(m.appointments) + N(m.smsSent) + N(leads) > 0;
+}
+function normalizeRooftop(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const fin = (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const leadsAttempted = fin(raw.leadsAttempted), engaged = fin(raw.engaged), qualified = fin(raw.qualified);
+  if (leadsAttempted === undefined || engaged === undefined || qualified === undefined) return undefined;
+  if (typeof raw.dept !== "string" || !raw.dept) return undefined;
+  if (!Array.isArray(raw.agentTypes) || !raw.agentTypes.every((t) => typeof t === "string")) return undefined;
+  const triple = (v, keepNull) => {
+    if (!v || typeof v !== "object") return undefined;
+    const g = (k) => (keepNull && v[k] === null ? null : fin(v[k]));
+    const a = g("leadsAttempted"), b = g("engaged"), c = g("qualified");
+    return a === undefined || b === undefined || c === undefined ? undefined : { leadsAttempted: a, engaged: b, qualified: c };
+  };
+  return { dept: raw.dept, agentTypes: raw.agentTypes, leadsAttempted, engaged, qualified, prior: triple(raw.prior, false), deltaPct: triple(raw.deltaPct, true) };
+}
+// The rooftop's DISTINCT rungs, only when `agents` is exactly the agent set the canonical API counted.
+// Fails closed (undefined → keep summing the agent rows), exactly like the Overview.
+function rooftopRungsFor(j, dept, agents) {
+  const r = normalizeRooftop(j && j.rooftop);
+  if (!r) return undefined;
+  if (dept !== r.dept) return undefined;
+  const mapped = r.agentTypes.map((t) => AGENT_ID[t]);
+  if (mapped.some((id) => !id)) return undefined;
+  const covered = new Set(mapped);
+  if (!covered.size) return undefined;
+  const live = (agents || []).filter(hasAgentActivity);
+  if (live.some((a) => !covered.has(agentIdOf(a)))) return undefined;
+  const present = new Set(live.map(agentIdOf));
+  for (const id of covered) if (!present.has(id)) return undefined;
+  return r;
+}
+function unattributedApptsFor(j, dept) {
+  if (!j) return 0;
+  const by = j.appointmentsUnattributedBy;
+  if (by && typeof by === "object") return N(dept === "service" ? by.service : by.sales);
+  return 0; // an older payload carries only a rooftop scalar, which belongs to no department
+}
+function assistedApptsFor(j, dept) {
+  const by = j && j.appointmentsAssistedBy;
+  if (!by || typeof by !== "object") return undefined;
+  return N(dept === "service" ? by.service : by.sales);
+}
+
+async function apiMetrics(teamId, dept, start, end, entId) {
+  const rep = await apiReport(teamId, start, end, entId);
+  const j = rep.j || {};
+  const { ib, ob } = apiPickDept(rep, dept);
   const n = (v) => Number(v) || 0;
-  const im = ib.metrics || {}, om = ob.metrics || {}, ics = ib.channelSplit || {}, ocs = ob.channelSplit || {}, ir = ib.report || {}, or = ob.report || {};
+  const im = ib.metrics || {}, om = ob.metrics || {}, ir = ib.report || {}, or = ob.report || {};
   const sm = ir.summary || {};
   // SMS counts = MESSAGES (metrics.smsSent), matching the console / reporting-vini dashboard's
   // "Total SMS" — NOT channelSplit.sms (conversation threads), which undercounts (1 thread = many
   // messages). smsSent is scoped to real agent conversations, so automated blasts are excluded.
   // Verified: Dream Nissan Lawrence 6/25 console out 24 = om.smsSent 24; in 36 ≈ im.smsSent 37.
-  // Calls keep channelSplit.voice (≈ one call per conversation).
-  const callIn = n(ics.voice), smsIn = n(im.smsSent), callOut = n(ocs.voice), smsOut = n(om.smsSent);
-  const obCalls = n(om.calls), obRate = n(om.connectRate), cf = ir.callFlow || {};
+  // Calls = metrics.calls, the figure the Overview's agent cards and the connect rate use (canonical for
+  // Sales). channelSplit.voice is the aggregate's pre-overlay count and, on an agent with activity rows
+  // but no calls, still carries the cloned MOCK value (22 digests printed a fabricated "Call 90").
+  const callIn = n(im.calls), smsIn = n(im.smsSent), callOut = n(om.calls), smsOut = n(om.smsSent);
+  const obCalls = n(om.calls), obRate = n(om.connectRate), cf = ir.callFlow || {}, ocf = or.callFlow || {};
   const calls = n(im.calls), after = n(im.afterHours);
   // Leads WORKED = inbound + outbound (leadFunnel.contacted is the funnel top; falls back to the
   // report's leadsAttempted). On an outbound-heavy rooftop the inbound count is tiny, so the hero's
@@ -221,13 +382,47 @@ async function apiMetrics(teamId, dept, start, end) {
   const ibf = ib.leadFunnel || {}, obf = ob.leadFunnel || {};
   const ibLeads = n(ibf.contacted) || n(ir.leadsAttempted);
   const obLeads = n(obf.contacted) || n(or.leadsAttempted);
-  const totalLeadsWorked = ibLeads + obLeads;
-  const warmWorked = n(ibf.qualified) + n(obf.qualified);
+  // SALES: the rooftop's own DISTINCT counts when the Overview would use them (same gate, ported above).
+  // Summing the two agents counts a lead both worked twice (Dream Nissan Midwest week of 09-21: 6,245 vs
+  // the Overview's 6,215 leads, 161 vs 155 conversations). Service keeps the sum, as the Overview does.
+  const deptAgents = [ib, ob].filter((a) => a && a.name);
+  const rungs = rooftopRungsFor(j, dept, deptAgents);
+  const totalLeadsWorked = rungs ? rungs.leadsAttempted : ibLeads + obLeads;
+  const warmWorked = rungs ? rungs.qualified : n(ibf.qualified) + n(obf.qualified);
+  const reached = rungs ? rungs.engaged : n(ibf.connected) + n(obf.connected);
+  // AI-booked = every agent's PLUS this department's bookings no agent owns, and AI-assisted = the
+  // department's snapshot total — both exactly the Overview's tile (aggregateFleet), and both counted
+  // from the same rows as the j.namedAppointments list the email shows beneath them.
+  const unattributed = unattributedApptsFor(j, dept);
+  const apptsBooked = n(im.appointments) + n(om.appointments) + unattributed;
+  const assistedTotal = assistedApptsFor(j, dept);
+  // Delta chips. Sales on distinct rungs: the API's own rooftop deltaPct, then its prior block, else none
+  // (never a distinct current over a summed prior). Otherwise the prior basis summed over this
+  // department's agents — the Overview's rungDelta / pSum, field for field.
+  const prior = (j && j.prior) || {};
+  const pSum = (f) => deptAgents.reduce((s, a) => { const p = prior[agentIdOf(a)]; return s + (p ? n(f(p)) : 0); }, 0);
+  let kpiDeltas;
+  if (rungs) {
+    if (rungs.deltaPct) kpiDeltas = { leads: rungs.deltaPct.leadsAttempted, conversations: rungs.deltaPct.engaged, qualified: rungs.deltaPct.qualified };
+    else if (rungs.prior) kpiDeltas = { leads: pctDelta(totalLeadsWorked, rungs.prior.leadsAttempted), conversations: pctDelta(reached, rungs.prior.engaged), qualified: pctDelta(warmWorked, rungs.prior.qualified) };
+    else kpiDeltas = { leads: null, conversations: null, qualified: null };
+  } else {
+    kpiDeltas = { leads: pctDelta(totalLeadsWorked, pSum((b) => b.leads)), conversations: pctDelta(reached, pSum((b) => b.conversations)), qualified: pctDelta(warmWorked, pSum((b) => b.qualified)) };
+  }
+  kpiDeltas.appointments = pctDelta(apptsBooked, pSum((b) => b.appointments));
+  // Per-section chips: each agent's own deltas, plus a lead-grain conversations delta (the per-agent
+  // deltas carry none, and a calls delta under a conversation count is a different number).
+  const priorOf = (a) => prior[agentIdOf(a)] || null;
+  const inboundDeltas = Object.assign({}, ir.deltas || {}, { conversations: priorOf(ib) ? pctDelta(n(ibf.connected), priorOf(ib).conversations) : null });
+  const outboundDeltas = Object.assign({}, or.deltas || {}, { conversations: priorOf(ob) ? pctDelta(n(obf.connected) || n(om.conversations), priorOf(ob).conversations) : null });
   return {
-    appointmentsYesterday: n(im.appointments) + n(om.appointments), appointmentsInbound: n(im.appointments),
+    appointmentsYesterday: apptsBooked, appointmentsInbound: n(im.appointments), appointmentsUnattributed: unattributed,
     // canonical: AI-assisted (CRM) appointments — SECONDARY metric, shown small under the AI-booked
-    // headline, never folded in. Sourced from the reporting API's per-agent appointmentsAssisted.
-    assistedAppointments: n(im.appointmentsAssisted) + n(om.appointmentsAssisted),
+    // headline, never folded in. The department's snapshot total when the API sends it (the Overview's
+    // tile), else the per-agent attributed sum.
+    assistedAppointments: assistedTotal != null ? assistedTotal : n(im.appointmentsAssisted) + n(om.appointmentsAssisted),
+    rooftopRungs: !!rungs,
+    kpiDeltas, inboundDeltas, outboundDeltas,
     inboundUniqueLeads: ibLeads, totalLeads: totalLeadsWorked,
     // Legacy inbound-leads value (report.leadsAttempted) — what the classic v1 email + its
     // guardrail used before the leadFunnel.contacted switch. Kept so a rooftop still on the
@@ -244,7 +439,7 @@ async function apiMetrics(teamId, dept, start, end) {
     // `connected` stage: a connected call OR an SMS that got a human reply). This is what the console's
     // Conversations metric counts. The channelSplit-based conversationsHandled above stays as raw
     // call/SMS activity (channel-breakdown bars + the send guardrail) — see Jun-2026 console-vs-digest bug.
-    conversationsReached: n(ibf.connected) + n(obf.connected), conversationsInbound: n(ibf.connected),
+    conversationsReached: reached, conversationsInbound: n(ibf.connected),
     conversationsCallIn: callIn, conversationsSmsIn: smsIn, conversationsChatIn: 0,
     conversationsCallOut: callOut, conversationsSmsOut: smsOut, conversationsChatOut: 0,
     // ── redesign fields (Conversational AI 2.0) ──────────────────────────────
@@ -277,9 +472,18 @@ async function apiMetrics(teamId, dept, start, end) {
     // is console-aligned: reporting-vini derives it from endcallreports.callDetails_endedReason='transferred'
     // (matches the Calls tab, e.g. Honda DTLA 94≈93) — NOT the zero-filled endcallreports.callTransferred.
     inboundTransfers: n(cf.transferred), inboundTransferTotal: n(cf.total),
+    // Hand-offs to team = transfers + callbacks across BOTH agents, read from the same callFlow fields the
+    // Overview sums (aggregateFleet: callFlow.transferred + callFlow.callbacks). The template used to derive
+    // callbacks from two legacy action-item intent names that no agent emits any more (0 of 1,178 sends).
+    handoffTransfers: n(cf.transferred) + n(ocf.transferred), handoffCallbacks: n(cf.callbacks) + n(ocf.callbacks),
+    inboundCallbacks: n(cf.callbacks), outboundTransfers: n(ocf.transferred),
   };
 }
-async function apiActionItems(teamId, dept, start, end) {
+// Created-in-window action items, grouped by intent. Pages through the route's 200-row cap (offset +
+// hasMore) instead of silently stopping at 200; past ACTION_ITEMS_MAX_PAGES it flags `truncated` so the
+// email can say "200+" rather than print a capped number as if it were the total.
+const ACTION_ITEMS_PAGE = 200, ACTION_ITEMS_MAX_PAGES = 10;
+async function apiActionItems(teamId, dept, start, end, entId) {
   // REAL action items from dealer_leads.actionItems, created in the report window, grouped by intent.
   // Fetched via reporting-vini /api/action-items?scope=created — the faithful successor to the old
   // getActionItems() "createdAt BETWEEN start/end GROUP BY intent" query.
@@ -287,40 +491,59 @@ async function apiActionItems(teamId, dept, start, end) {
   //   under-counted by 3-5× and read 0 on quiet-inbound days despite dozens of real CRM action items.
   const svc = dept === "service" ? "service" : "sales";
   try {
-    const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=created&start=${start}&end=${end}&limit=200`;
-    const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`action-items ${res.status} (${teamId} ${start}..${end})`);
-    const j = await res.json();
-    if (j && j.degraded) throw new Error(`action-items degraded (${teamId})`);
+    const rows = [];
+    let truncated = false;
+    for (let page = 0; ; page++) {
+      const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=created&start=${start}&end=${end}&limit=${ACTION_ITEMS_PAGE}&offset=${page * ACTION_ITEMS_PAGE}${entQS(entId)}`;
+      const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
+      if (!res.ok) throw new Error(`action-items ${res.status} (${teamId} ${start}..${end})`);
+      const j = await res.json();
+      if (j && j.degraded) throw new Error(`action-items degraded (${teamId})`);
+      const got = Array.isArray(j && j.actionItems) ? j.actionItems : [];
+      rows.push(...got);
+      // hasMore is the route's "got a full page" flag; an older deploy without it never pages.
+      if (!(j && j.hasMore) || got.length === 0) break;
+      if (page + 1 >= ACTION_ITEMS_MAX_PAGES) { truncated = true; break; }
+    }
     // Group the row-level items by intent → [{intent, count}] (blank intents already dropped server-side).
     const byIntent = new Map();
-    for (const it of j.actionItems || []) {
+    for (const it of rows) {
       const k = (it.intent || "").trim();
       if (!k) continue;
       byIntent.set(k, (byIntent.get(k) || 0) + 1);
     }
     const items = [...byIntent.entries()].map(([intent, count]) => ({ intent, count })).sort((a, b) => b.count - a.count);
-    return { total: items.reduce((s, i) => s + i.count, 0), items };
-  } catch { return { total: 0, items: [] }; }
+    return { total: items.reduce((s, i) => s + i.count, 0), items, truncated };
+  } catch { return { total: 0, items: [], truncated: false }; }
 }
-// Action-item scoreboard (scope=stats): current-state `overdue` + `completed` (closed within [start,end)).
-// Feeds the digest's "N overdue" chip and "N closed <period>" note — both previously unwired (silent 0).
-// De-duped to latest CDC row per _id server-side. Degrades to zeros; never throws into the pipeline.
-async function apiActionItemStats(teamId, dept, start, end) {
+// Action-item scoreboard (scope=stats): current-state `open` / `overdue` and `completed` (closed within
+// [start,end)). Feeds the "N still open", "N overdue" and "N closed" lines. Never throws: an unreachable
+// or degraded stats call returns null, which the email renders as nothing (never as a false 0).
+async function apiActionItemStats(teamId, dept, start, end, entId) {
   const svc = dept === "service" ? "service" : "sales";
   try {
-    const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=stats&start=${start}&end=${end}`;
+    const url = `${REPORTING_API_BASE}/api/action-items?team_id=${encodeURIComponent(teamId)}&serviceType=${svc}&scope=stats&start=${start}&end=${end}${entQS(entId)}`;
     const res = await fetch(url, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`action-items stats ${res.status} (${teamId})`);
     const j = await res.json();
     if (j && j.degraded) throw new Error(`action-items stats degraded (${teamId})`);
-    const s = (j && j.stats) || {};
-    return { overdue: Number(s.overdue) || 0, closedYesterday: Number(s.completed) || 0 };
-  } catch { return { overdue: 0, closedYesterday: 0 }; }
+    if (!j || !j.stats || typeof j.stats !== "object") return null;
+    return { stats: j.stats, source: j.source || null };
+  } catch { return null; }
 }
-async function apiCampaigns(teamId, dept, start, end) {
+// Stats that cannot be right. Since 2026-10-01 the route answers scope=stats from the dealer-leads API
+// first; without the rooftop's enterprise it got all zeros back and returned them as real (0 of 335 sends
+// had an overdue chip, against ~95% before). All-zero dealer-leads stats on a window where items WERE
+// created is that failure, not a quiet day.
+function actionItemStatsDegraded(st, createdTotal) {
+  if (!st || !st.stats) return true;
+  const s = st.stats;
+  const allZero = ["created", "completed", "open", "overdue"].every((k) => !(Number(s[k]) > 0));
+  return st.source === "dealer-leads" && allZero && createdTotal > 0;
+}
+async function apiCampaigns(teamId, dept, start, end, entId) {
   try {
-    const { ob } = apiPickDept(await apiReport(teamId, start, end), dept);
+    const { ob } = apiPickDept(await apiReport(teamId, start, end, entId), dept);
     const mapped = ((ob.report || {}).activeCampaigns || []).map((c) => {
       const dials = Number(c.enrolled) || 0, appts = Number(c.appts) || 0;
       const conversion = c.apptRate != null ? `${Number(c.apptRate).toFixed(1)}%` : dials > 0 ? `${((appts * 100) / dials).toFixed(1)}%` : "0%";
@@ -336,7 +559,7 @@ async function apiCampaigns(teamId, dept, start, end) {
   } catch { return []; }
 }
 // metric fetchers — Reporting API only (day window = apiStart..apiEnd, MTD = apiMonthStart..apiEnd)
-const getMetrics = (teamId, dept, w, win) => apiMetrics(teamId, dept, win === "mtd" ? w.apiMonthStart : w.apiStart, w.apiEnd);
+const getMetrics = (teamId, dept, w, win, entId) => apiMetrics(teamId, dept, win === "mtd" ? w.apiMonthStart : w.apiStart, w.apiEnd, entId);
 
 // ── Department liveness (lull-tolerant 90-day lifecycle signal) ──────────────
 // A digest section (Sales/Service · Inbound/Outbound) shows when its direction is genuinely ALIVE — i.e. it
@@ -353,11 +576,11 @@ const subDaysISO = (iso, days) => { const d = new Date(`${iso}T00:00:00Z`); d.se
 // the current window is trivially alive (no extra fetch); we only pay the 90d /api/reports round-trip for a
 // direction that had ZERO activity this window (to tell "quiet today but alive" from "genuinely dead").
 // FAIL-OPEN to the day-window verdict if the 90d fetch errors (never blocks a send on a monitoring blip).
-async function deriveLiveness(teamId, dept, w, day) {
+async function deriveLiveness(teamId, dept, w, day, entId) {
   let inboundLive = ibActivity(day) > 0, outboundLive = obActivity(day) > 0;
   if (!inboundLive || !outboundLive) {
     try {
-      const life = await apiMetrics(teamId, dept, subDaysISO(w.apiEnd, LIFE_DAYS), w.apiEnd);
+      const life = await apiMetrics(teamId, dept, subDaysISO(w.apiEnd, LIFE_DAYS), w.apiEnd, entId);
       if (!inboundLive) inboundLive = ibActivity(life) > 0;
       if (!outboundLive) outboundLive = obActivity(life) > 0;
     } catch (e) { console.warn("[roi-cron] liveness 90d probe failed (fail-open to day window):", String(e && e.message ? e.message : e).slice(0, 100)); }
@@ -366,9 +589,9 @@ async function deriveLiveness(teamId, dept, w, day) {
 }
 // Day-window metrics with the 90d liveness flags folded in, so every downstream `{ ...day }` spread carries
 // inboundLive/outboundLive into the stored metrics `m` (templates gate their IB/OB sections on these).
-const getDayWithLiveness = async (teamId, dept, w) => {
-  const day = await getMetrics(teamId, dept, w, "day");
-  const live = await deriveLiveness(teamId, dept, w, day);
+const getDayWithLiveness = async (teamId, dept, w, entId) => {
+  const day = await getMetrics(teamId, dept, w, "day", entId);
+  const live = await deriveLiveness(teamId, dept, w, day, entId);
   return { ...day, inboundLive: live.inboundLive, outboundLive: live.outboundLive };
 };
 
@@ -394,19 +617,61 @@ async function probeAggregateFreshness() {
     return { known: false };
   }
 }
-// Stale = we KNOW the newest aggregated day and it is BEFORE the day being reported → the
-// sync has not processed that day yet, so any figure for it would be frozen/zero, not real.
-function aggregateStaleForDate(freshness, reportLocalDate) {
-  return !!(freshness && freshness.known && freshness.maxActivityDay < reportLocalDate);
+// Stale = we KNOW the newest aggregated day and it is BEFORE the LAST day being reported → the sync has
+// not processed that day yet, so any figure for it would be frozen/zero, not real. For a daily digest
+// the last day is the report date; for a weekly/monthly one it is the period's final day.
+function aggregateStaleForDate(freshness, reportLastDay) {
+  return !!(freshness && freshness.known && freshness.maxActivityDay < reportLastDay);
 }
-const getActionItems = async (teamId, dept, w) => {
-  const [items, stats] = await Promise.all([
-    apiActionItems(teamId, dept, w.apiStart, w.apiEnd),
-    apiActionItemStats(teamId, dept, w.apiStart, w.apiEnd),
+const getActionItems = async (teamId, dept, w, entId) => {
+  const [items, st] = await Promise.all([
+    apiActionItems(teamId, dept, w.apiStart, w.apiEnd, entId),
+    apiActionItemStats(teamId, dept, w.apiStart, w.apiEnd, entId),
   ]);
-  return { ...items, overdue: stats.overdue, closedYesterday: stats.closedYesterday };
+  const degraded = actionItemStatsDegraded(st, items.total);
+  if (degraded && st) console.warn(`[roi-cron] ${teamId} [${dept}] action-item stats look wrong (all zero from ${st.source || "?"} while ${items.total} were created) — holding the open/overdue/closed figures`);
+  const s = (!degraded && st && st.stats) || {};
+  const val = (k) => (degraded ? null : Number(s[k]) || 0);
+  return { ...items, statsDegraded: degraded, open: val("open"), overdue: val("overdue"), closedYesterday: val("completed") };
 };
-const getCampaigns = (teamId, dept, w) => apiCampaigns(teamId, dept, w.apiStart, w.apiEnd);
+const getCampaigns = (teamId, dept, w, entId) => apiCampaigns(teamId, dept, w.apiStart, w.apiEnd, entId);
+
+// ── ONE metric build for every send path ────────────────────────────────────────────────────────
+// The daily, weekly, monthly, on-demand, preview and backfill paths each used to assemble `m` by hand
+// and they drifted (weekly/monthly/on-demand never carried conversationsReachedMTD, so their hero fell
+// back to "leads worked this month"). They all call this now. Returns the metrics, the action-item
+// list, and the day window's full /api/reports response (the appointment list is read from it).
+async function buildDigestMetrics({ teamId, entId, dept, w }) {
+  const day = await getDayWithLiveness(teamId, dept, w, entId);
+  const mtd = await getMetrics(teamId, dept, w, "mtd", entId);
+  const ai = await getActionItems(teamId, dept, w, entId);
+  let report = null;
+  try { report = (await apiReport(teamId, w.apiStart, w.apiEnd, entId)).j; } catch { /* cached success above; never reached */ }
+  const m = {
+    ...day,
+    actionItemsTotal: ai.total, actionItemsTruncated: ai.truncated === true,
+    actionItemsOpen: ai.open, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday,
+    actionItemStatsDegraded: ai.statsDegraded === true,
+    appointmentsYesterdayMTD: mtd.appointmentsYesterday,
+    appointmentsInboundMTD: mtd.appointmentsInbound,
+    warmTransfersMTD: mtd.warmTransfers,
+    inboundUniqueLeadsMTD: mtd.inboundUniqueLeads,
+    // combined (IB+OB, or the rooftop's distinct count) leads MTD — the sub-line under "Leads touched",
+    // which is itself combined. It used to pair a combined daily number with an inbound-only MTD.
+    totalLeadsMTD: mtd.totalLeads,
+    // real-conversations MTD drives the hero's "…this month" pop-out; without it the hero
+    // silently falls back to "leads worked this month" on conversation-focus rooftops.
+    conversationsReachedMTD: mtd.conversationsReached,
+    outboundUniqueReachedMTD: mtd.outboundUniqueReached,
+    outboundConnectRateMTD: mtd.outboundConnectRate,
+    outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet,
+    // redesign MTD figures (calling hours + qualified)
+    callingDuringMTD: mtd.callingDuring,
+    callingAfterMTD: mtd.callingAfter,
+    qualifiedLeadsMTD: mtd.qualifiedLeads,
+  };
+  return { m, ai, report };
+}
 
 // ── guardrails ──────────────────────────────────────────────────────────────
 // Send whenever there is ANY activity — calls handled, leads, appointments,
@@ -439,21 +704,54 @@ function guardrailV1(m) {
 
 // ── email HTML (email-safe table; real console links) ───────────────────────
 const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-function links(ent, team, dept, localDate, tz) {
+// Console deep links for ONE digest. They carry the email's OWN window, so the numbers in the email can
+// be found on the page the dealer clicks through to:
+//   · the reporting page (reporting-vini Overview, embedded at /converse-ai/reports) reads ?range=<preset>
+//     or ?start=YYYY-MM-DD&end=YYYY-MM-DD with an INCLUSIVE end (reporting-vini dateRange.ts). Daily →
+//     range=yesterday (the Overview's Yesterday preset is exactly the digest's day); weekly/monthly →
+//     the explicit period. With no range it opened on its "Last 30 days" default (audit F11).
+//   · the console's appointments / action-items lists take UTC instants: the period's store-local
+//     midnight bounds (they used to assume Eastern time for every rooftop).
+// `w` is the period window (localDate/apiStart/apiEnd); a bare localDate string is read as a daily day.
+function links(ent, team, dept, w, tz, cadence) {
   const enc = encodeURIComponent;
-  const start = `${localDate}T04:00:00.000Z`; // ET window for the deep links
-  const [y, mo, d] = localDate.split("-").map(Number);
-  const nd = new Date(Date.UTC(y, mo - 1, d + 1)); const endDate = `${nd.getUTCFullYear()}-${String(nd.getUTCMonth() + 1).padStart(2, "0")}-${String(nd.getUTCDate()).padStart(2, "0")}`;
-  const end = `${endDate}T03:59:59.999Z`;
+  const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
+  if (typeof w === "string") w = { localDate: w, apiStart: w, apiEnd: addDaysISO(w, 1) };
+  const zone = isValidTz(tz) ? tz : "America/New_York";
+  const ymd = (iso) => iso.split("-").map(Number);
+  const [sy, sm, sd] = ymd(w.apiStart), [ey, em, ed] = ymd(w.apiEnd);
+  const start = localToUTC(sy, sm, sd, zone).toISOString();
+  const end = new Date(localToUTC(ey, em, ed, zone).getTime() - 1).toISOString();
+  const lastDay = addDaysISO(w.apiEnd, -1);
+  const rangeQS = cad === "daily" ? "range=yesterday" : `start=${w.apiStart}&end=${lastDay}`;
   const b = "https://console.spyne.ai/converse-ai";
   return {
-    appts: `${b}/appointments?enterprise_id=${ent}&team_id=${team}&all_createdAtStart=${enc(start)}&all_createdAtEnd=${enc(end)}&all_createdAtDateValue=yesterday&page=1&serviceType=${dept}&tab=all`,
+    appts: `${b}/appointments?enterprise_id=${ent}&team_id=${team}&all_createdAtStart=${enc(start)}&all_createdAtEnd=${enc(end)}${cad === "daily" ? "&all_createdAtDateValue=yesterday" : ""}&page=1&serviceType=${dept}&tab=all`,
     conv: `${b}/conversations?enterprise_id=${ent}&team_id=${team}`,
     action: `${b}/action-items?enterprise_id=${ent}&team_id=${team}&serviceType=${dept}&createdAtStart=${enc(start)}&createdAtEnd=${enc(end)}&page=1`,
-    // "Open console" deep-link → the rooftop's reports page. Was a bare base URL with no
-    // enterprise_id/team_id, so the button dropped users on a generic page (Jun-2026 bug report).
-    reports: `${b}/reports?enterprise_id=${ent}&team_id=${team}&serviceType=${dept}`,
+    // "Open console" deep-link → the rooftop's reports page, on the email's own window.
+    reports: `${b}/reports?enterprise_id=${ent}&team_id=${team}&serviceType=${dept}&${rangeQS}`,
   };
+}
+// "7:00 AM" from the configured send time (the footer used to hard-code 7:00 AM for every rooftop).
+function fmtSendTime(hour, minute) {
+  const h = Number.isFinite(Number(hour)) ? Number(hour) : 7, mi = Number.isFinite(Number(minute)) ? Number(minute) : 0;
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(mi).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+}
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const ordinal = (n) => { const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+function nextReportLabel(cadence, cfg) {
+  const at = fmtSendTime(cfg && cfg.digest_send_hour != null ? cfg.digest_send_hour : 7, cfg && cfg.digest_send_minute != null ? cfg.digest_send_minute : 0);
+  if (cadence === "weekly") {
+    const dow = cfg && Number.isInteger(cfg.weekly_send_dow) && cfg.weekly_send_dow >= 0 && cfg.weekly_send_dow <= 6 ? cfg.weekly_send_dow : 1;
+    return `next ${WEEKDAYS[dow]} · ${at}`;
+  }
+  if (cadence === "monthly") {
+    const day = cfg && Number.isInteger(cfg.monthly_send_day) && cfg.monthly_send_day >= 1 && cfg.monthly_send_day <= 31 ? cfg.monthly_send_day : 1;
+    return `${ordinal(day)} of next month · ${at}`;
+  }
+  return `tomorrow · ${at}`;
 }
 // Map raw action-item intent → human label (matches the v1 template wording).
 const INTENT_LABELS = {
@@ -521,8 +819,15 @@ async function sendMailAttributed(emails, subject, html, opts) {
   return firstId;
 }
 
-function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
-  const L = links(ent, team, dept, localDate, tz);
+// The period window for links when the caller has none (re-renders of a stored row): rebuilt from the
+// row's own cadence + local_date. Never throws — a bad zone or date falls back to the day itself.
+function periodWindowFor(tz, cadence, localDate) {
+  try { return windowForPeriod(isValidTz(tz) ? tz : "America/New_York", cadence, localDate); } catch { return localDate; }
+}
+// ctx (optional): { w: period window, cfg: roi_rooftop_config row (send time for the footer) }.
+function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence, ctx) {
+  ctx = ctx || {};
+  const L = links(ent, team, dept, ctx.w || periodWindowFor(tz, cadence, localDate), tz, cadence);
   // First-party open pixel → the track-open Edge Function (always reachable from an
   // inbox; deterministic from team/dept/cadence/date so a re-render reproduces it).
   const pixelUrl = pixelUrlFor(team, dept, localDate, cadence);
@@ -537,7 +842,11 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
     agentPerson: m.agentPerson || "",
     links: { appointments: L.appts, conversations: L.conv, actionItems: L.action, console: L.reports },
     appointments: Array.isArray(m.appointments) ? m.appointments : [],
+    // AI-assisted (CRM) bookings, listed apart from the AI-booked ones (never under the AI-booked heading).
+    assistedAppointments: Array.isArray(m.assistedAppointmentList) ? m.assistedAppointmentList : [],
     topVehicles: Array.isArray(m.topVehicles) ? m.topVehicles : [],
+    topVehiclesDays: Number(m.topVehiclesDays) || undefined,
+    nextReportLabel: ctx.cfg ? nextReportLabel(cadence, ctx.cfg) : undefined,
     warmLeads: Array.isArray(m.warmLeads) ? m.warmLeads : [],
     dollarRate: Number(m.dollarRate) || 0,
     // Upsell banner is driven by agent deployment state when it's present on the
@@ -557,8 +866,9 @@ function renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaign
 // #0891B2/#0D9488). Preserved verbatim so a rooftop on the 'v1' daily template keeps
 // getting the exact email it gets today. Selected per-rooftop via roi_rooftop_config
 // .daily_template; v2 is renderHtml() above (the Conversational-AI-2.0 redesign).
-function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns) {
-  const L = links(ent, team, dept, localDate, tz);
+function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, ctx) {
+  ctx = ctx || {};
+  const L = links(ent, team, dept, ctx.w || periodWindowFor(tz, "daily", localDate), tz, "daily");
   const isSvc = dept === "service";
   const camps = (campaigns || []).filter((c) => Number(c.dials) > 0); // drop zero-dial campaigns
   const items = (m.actionItems || []).slice(0, 6);
@@ -622,10 +932,10 @@ function renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m, campai
       ${mini("Appointments set", m.outboundAppointmentsSet || 0, `Yesterday · ${m.outboundAppointmentsSetMTD || 0} MTD`)}
     </tr></table>
     ${hasOutboundConv ? `<div style="padding:0 6px;">${sect("Channel breakdown")}${mkBar(callOut, smsOut, chatOut)}</div>` : ""}
-    ${camps.length ? `<div style="padding:0 6px;">${sect("Active campaigns")}<div style="font-size:11px;color:#9CA3AF;margin:-4px 0 4px;">Yesterday's activity</div>${camps.map((c) => `<div style="border:1px solid #E5E7EB;border-radius:8px;padding:12px 14px;margin-top:8px;"><div><span style="font-size:13px;font-weight:600;color:#111827;">${esc(c.name)}</span><span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#16A34A;background:#DCFCE7;border-radius:4px;padding:2px 6px;margin-left:8px;">ACTIVE</span></div><div style="font-size:12px;color:#6B7280;margin-top:4px;">${esc(c.dials)} dials · ${esc(c.appts)} appts · ${esc(c.conversion)} conversion</div></div>`).join("")}</div>` : ""}
+    ${camps.length ? `<div style="padding:0 6px;">${sect("Active campaigns")}<div style="font-size:11px;color:#9CA3AF;margin:-4px 0 4px;">Last 120 days</div>${camps.map((c) => `<div style="border:1px solid #E5E7EB;border-radius:8px;padding:12px 14px;margin-top:8px;"><div><span style="font-size:13px;font-weight:600;color:#111827;">${esc(c.name)}</span><span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#16A34A;background:#DCFCE7;border-radius:4px;padding:2px 6px;margin-left:8px;">ACTIVE</span></div><div style="font-size:12px;color:#6B7280;margin-top:4px;">${esc(c.dials)} dials · ${esc(c.appts)} appts · ${esc(c.conversion)} conversion</div></div>`).join("")}</div>` : ""}
   </td></tr>` : ""}
   <tr><td class="pad" style="padding:18px 28px 26px;border-top:1px solid #E5E7EB;"><table width="100%"><tr>
-    <td valign="top" style="font-size:11px;color:#9CA3AF;line-height:1.6;">Reporting period: ${esc(dateLabel)}<br/>Next report: tomorrow · 7:00 AM</td>
+    <td valign="top" style="font-size:11px;color:#9CA3AF;line-height:1.6;">Reporting period: ${esc(dateLabel)}<br/>Next report: ${esc(nextReportLabel("daily", ctx.cfg || {}))}</td>
     <td valign="top" align="right" style="font-size:11px;color:#9CA3AF;">© Vini · 2026</td>
   </tr></table></td></tr>
 </table></td></tr></table></body></html>`;
@@ -664,16 +974,17 @@ function pickFocus(cfg, m) {
 }
 // Render the right template. v1 shims inboundUniqueLeads back to its legacy value so
 // the classic email stays byte-faithful to production.
-function renderDigest(tpl, name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence) {
+// ctx (optional): { w, cfg } — see renderHtml.
+function renderDigest(tpl, name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence, ctx) {
   let html, gateM = m;
   if (tpl === "v2") {
-    html = renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence);
+    html = renderHtml(name, dept, dateLabel, ent, team, localDate, tz, m, campaigns, cadence, ctx);
   } else {
     const m1 = Object.assign({}, m, { inboundUniqueLeads: (m.inboundUniqueLeadsLegacy != null ? m.inboundUniqueLeadsLegacy : m.inboundUniqueLeads) });
     gateM = m1;   // gate v1 on the SAME shimmed metrics it renders from, so the no-value
                   // marker can't disagree with the numbers actually shown in the email.
     // v1 classic has no built-in pixel slot — inject the open-tracking pixel before </body>.
-    html = renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m1, campaigns)
+    html = renderHtmlV1(name, dept, dateLabel, ent, team, localDate, tz, m1, campaigns, ctx)
       .replace("</body></html>", `${pixelImg(team, dept, localDate, cadence)}</body></html>`);
   }
   // Stamp the no-value marker for the v1 path too (the v2 renderer self-stamps);
@@ -881,15 +1192,15 @@ async function deliverabilityAudit() {
 
 // ── Pass ordering + budget (shared by the daily and weekly/monthly passes) ─────────────────────
 const isoDaysAgo = (n) => { const d = new Date(); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); };
-// Every department's current run status for one cadence, in ONE paged read (team|dept|local_date →
-// status). Never throws: without it the pass just keeps table order.
-async function readRunStatuses(cadence, sinceLocalDate) {
+// Every department's current run row for one cadence, in ONE paged read: team|dept|local_date →
+// { status, reason, message_id }. Never throws: without it the pass just keeps table order.
+async function readRunIndex(cadence, sinceLocalDate) {
   const out = new Map();
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await sb.from("roi_digest_runs").select("team_id,department,local_date,status")
+    const { data, error } = await sb.from("roi_digest_runs").select("team_id,department,local_date,status,reason,message_id")
       .eq("cadence", cadence).gte("local_date", sinceLocalDate).order("id", { ascending: true }).range(from, from + 999);
     if (error) { console.warn(`[roi-cron] ${cadence} run-status read failed, keeping table order:`, error.message); return out; }
-    for (const r of data ?? []) out.set(`${r.team_id}|${r.department}|${r.local_date}`, r.status);
+    for (const r of data ?? []) out.set(`${r.team_id}|${r.department}|${r.local_date}`, { status: r.status, reason: r.reason ?? null, message_id: r.message_id ?? null });
     if (!data || data.length < 1000) return out;
   }
 }
@@ -898,11 +1209,15 @@ async function readRunStatuses(cadence, sinceLocalDate) {
 // never reached. Tiers: not visited yet for this period, or waiting on its send time → failed, retry →
 // already decided (not_sent / dry-run suppressed), re-check → finished (exits on one read). Within a
 // tier, departments that really email dealers (dry_run=false) first. Stable: table order breaks ties.
-function prioritize(targets, statuses, localDateOf) {
+function prioritize(targets, index, localDateOf) {
   const tier = (L) => {
-    const st = statuses.get(`${L.team_id}|${L.department}|${localDateOf(L)}`);
+    const row = index.get(`${L.team_id}|${L.department}|${localDateOf(L)}`);
+    const st = row && (typeof row === "string" ? row : row.status);
+    const reason = row && typeof row === "object" ? row.reason : null;
+    if (row && typeof row === "object" && row.message_id) return 3;  // claimed: finished, whatever its status
     if (!st || st === "scheduled" || st === "queued") return 0;
-    if (st === "suppressed" && L.dry_run === false) return 0; // went live after it was held: real work now
+    if (st === "not_sent" && reason === "backfilled") return 0;      // history rebuilt by backfill, never emailed
+    if (st === "suppressed" && L.dry_run === false) return 0;        // went live after it was held: real work now
     if (st === "error") return 1;
     if (st === "sent" || st === "sending") return 3;
     return 2;
@@ -932,7 +1247,173 @@ async function reportUnreached(source, unreached, total, nameOf) {
   } catch (e) { console.warn("[roi-cron] unreached alert skipped:", String(e).slice(0, 140)); }
 }
 
-async function runOnce() {
+// ── Pass trail (roi_cron_runs) ───────────────────────────────────────────────────────────────────
+// One row per digest pass, so a pass that ran (or crashed) leaves a record the health checks can read.
+// A pass Vercel kills at 300s writes nothing; its ABSENCE is the signal. Never throws.
+async function writeCronTrail(source, ok, summary) {
+  try {
+    const { error } = await sb.from("roi_cron_runs").insert({ source, ok, summary });
+    if (error) console.warn(`[roi-cron] ${source} trail write failed:`, String(error.message || error).slice(0, 140));
+  } catch (e) { console.warn(`[roi-cron] ${source} trail write failed:`, String(e).slice(0, 140)); }
+}
+async function withPassTrail(source, opts, fn) {
+  const startedAt = new Date();
+  const trail = !(opts && opts.cli === true); // a CLI run is an operator's, not the scheduled cron's
+  try {
+    const out = await fn();
+    if (trail) await writeCronTrail(source, true, { startedAt: startedAt.toISOString(), finishedAt: new Date().toISOString(), elapsedMs: Date.now() - startedAt.getTime(), ...out });
+    return out;
+  } catch (e) {
+    if (trail) await writeCronTrail(source, false, { startedAt: startedAt.toISOString(), finishedAt: new Date().toISOString(), elapsedMs: Date.now() - startedAt.getTime(), error: String(e && e.message ? e.message : e).slice(0, 300) });
+    throw e;
+  }
+}
+
+// ── Orphan reaper (start of every daily pass) ───────────────────────────────────────────────────
+// A pass killed mid-flight leaves rows that no later pass will ever finish: 'queued'/'scheduled' for a
+// report day that is over, and 'sending' rows whose claim was taken but whose send outcome was never
+// written (2 sending + 3 queued + 13 scheduled in the week to 2026-10-08). They read as "in flight"
+// forever. The claim time is stamped into reason_detail when a claim is taken, so a hung 'sending' row
+// is recognisable after SENDING_STALE_MS. A reaped 'sending' row KEEPS its claim (message_id): the
+// email may have gone out, so it is never resent automatically.
+const SENDING_STALE_MS = 2 * 3600 * 1000;
+const CLAIM_STAMP_RE = /claimed (\d{4}-\d{2}-\d{2}T[0-9:.]+Z)/;
+const claimDetail = () => `claimed ${new Date().toISOString()}`;
+async function reapOrphans(cutoff) {
+  const out = { queued: 0, scheduled: 0, sending: 0 };
+  if (!cutoff) return out;
+  try {
+    const { data: stuck, error } = await readAll("roi_digest_runs", "id,status,local_date",
+      { filter: (q) => q.eq("cadence", "daily").in("status", ["queued", "scheduled"]).lt("local_date", cutoff).is("message_id", null), order: ["id"] });
+    if (error) throw new Error(error.message);
+    for (const st of ["queued", "scheduled"]) {
+      const ids = (stuck || []).filter((r) => r.status === st).map((r) => r.id);
+      for (let i = 0; i < ids.length; i += 200) {
+        const { data } = await sb.from("roi_digest_runs")
+          .update({ status: "not_sent", reason: "pass_killed", reason_detail: `left '${st}' by a digest pass that never finished; the report day is over, so it was not sent` })
+          .in("id", ids.slice(i, i + 200)).eq("status", st).is("message_id", null).select("id");
+        out[st] += (data || []).length;
+      }
+    }
+    const { data: sending, error: sErr } = await readAll("roi_digest_runs", "id,cadence,local_date,reason_detail",
+      { filter: (q) => q.eq("status", "sending"), order: ["id"] });
+    if (sErr) throw new Error(sErr.message);
+    const now = Date.now();
+    const dead = (sending || []).filter((r) => {
+      const hit = CLAIM_STAMP_RE.exec(r.reason_detail || "");
+      if (hit) return now - Date.parse(hit[1]) > SENDING_STALE_MS;
+      return r.cadence === "daily" && r.local_date < cutoff; // claimed before claims were stamped: once its day is over
+    }).map((r) => r.id);
+    for (let i = 0; i < dead.length; i += 200) {
+      const { data } = await sb.from("roi_digest_runs")
+        .update({ status: "error", reason: "pass_killed", reason_detail: "claimed for sending by a pass that never finished; delivery unknown, so it is not resent automatically. Check the mail log before sending it by hand." })
+        .in("id", dead.slice(i, i + 200)).eq("status", "sending").select("id");
+      out.sending += (data || []).length;
+    }
+    if (out.queued + out.scheduled + out.sending) console.warn(`[roi-cron] reaped orphaned digest rows: ${JSON.stringify(out)} (cutoff local_date < ${cutoff})`);
+  } catch (e) { console.warn("[roi-cron] orphan reaper skipped:", String(e && e.message ? e.message : e).slice(0, 140)); }
+  return out;
+}
+
+// ── Timezone drift check (warning only) ─────────────────────────────────────────────────────────
+// The digest computes "yesterday" and the send hour in roi_rooftop_config.timezone (a manual override)
+// while reporting-vini buckets the numbers by the team's own setting. Where the two differ in UTC offset
+// the email's day and the data's day can split (Landers: Costa_Rica vs Chicago). No behaviour change:
+// logged and carried in the pass summary for a human to fix.
+function utcOffsetMin(tz, at) {
+  at = at || new Date();
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" }).formatToParts(at);
+  const g = (t) => +p.find((x) => x.type === t).value;
+  return Math.round((Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute")) - Math.floor(at.getTime() / 60000) * 60000) / 60000);
+}
+// Checked at most every TZ_DRIFT_EVERY_MS per warm instance: the answer changes only when someone edits a
+// zone, and an hourly ClickHouse read + warning burst for the same few rooftops is noise.
+const TZ_DRIFT_EVERY_MS = 6 * 3600 * 1000;
+let _tzDrift = { at: 0, out: [] };
+async function timezoneDrift(targets, cfgOf) {
+  const teams = [...new Set(targets.map((L) => L.team_id))].filter((t) => isValidTz(cfgOf.get(t)?.timezone));
+  if (!teams.length) return [];
+  if (Date.now() - _tzDrift.at < TZ_DRIFT_EVERY_MS) return _tzDrift.out;
+  let det;
+  try { det = await fetchTeamDetailsCH(teams); } catch { return []; }
+  const out = [];
+  for (const t of teams) {
+    const cfgTz = cfgOf.get(t).timezone, teamTz = det.get(t)?.timezone;
+    if (!teamTz || teamTz === cfgTz || !isValidTz(teamTz)) continue;
+    if (utcOffsetMin(teamTz) !== utcOffsetMin(cfgTz)) out.push({ team: t, name: cfgOf.get(t)?.rooftop_name || cfgOf.get(t)?.team_name || "", config: cfgTz, teamSetting: teamTz });
+  }
+  if (out.length) console.warn(`[roi-cron] ${out.length} rooftop(s) have a config timezone on a different UTC offset than the team setting the numbers are bucketed by: ${out.slice(0, 10).map((x) => `${x.name || x.team} (${x.config} vs ${x.teamSetting})`).join(", ")}`);
+  if (det.size) _tzDrift = { at: Date.now(), out: out.slice(0, 25) };
+  return out.slice(0, 25);
+}
+
+// Operator knobs (FORCE_RESEND, IGNORE_SEND_HOUR, IGNORE_SEND_DAY, ONLY_TEAMS, RUN_LOCAL_DATE) are read
+// ONLY when a CLI entry passes { cli: true }. The scheduled cron ignores them, so a stray value left in
+// the deployment can't cause hourly re-sends, midnight sends or a silently partial fleet.
+const OPERATOR_KNOBS = ["FORCE_RESEND", "IGNORE_SEND_HOUR", "IGNORE_SEND_DAY", "ONLY_TEAMS", "RUN_LOCAL_DATE"];
+function operatorKnobs(opts) {
+  const cli = !!(opts && opts.cli === true);
+  const get = (k) => (cli ? process.env[k] : undefined);
+  const ignored = cli ? [] : OPERATOR_KNOBS.filter((k) => process.env[k]);
+  if (ignored.length) console.warn(`[roi-cron] ignoring operator knob(s) ${ignored.join(", ")} on the scheduled pass (honoured only by the CLI: node server/roi-cron/runner.cjs)`);
+  return {
+    cli, ignored,
+    ONLY: (get("ONLY_TEAMS") || "").split(",").map((s) => s.trim()).filter(Boolean),
+    IGNORE_HOUR: get("IGNORE_SEND_HOUR") === "true",
+    IGNORE_DAY: get("IGNORE_SEND_DAY") === "true",
+    RUN_LOCAL_DATE: get("RUN_LOCAL_DATE") || null,
+    FORCE_RESEND: get("FORCE_RESEND") === "true",
+  };
+}
+// Enrichment for the email body: the appointment lists (from the SAME /api/reports response the KPI
+// numbers came from), top vehicles and the warm-lead list. Degrades to empty sections, never throws.
+async function enrichFor({ teamId, entId, dept, tz, w, report, cadence }) {
+  const dollarRate = digestDollarRate(dept);
+  let enr = { appointments: [], assistedAppointments: [], topVehicles: [], topVehiclesDays: null, warmLeads: [] };
+  try {
+    const { enrichRooftop } = await import("./digestEnrich.js");
+    enr = await enrichRooftop(teamId, {
+      dollarRate, dept, enterpriseId: entId, tz, start: w.apiStart, end: w.apiEnd, report,
+      topVehiclesDays: cadence === "weekly" ? 7 : 30,
+      apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined,
+    });
+  } catch (e) { console.warn("[roi-cron] enrich skipped:", String(e).slice(0, 120)); }
+  return { dollarRate, enr };
+}
+const enrichedFields = (enr) => ({
+  appointments: enr.appointments || [], assistedAppointmentList: enr.assistedAppointments || [],
+  topVehicles: enr.topVehicles || [], topVehiclesDays: enr.topVehiclesDays || null, warmLeads: enr.warmLeads || [],
+});
+// The SMS renderer (transactionalTemplates.renderDigestSms) reads a few legacy fields under rooftop labels:
+// "Qualified leads" ← qualifiedLeads (inbound only), "Hand-offs to team" ← warmTransfers (inbound transfers
+// only), "Open action items" ← actionItemsTotal (a CREATED count). Hand it the rooftop figures the email
+// headlines instead, so the text and the email say the same thing.
+function smsView(m) {
+  const v = Object.assign({}, m);
+  if (m.warmCount != null) { v.qualifiedLeads = m.warmCount; v.qualifiedPct = null; }
+  if (m.handoffTransfers != null || m.handoffCallbacks != null) v.warmTransfers = N(m.handoffTransfers) + N(m.handoffCallbacks);
+  if (!m.actionItemStatsDegraded && m.actionItemsOpen != null) v.actionItemsTotal = m.actionItemsOpen;
+  return v;
+}
+// Digest SMS, sent only AFTER the email itself went out: a held email (no-value, guardrail, dry-run,
+// v2 lock) used to still text its headline. Never throws.
+async function smsAfterSend({ L, c, recOf, cadence, w, tz, name, m, smsFailures }) {
+  const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, cadence, c && c.sms_enabled);
+  if (!smsRecips.length || SMS_DRY_RUN || L.dry_run === true) return;
+  const reportLink = links(L.enterprise_id, L.team_id, L.department, w, tz, cadence).reports;
+  const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: smsView(m), link: reportLink }));
+  if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
+}
+// Map a thrown send error to the row it leaves: deliberate holds are not_sent, anything else is a failure.
+const HOLD_REASON = { BLOCKED_NO_VALUE: "no_value", V2_SPYNE_ONLY: "v2_spyne_only", NO_DELIVERABLE_RECIPIENT: "recipients_missing" };
+// Rows a pass re-evaluates (fetches again) before the send time, because they were held for a reason
+// unrelated to the numbers that a human may have fixed since.
+const REEVALUATE_REASONS = ["recipients_missing", "unsubscribed", "churned", "aggregate_stale", "disabled", "backfilled"];
+
+async function runOnce(opts = {}) {
+  return withPassTrail("roi-email-daily", opts, () => runDailyPass(opts));
+}
+async function runDailyPass(opts) {
   const passStart = Date.now();
   resetApiCache();
   const ts = new Date().toISOString();
@@ -940,24 +1421,10 @@ async function runOnce() {
   // FAIL LOUD: a misconfigured serverless function (missing ROI_SUPABASE_*) used to
   // silently return an all-zero summary because the Supabase error was swallowed. Surface it.
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY (set them as server env vars on Vercel — NOT VITE_-prefixed).");
-  const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date"),
-    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
-  ]);
-  if (liveRes.error || cfgRes.error || recRes.error) {
-    const e = liveRes.error || cfgRes.error || recRes.error;
-    throw new Error(`Supabase read failed (check ROI_SUPABASE_URL/ROI_SUPABASE_SERVICE_KEY): ${e.message}`);
-  }
-  const live = liveRes.data, cfg = cfgRes.data, rec = recRes.data;
-  if (!live || live.length === 0) console.warn("[roi-cron] WARNING: roi_live_departments.is_live=true returned 0 rows — nothing to process (check data / env).");
-  const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
-  // enterprise_id lives on roi_rooftop_config (not roi_live_departments) — attach it to each
-  // live row so downstream (stored row, console links, enrichment) keeps working.
-  for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || "";
-  const recOf = new Map();
-  for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const out = { sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, already_sent: 0, errors: 0, stale_held: 0, churned: 0, unreached: 0 };
+  const { live, cfgOf, recOf } = await loadFleet("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date");
+  if (!live.length) console.warn("[roi-cron] WARNING: roi_live_departments.is_live=true returned 0 rows — nothing to process (check data / env).");
+  const knobs = operatorKnobs(opts);
+  const out = { targets: 0, sent: 0, queued: 0, suppressed: 0, no_data: 0, before_hour: 0, no_recipients: 0, unsubscribed: 0, already_sent: 0, errors: 0, stale_held: 0, churned: 0, disabled: 0, unreached: 0, reaped: null, tzMismatches: [], ignoredEnv: knobs.ignored };
   const failures = []; // genuine send failures this pass → the Slack breakage alert (postSlackAlert)
   const smsFailures = []; // genuine digest-SMS send failures this pass → shared Slack breakage alert (SMS)
   const staleHeld = []; // rooftops held this pass because the aggregate hadn't reached the report day
@@ -966,33 +1433,26 @@ async function runOnce() {
   // frozen snapshots (see probeAggregateFreshness). One fetch, shared by every processOne below.
   const freshness = await probeAggregateFreshness();
   if (freshness.known) console.log(`  aggregate freshness: newest day = ${freshness.maxActivityDay} (last sync ${freshness.lastRunAt || "?"})`);
-  // optional scoping for targeted dry-runs:
-  //   ONLY_TEAMS=team1,team2   → run only these team_ids
-  //   IGNORE_SEND_HOUR=true    → skip the local send-hour gate (render now regardless of time)
-  const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const IGNORE_HOUR = process.env.IGNORE_SEND_HOUR === "true";
-  // RUN_LOCAL_DATE=YYYY-MM-DD → report that specific dealer-local date instead of "yesterday".
-  // FORCE_RESEND=true → re-send even if a 'sent' row already exists for that date (manual backfill send).
-  const RUN_LOCAL_DATE = process.env.RUN_LOCAL_DATE || null;
-  const FORCE_RESEND = process.env.FORCE_RESEND === "true";
-  const scoped = (live ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
+  const { ONLY, IGNORE_HOUR, RUN_LOCAL_DATE, FORCE_RESEND } = knobs;
+  const scoped = live.filter((L) => !ONLY.length || ONLY.includes(L.team_id));
   if (ONLY.length) console.log(`  scope: ONLY_TEAMS → ${scoped.length} dept-rows across ${ONLY.length} team(s)`);
+  // Orphans first, against a FLEET-wide cutoff (never a scoped subset's): the earliest dealer-local
+  // "yesterday" anywhere, with Hawaii always counted so an unresolved zone can't move it later.
+  const cutoff = [...new Set(["Pacific/Honolulu", ...live.map((L) => cfgOf.get(L.team_id)?.timezone).filter(isValidTz)])].map(safeLocalDate).sort()[0];
+  out.reaped = await reapOrphans(cutoff);
   // Team timezones for every rooftop without one in config, in ONE ClickHouse read, so resolveTz
   // below reads memory instead of calling out once per rooftop.
   await primeTeamDetails(scoped.filter((L) => !cfgOf.get(L.team_id)?.timezone).map((L) => L.team_id));
-  const targets = prioritize(scoped, await readRunStatuses("daily", isoDaysAgo(3)),
-    (L) => RUN_LOCAL_DATE || localParts(cfgOf.get(L.team_id)?.timezone || "America/New_York").localDate);
+  out.tzMismatches = await timezoneDrift(scoped, cfgOf);
+  const index = await readRunIndex("daily", isoDaysAgo(3));
+  const targets = prioritize(scoped, index, (L) => RUN_LOCAL_DATE || safeLocalDate(cfgOf.get(L.team_id)?.timezone));
+  out.targets = targets.length;
 
   // Process ONE rooftop·dept. Independent per row → safe to run many in parallel.
   const processOne = async (L) => {
     const c = cfgOf.get(L.team_id);
     const name = c?.rooftop_name || c?.team_name || "";
-    if (c && c.daily_enabled === false) return;
-    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
-    const w = RUN_LOCAL_DATE
-      ? { ...windowsForDate(RUN_LOCAL_DATE, tz), localHour: localParts(tz).localHour, localMinute: localParts(tz).localMinute }
-      : localParts(tz);
-    const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
+    let tz = null, w = null, base = null;
     // FAIL LOUD on write failure. The 'queued' upsert runs BEFORE the send, so if the DB write
     // is blocked (e.g. ROI_SUPABASE_SERVICE_KEY is the anon key → RLS denies the insert), this
     // throws and we NEVER send — preventing the silent "no row written → re-send every hour" loop.
@@ -1005,10 +1465,29 @@ async function runOnce() {
       if (!data || data.length === 0) throw new Error("roi_digest_runs write affected 0 rows (RLS blocked — service_role key required)");
     };
     try {
-      // already sent (or claimed by a sender) today? 'sending' used to fall through, fetch every number,
-      // and only then lose the send-claim below: same skip, minus the reporting-api calls.
-      const { data: prior } = await sb.from("roi_digest_runs").select("id,status,reason").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate).maybeSingle();
-      if (prior && (prior.status === "sent" || prior.status === "sending") && !FORCE_RESEND) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already ${prior.status} for ${w.localDate}`); return; }
+      // Zone + window INSIDE the try: one malformed timezone fails this row (an error row the tracker
+      // shows), not the whole pass, which used to reject Promise.all and stop every rooftop.
+      tz = await resolveTz(sb, L.team_id, c?.timezone, name);
+      assertValidTz(tz);
+      w = RUN_LOCAL_DATE
+        ? { ...windowsForDate(RUN_LOCAL_DATE, tz), localHour: localParts(tz).localHour, localMinute: localParts(tz).localMinute }
+        : localParts(tz);
+      base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
+      // PAUSED (daily_enabled=false): one cheap not_sent/disabled row per report day, no numbers fetched,
+      // so a paused rooftop is visible in the tracker instead of an empty cell.
+      if (c && c.daily_enabled === false) {
+        const row = index.get(`${L.team_id}|${L.department}|${w.localDate}`);
+        out.disabled++;
+        if (row && (row.message_id || row.status === "sent" || row.status === "sending" || (row.status === "not_sent" && row.reason === "disabled"))) return;
+        await upsert({ status: "not_sent", reason: "disabled", reason_detail: "daily digest switched off for this rooftop (daily_enabled=false)" });
+        console.log(`  · ${name} [${L.department}] not_sent → disabled (daily digest switched off)`);
+        return;
+      }
+      // already sent (or claimed by a sender) for this day? A claimed row (message_id set) is finished
+      // whatever its status: a send that failed after its claim stays a red "Failed" in the tracker
+      // instead of being flipped back to 'queued' by this pass and then skipped at the claim.
+      const { data: prior } = await sb.from("roi_digest_runs").select("id,status,reason,message_id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate).maybeSingle();
+      if (prior && (prior.status === "sent" || prior.status === "sending" || prior.message_id) && !FORCE_RESEND) { out.already_sent++; console.log(`  · ${name} [${L.department}] skipped → already ${prior.status}${prior.message_id && prior.status !== "sent" ? " (claimed)" : ""} for ${w.localDate}`); return; }
       // ── CHURN GATE ───────────────────────────────────────────────────────────────────────────────
       // Stage never gates a send (onboarding/contracting rooftops are often live for the dealer) —
       // churn is the sole exception. Deliberately AFTER the already-sent check so it can never
@@ -1022,7 +1501,13 @@ async function runOnce() {
       }
       // recipients (step 1 finalized) for this dept — email filtered by the subscription matrix.
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
-      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; console.log(`  · ${name} [${L.department}] not_sent → recipients_missing (no enabled recipient for this dept)`); return; }
+      if (!emails.length) {
+        const unsub = eligibleButUnsubscribed(recOf.get(L.team_id), L.department);
+        await upsert({ status: "not_sent", reason: unsub ? "unsubscribed" : "recipients_missing", reason_detail: unsub ? "verified recipients exist but none is subscribed to the daily digest" : null });
+        if (unsub) out.unsubscribed++; else out.no_recipients++;
+        console.log(`  · ${name} [${L.department}] not_sent → ${unsub ? "unsubscribed (verified recipients, none subscribed to daily)" : "recipients_missing (no enabled recipient for this dept)"}`);
+        return;
+      }
       // ── BEFORE THE SEND TIME, EVALUATE ONCE ──────────────────────────────────────────────────────
       // The first visit for a report day fetches and stores the numbers (the tracker previews them);
       // later pre-send visits don't re-fetch, because the send-time visit reads everything again
@@ -1032,7 +1517,7 @@ async function runOnce() {
       const sendHour = c?.digest_send_hour ?? 7;
       const sendMinute = c?.digest_send_minute ?? 0;
       const beforeSendTime = w.localHour < sendHour || (w.localHour === sendHour && (w.localMinute ?? 0) < sendMinute);
-      if (!IGNORE_HOUR && beforeSendTime && prior && !(prior.status === "not_sent" && ["recipients_missing", "churned", "aggregate_stale"].includes(prior.reason))) {
+      if (!IGNORE_HOUR && beforeSendTime && prior && !(prior.status === "not_sent" && REEVALUATE_REASONS.includes(prior.reason))) {
         out.before_hour++;
         console.log(`  · ${name} [${L.department}] ${prior.status} → evaluated earlier today, waiting for send ${String(sendHour).padStart(2, "0")}:${String(sendMinute).padStart(2, "0")}`);
         return;
@@ -1049,30 +1534,11 @@ async function runOnce() {
         console.log(`  · ${name} [${L.department}] HELD → aggregate_stale (agg max=${freshness.maxActivityDay} < report ${w.localDate}) — not emailing frozen zeros`);
         return;
       }
-      // step 2 — fetch via embedding (daily window + MTD window) + action items, store queued
-      const day = await getDayWithLiveness(L.team_id, L.department, w);
-      const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
-      const ai = await getActionItems(L.team_id, L.department, w);
-      const m = {
-        ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday,
-        appointmentsYesterdayMTD: mtd.appointmentsYesterday,
-        appointmentsInboundMTD: mtd.appointmentsInbound,
-        warmTransfersMTD: mtd.warmTransfers,
-        inboundUniqueLeadsMTD: mtd.inboundUniqueLeads,
-        // real-conversations MTD drives the hero's "…this month" pop-out; without it the hero
-        // silently falls back to "leads worked this month" on conversation-focus rooftops.
-        conversationsReachedMTD: mtd.conversationsReached,
-        outboundUniqueReachedMTD: mtd.outboundUniqueReached,
-        outboundConnectRateMTD: mtd.outboundConnectRate,
-        outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet,
-        // redesign MTD figures (calling hours + qualified)
-        callingDuringMTD: mtd.callingDuring,
-        callingAfterMTD: mtd.callingAfter,
-        qualifiedLeadsMTD: mtd.qualifiedLeads,
-      };
+      // step 2 — fetch (day window + MTD window + action items), store queued
+      const { m, ai, report } = await buildDigestMetrics({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, w });
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate };
       const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
-      await upsert({ status: "queued", reason: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
+      await upsert({ status: "queued", reason: null, reason_detail: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
       out.queued++;
       // daily-template selection (redesign v2 / classic v1) — per rooftop, default v2
       const tpl = pickTemplate(c, "daily");
@@ -1081,33 +1547,15 @@ async function runOnce() {
       if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; console.log(`  · ${name} [${L.department}] not_sent → ${g.reason} (appts ${m.appointmentsYesterday} · conv ${m.conversationsHandled} · leads ${m.inboundUniqueLeads} · actions ${m.actionItemsTotal})`); return; }
       // step 4 — send-hour gate (sendHour / beforeSendTime computed above)
       if (!IGNORE_HOUR && beforeSendTime) { await upsert({ status: "scheduled", reason: "before_send_hour", metrics, subject }); out.before_hour++; console.log(`  · ${name} [${L.department}] scheduled → before_send_hour (local ${tz} ${String(w.localHour).padStart(2, "0")}:${String(w.localMinute ?? 0).padStart(2, "0")} < send ${String(sendHour).padStart(2, "0")}:${String(sendMinute).padStart(2, "0")})`); return; }
-      // active campaigns (3rd embedding) — only now, just before render
-      const camps = await getCampaigns(L.team_id, L.department, w);
-      // Enrichment: upcoming appointments (car + $ + schedule) + top vehicles — sourced from the
-      // SAME Reporting service as every other metric (single source of truth), not a separate
-      // ClickHouse query. Optional — degrades to empty (section omitted) when unavailable.
-      const dollarRate = digestDollarRate(L.department);
-      let enr = { appointments: [], topVehicles: [], warmLeads: [] };
-      try {
-        const { enrichRooftop } = await import("./digestEnrich.js");
-        enr = await enrichRooftop(L.team_id, {
-          dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz,
-          start: w.apiStart, end: w.apiEnd,
-          apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined,
-        });
-      } catch (e) { console.warn("[roi-cron] enrich skipped:", String(e).slice(0, 120)); }
+      // active campaigns — only now, just before render
+      const camps = await getCampaigns(L.team_id, L.department, w, L.enterprise_id);
+      // Enrichment: the appointment lists + top vehicles + warm leads, from the same Reporting service
+      // (and, for the lists, the same response) as every number above. Degrades to empty sections.
+      const { dollarRate, enr } = await enrichFor({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, tz, w, report, cadence: "daily" });
       // canonical stored payload — carries everything the template reads so a later
       // re-render (and the SPA preview) reproduce the exact email.
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate, daily_template: tpl, digest_focus: pickFocus(c, m) };
-      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, "daily");
-      // Digest SMS — terse headline + report link to subscribers with a phone (opt-in per type).
-      // Runs BEFORE the email dry gate so held emails don't block SMS; own SMS_DRY_RUN + dedupe.
-      const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, "daily", c && c.sms_enabled);
-      if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true)) {
-        const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
-        const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, "daily", w.localDate, smsRecips, T.renderDigestSms({ cadence: "daily", rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
-        if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
-      }
+      const metricsFull = { ...metrics, campaigns: camps, ...enrichedFields(enr), dollarRate, daily_template: tpl, digest_focus: pickFocus(c, m) };
+      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, "daily", { w, cfg: c });
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; console.log(`  · ${name} [${L.department}] suppressed (dry-run)`); return; }
       // ── ATOMIC SEND-CLAIM (idempotency: at-most-once per customer · dept · cadence · day) ──────────
@@ -1117,11 +1565,12 @@ async function runOnce() {
       // the same time. Lost the claim (0 rows) → someone else already owns this send → skip, never double.
       // On a send FAILURE the lock is deliberately KEPT (no same-day auto-retry) so we never double-send an
       // email that may have gone out; the failure surfaces as "Failed" + a Slack alert for manual retry.
+      // The claim time rides in reason_detail so the orphan reaper can tell a hung claim from a live one.
       const sentAt = new Date().toISOString();
       const lockId = `cron-${L.team_id}-${L.department}-daily-${w.localDate}`;
       if (!FORCE_RESEND) {
         const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
-          .update({ status: "sending", message_id: lockId })
+          .update({ status: "sending", message_id: lockId, reason_detail: claimDetail() })
           .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", w.localDate)
           .is("message_id", null)
           .select("id");
@@ -1131,9 +1580,11 @@ async function runOnce() {
       // SEND (we own the claim; message_id is now non-null so no other sender will re-send this row)
       const messageId = await sendMailAttributed(emails, subject, html);
       const finalId = messageId || lockId;
-      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: finalId, recipients: emails.map((e) => ({ email: e, received: true })) });
+      await upsert({ status: "sent", reason: null, reason_detail: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: finalId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;
       console.log(`  ✓ SENT ${name} [${L.department}] → ${emails.join(", ")}`);
+      // Digest SMS — only now that the email really went out.
+      await smsAfterSend({ L, c, recOf, cadence: "daily", w, tz, name, m, smsFailures });
     } catch (e) {
       out.errors++;
       const code = e && e.code;
@@ -1143,12 +1594,14 @@ async function runOnce() {
       // NO_DELIVERABLE_RECIPIENT is a hold too — the deliverability gate left nobody to mail. It is
       // a backstop (subscribedEmails already filters, so the pass normally exits at
       // recipients_missing first), but if it ever trips it must not page anyone as a send failure.
-      const isHold = code === "BLOCKED_NO_VALUE" || code === "V2_SPYNE_ONLY" || code === "NO_DELIVERABLE_RECIPIENT";
+      const isHold = !!HOLD_REASON[code];
       const detail = String(e && e.message ? e.message : e).slice(0, 400);
       console.log(`  ✗ ${name} [${L.department}] ${isHold ? "held" : "FAILED"}: ${detail.slice(0, 160)}`);
+      // The zone/window itself failed: key the error row on the Eastern report date so it still shows.
+      if (!base) base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: RUN_LOCAL_DATE || safeLocalDate(null), dealer_timezone: String(tz || c?.timezone || "") || null, trigger: "cron" };
       try {
         await upsert(isHold
-          ? { status: "not_sent", reason: { BLOCKED_NO_VALUE: "no_value", V2_SPYNE_ONLY: "v2_spyne_only", NO_DELIVERABLE_RECIPIENT: "recipients_missing" }[code], reason_detail: detail }
+          ? { status: "not_sent", reason: HOLD_REASON[code], reason_detail: detail }
           : { status: "error", reason: "error", reason_detail: detail });
       } catch { /* swallow — one failure must not halt the pass */ }
       if (!isHold) failures.push({ rooftop: name, dept: L.department, error: detail.slice(0, 200) });
@@ -1166,7 +1619,6 @@ async function runOnce() {
   // stale numbers, and names the affected rooftops. Best-effort; never throws.
   if (staleHeld.length) {
     try {
-      const { postSystemicAlert } = require("./slackAlert.cjs");
       await postSystemicAlert({
         source: "Daily digest",
         title: `${staleHeld.length} digest(s) HELD — reporting aggregate is stale`,
@@ -1208,47 +1660,37 @@ function dateRange(start, end) {
 }
 async function backfill(start, end) {
   console.log(`\n── BACKFILL ${start}…${end} (record-only, NO emails) ──`);
-  const [{ data: live }, { data: cfg }, { data: rec }] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_enabled,daily_template,digest_focus,lifecycle_status,churn_date"),
-    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
-  ]);
-  const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
-  for (const L of (live ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
-  const recOf = new Map();
-  for (const r of rec ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
+  const { live, cfgOf, recOf } = await loadFleet("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,lifecycle_status,churn_date");
   const days = dateRange(start, end);
-  const out = { sent: 0, not_sent: 0, preserved: 0, errors: 0 };
+  const out = { backfilled: 0, not_sent: 0, preserved: 0, errors: 0 };
   const POOL = 8;
   // NO churn gate here on purpose: backfill is record-only (it synthesizes roi_digest_runs history
   // and never calls sendMail), so gating it would only erase a churned rooftop's historical rows
   // without preventing any email. The gate belongs on the paths that actually send.
-  const tasks = (live ?? []).filter((L) => (cfgOf.get(L.team_id)?.daily_enabled) !== false);
+  const tasks = live.filter((L) => (cfgOf.get(L.team_id)?.daily_enabled) !== false);
 
   async function worker(L) {
     const c = cfgOf.get(L.team_id);
     const name = c?.rooftop_name || c?.team_name || "";
     const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
+    if (!isValidTz(tz)) { out.errors += days.length; console.log(`  ✗ ${name} [${L.department}] invalid timezone "${tz}", skipped`); return; }
     const emails = subscribedEmails(recOf.get(L.team_id), L.department, "daily");
     for (const day of days) {
       const w = windowsForDate(day, tz);
       const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence: "daily", local_date: day, dealer_timezone: tz, trigger: "backfill" };
       try {
-        const dayM = await getDayWithLiveness(L.team_id, L.department, w);
-        const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
-        const ai = await getActionItems(L.team_id, L.department, w);
-        const camps = await getCampaigns(L.team_id, L.department, w);
-        const m = { ...dayM, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, conversationsReachedMTD: mtd.conversationsReached, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet };
+        const { m, ai } = await buildDigestMetrics({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, w });
+        const camps = await getCampaigns(L.team_id, L.department, w, L.enterprise_id);
         const tpl = pickTemplate(c, "daily");
         const metrics = { ...m, actionItems: ai.items, campaigns: camps, reportDate: day, daily_template: tpl, digest_focus: pickFocus(c, m) };
         const subject = `${L.department === "service" ? "Service" : "Sales"} Daily Digest — ${name}`;
         const g = guardrailFor(tpl, m);
         // backfill is historical → no future "upcoming appointments"; render from the
         // full metrics so follow-ups/campaigns still show.
-        const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, day, tz, metrics, camps, "daily");
-        // preserve a row already marked sent — just refresh its data
+        const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, day, tz, metrics, camps, "daily", { w, cfg: c || {} });
+        // preserve a row already marked sent (or claimed by a sender) — just refresh its data
         const { data: ex } = await sb.from("roi_digest_runs").select("status,message_id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", day).maybeSingle();
-        if (ex?.status === "sent") {
+        if (ex?.status === "sent" || ex?.message_id) {
           // LOCK: a really-emailed row (message_id set) keeps its exact sent body — refresh metrics only.
           const upd = ex.message_id ? { metrics, subject } : { metrics, rendered_html: html, subject };
           await sb.from("roi_digest_runs").update(upd).eq("team_id", L.team_id).eq("department", L.department).eq("cadence", "daily").eq("local_date", day); out.preserved++; continue;
@@ -1259,12 +1701,15 @@ async function backfill(start, end) {
           const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" });
           if (error) throw new Error(`roi_digest_runs write failed (service_role key required?): ${error.message}`);
         };
-        if (!emails.length) { await up({ status: "not_sent", reason: "recipients_missing", metrics, subject }); out.not_sent++; }
+        if (!emails.length) { await up({ status: "not_sent", reason: eligibleButUnsubscribed(recOf.get(L.team_id), L.department) ? "unsubscribed" : "recipients_missing", metrics, subject }); out.not_sent++; }
         else if (!g.ok) { await up({ status: "not_sent", reason: g.reason, metrics, subject }); out.not_sent++; }
         else {
-          // record-only "sent" — historical digest; recipients received, but NO mail is fired
-          await up({ status: "sent", reason: null, metrics, subject, rendered_html: html, send_path: "raw_html", sent_at: new Date(`${day}T11:00:00Z`).toISOString(), recipients: emails.map((e) => ({ email: e, received: true })) });
-          out.sent++;
+          // Record-only: the digest that WOULD have gone out, rebuilt from the data. It is NEVER recorded
+          // as 'sent' (that used to fake a delivery and, through the already-sent check, block a real
+          // re-send of the same day). not_sent/backfilled keeps the body for the tracker preview, marks
+          // every recipient as not received, and leaves message_id NULL so a real send can still claim it.
+          await up({ status: "not_sent", reason: "backfilled", reason_detail: "history rebuilt from stored data by backfill; this digest was never emailed", metrics, subject, rendered_html: html, send_path: "raw_html", sent_at: null, recipients: emails.map((e) => ({ email: e, received: false })) });
+          out.backfilled++;
         }
       } catch (e) { out.errors++; console.log(`  ✗ ${name} [${L.department}] ${day}: ${String(e).slice(0, 120)}`); }
     }
@@ -1283,7 +1728,7 @@ async function backfill(start, end) {
 // carry rendered_html (sent/suppressed) so the stored bytes match the latest template.
 async function rerender() {
   console.log("\n── RERENDER stored rendered_html from stored metrics (Supabase-only · NO emails · NO data change) ──");
-  const { data: cfg } = await sb.from("roi_rooftop_config").select("team_id,rooftop_name,team_name,daily_template,digest_focus");
+  const { data: cfg } = await readAll("roi_rooftop_config", "team_id,rooftop_name,team_name,daily_template,digest_focus,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day");
   const nameOf = new Map((cfg ?? []).map((c) => [c.team_id, c.rooftop_name || c.team_name || ""]));
   const cfgOf = new Map((cfg ?? []).map((c) => [c.team_id, c]));
   const out = { updated: 0, errors: 0 };
@@ -1302,11 +1747,12 @@ async function rerender() {
         const m = r.metrics || {};
         const name = nameOf.get(r.team_id) || "";
         const tz = await resolveTz(sb, r.team_id, r.dealer_timezone, name);
-        const dateLabel = new Date(`${r.local_date}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+        const pw = periodWindowFor(tz, r.cadence, r.local_date);
+        const dateLabel = (pw && pw.dateLabel) || new Date(`${r.local_date}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
         const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
         // re-render to the rooftop's CURRENT template choice (daily switchable; weekly/monthly always v2)
         const tpl = pickTemplate(cfgOf.get(r.team_id), r.cadence);
-        const html = renderDigest(tpl, name, r.department, dateLabel, r.enterprise_id, r.team_id, r.local_date, tz, m, camps, r.cadence);
+        const html = renderDigest(tpl, name, r.department, dateLabel, r.enterprise_id, r.team_id, r.local_date, tz, m, camps, r.cadence, { w: pw, cfg: cfgOf.get(r.team_id) || {} });
         const { error: ue } = await sb.from("roi_digest_runs").update({ rendered_html: html })
           .eq("team_id", r.team_id).eq("department", r.department).eq("cadence", r.cadence).eq("local_date", r.local_date);
         if (ue) out.errors++; else out.updated++;
@@ -1335,15 +1781,16 @@ async function renderStoredDigest({ teamId, department, cadence = "daily", local
   if (error) throw new Error(error.message);
   if (!row || !row.metrics) return null;
   const { data: cfg } = await sb.from("roi_rooftop_config")
-    .select("rooftop_name,team_name,daily_template,digest_focus").eq("team_id", teamId).maybeSingle();
+    .select("rooftop_name,team_name,daily_template,digest_focus,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day").eq("team_id", teamId).maybeSingle();
   const m = row.metrics || {};
   const name = (cfg && (cfg.rooftop_name || cfg.team_name)) || "";
   const tz = await resolveTz(sb, teamId, row.dealer_timezone, name);
-  const dateLabel = new Date(`${localDate}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+  const pw = periodWindowFor(tz, cad, localDate);
+  const dateLabel = (pw && pw.dateLabel) || new Date(`${localDate}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
   const camps = Array.isArray(m.campaigns) ? m.campaigns : [];
   // daily honors the requested template (falls back to the rooftop's config); weekly/monthly always v2.
   const chosen = cad === "daily" ? (tpl === "v1" || tpl === "v2" ? tpl : pickTemplate(cfg, cad)) : "v2";
-  const html = renderDigest(chosen, name, dept, dateLabel, row.enterprise_id, teamId, localDate, tz, m, camps, cad);
+  const html = renderDigest(chosen, name, dept, dateLabel, row.enterprise_id, teamId, localDate, tz, m, camps, cad, { w: pw, cfg: cfg || {} });
   // strip the no-value marker AND the 1×1 open-tracking pixel — this is an on-screen preview, never a
   // send; leaving the pixel in fires the track-open Edge Function and inflates open_count on every preview.
   const preview = emailValue.stripMarker(html).replace(/<img[^>]*\/functions\/v1\/track-open[^>]*>/gi, "");
@@ -1366,136 +1813,202 @@ function localCadenceParts(tz) {
   return { Y, M, D, H: (+g("hour")) === 24 ? 0 : +g("hour"), Min: +g("minute"), dow: g("weekday"), dowNum };
 }
 const isoD = (d) => d.toISOString().slice(0, 10);
-// `cfg` (roi_rooftop_config row) is optional — the on-demand "generate now" paths call this
-// without a cfg and don't read sendDue, so they're unaffected.
-function cadenceWindow(tz, cadence, cfg) {
-  const c = localCadenceParts(tz);
+const pad2 = (n) => String(n).padStart(2, "0");
+
+// ── THE period window for a digest, from its period key (pure: no clock, no I/O) ──────────────────
+// The key is the row's local_date in the cron's own convention:
+//   daily   → the report date                       window [D, D+1)
+//   weekly  → the LAST day of the 7-day window      window [D-6, D+1)
+//   monthly → the 1st of the reported month         window [1st, 1st of next month)
+// The scheduled passes and an explicit "send this period" request both go through here, so a manual
+// send for a period covers exactly the days the cron would have. MTD runs from the 1st of the month of
+// the period's last day (for a weekly sent on the 1st that is the previous month, not an empty window).
+// Throws on a malformed date.
+function windowForPeriod(tz, cadence, localDate) {
+  const s = String(localDate || "");
+  const [y, m, d] = s.split("-").map(Number);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || isoD(new Date(Date.UTC(y, m - 1, d))) !== s) throw new Error(`invalid period date "${localDate}" (expected YYYY-MM-DD)`);
   if (cadence === "weekly") {
-    const end = new Date(Date.UTC(c.Y, c.M - 1, c.D));           // today (exclusive)
-    const start = new Date(Date.UTC(c.Y, c.M - 1, c.D - 7));     // 7 days back
-    const ystr = new Date(Date.UTC(c.Y, c.M - 1, c.D - 1));      // yesterday → row local_date
-    const weeklySendDow = cfg?.weekly_send_dow ?? 1; // default Monday
-    return { apiStart: isoD(start), apiEnd: isoD(end), apiMonthStart: `${c.Y}-${String(c.M).padStart(2, "0")}-01`,
-      localDate: isoD(ystr), dateLabel: `Week of ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H, localMinute: c.Min, sendDue: c.dowNum === weeklySendDow };
+    const apiStart = addDaysISO(s, -6), apiEnd = addDaysISO(s, 1);
+    return { cadence: "weekly", localDate: s, apiStart, apiEnd, apiMonthStart: `${s.slice(0, 7)}-01`, lastDay: s, dateLabel: `Week of ${apiStart} – ${s}` };
   }
-  // monthly — previous calendar month, sent on the configured day (default the 1st)
-  const thisM1 = new Date(Date.UTC(c.Y, c.M - 1, 1)), prevM1 = new Date(Date.UTC(c.Y, c.M - 2, 1));
-  const monthlySendDay = cfg?.monthly_send_day ?? 1;
-  return { apiStart: isoD(prevM1), apiEnd: isoD(thisM1), apiMonthStart: isoD(prevM1),
-    localDate: isoD(prevM1), dateLabel: prevM1.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }), localHour: c.H, localMinute: c.Min, sendDue: c.D === monthlySendDay };
+  if (cadence === "monthly") {
+    const first = `${s.slice(0, 7)}-01`, next = isoD(new Date(Date.UTC(y, m, 1)));
+    return { cadence: "monthly", localDate: first, apiStart: first, apiEnd: next, apiMonthStart: first, lastDay: addDaysISO(next, -1),
+      dateLabel: new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }) };
+  }
+  return { cadence: "daily", ...windowsForDate(s, tz), lastDay: s };
 }
 
-// On-demand window for the manual "generate & send now" path. Unlike the scheduled
-// cron (calendar-anchored monthly), on-demand uses ROLLING windows ending yesterday:
+// The period a scheduled weekly/monthly pass works on NOW, and whether it is due. A period stays due from
+// its send day until a 'sent' row exists, bounded: weekly ≤ WEEKLY_MAX_LATE_DAYS (the next period starts
+// after 6), monthly ≤ MONTHLY_MAX_LATE_DAYS (then gaveUp → not_sent/missed_send_day). It used to be due on
+// the exact send day only, so one bad day lost the period (the week ending 2026-10-04 wrote nothing).
+// `cfg` (roi_rooftop_config row) is optional: defaults Monday / the 1st.
+function cadenceWindow(tz, cadence, cfg) {
+  const c = localCadenceParts(tz);
+  const today = `${c.Y}-${pad2(c.M)}-${pad2(c.D)}`;
+  const clock = { localHour: c.H, localMinute: c.Min };
+  if (cadence === "weekly") {
+    const dow = Number(cfg?.weekly_send_dow ?? 1);
+    const valid = Number.isInteger(dow) && dow >= 0 && dow <= 6;
+    const lateDays = valid ? (c.dowNum - dow + 7) % 7 : 0;
+    const sendDate = addDaysISO(today, -lateDays);
+    return { ...windowForPeriod(tz, "weekly", addDaysISO(sendDate, -1)), ...clock, sendDate, lateDays, sendDue: valid && lateDays <= WEEKLY_MAX_LATE_DAYS, gaveUp: false };
+  }
+  // monthly — the previous calendar month, sent on the configured day (default the 1st; a day the month
+  // doesn't have, e.g. the 31st, means its last day)
+  const day = Number(cfg?.monthly_send_day ?? 1);
+  const valid = Number.isInteger(day) && day >= 1 && day <= 31;
+  const dim = (yy, mm) => new Date(Date.UTC(yy, mm, 0)).getUTCDate(); // days in month mm (1-based)
+  let sy = c.Y, sm = c.M;
+  if (valid && c.D < Math.min(day, dim(sy, sm))) { sm -= 1; if (sm === 0) { sm = 12; sy -= 1; } }
+  const sendDate = `${sy}-${pad2(sm)}-${pad2(valid ? Math.min(day, dim(sy, sm)) : 1)}`;
+  const lateDays = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${sendDate}T00:00:00Z`)) / 86400000);
+  const period = isoD(new Date(Date.UTC(sy, sm - 2, 1)));  // the month before the send month
+  return { ...windowForPeriod(tz, "monthly", period), ...clock, sendDate, lateDays,
+    sendDue: valid && lateDays <= MONTHLY_MAX_LATE_DAYS, gaveUp: valid && lateDays > MONTHLY_MAX_LATE_DAYS };
+}
+
+// On-demand window for the manual "generate & send now" path when no period is named. Unlike the
+// scheduled cron (calendar-anchored), on-demand uses ROLLING windows ending yesterday:
 // daily = yesterday · weekly = last 7 days · monthly = last 30 days. No send-day gate.
 function onDemandWindow(tz, cadence) {
-  if (cadence === "weekly") return cadenceWindow(tz, "weekly");
+  const c = localCadenceParts(tz);
+  const yesterday = addDaysISO(`${c.Y}-${pad2(c.M)}-${pad2(c.D)}`, -1);
+  if (cadence === "weekly") return { ...windowForPeriod(tz, "weekly", yesterday), localHour: c.H, localMinute: c.Min };
   if (cadence === "monthly") {
-    const c = localCadenceParts(tz);
-    const start = new Date(Date.UTC(c.Y, c.M - 1, c.D - 30));    // 30 days back
-    const end = new Date(Date.UTC(c.Y, c.M - 1, c.D));           // today (exclusive)
-    const ystr = new Date(Date.UTC(c.Y, c.M - 1, c.D - 1));      // yesterday → row local_date
-    return { apiStart: isoD(start), apiEnd: isoD(end), apiMonthStart: `${c.Y}-${String(c.M).padStart(2, "0")}-01`,
-      localDate: isoD(ystr), dateLabel: `Last 30 days · ${isoD(start)} – ${isoD(ystr)}`, localHour: c.H };
+    const start = addDaysISO(yesterday, -29), end = addDaysISO(yesterday, 1);
+    return { cadence: "monthly", apiStart: start, apiEnd: end, apiMonthStart: `${c.Y}-${pad2(c.M)}-01`, lastDay: yesterday,
+      localDate: yesterday, dateLabel: `Last 30 days · ${start} – ${yesterday}`, localHour: c.H, localMinute: c.Min };
   }
-  return localParts(tz); // daily — yesterday window (apiStart/apiEnd/apiMonthStart present)
+  return { ...localParts(tz), lastDay: yesterday }; // daily — yesterday window (apiStart/apiEnd/apiMonthStart present)
 }
 
 // ── ON-DEMAND generate + send (manual "create in real time and send") ────────
 // Powers the tracker's per-rooftop and bulk "Generate & send {cadence}" buttons.
-// Reuses the SAME fetch → render → send → mark pipeline as the cron, but:
-//   · bypasses the send-day (Mon/1st) + send-hour gates and the already-sent guard
-//     (this is an explicit user action — regenerate + resend on demand),
-//   · can target ONE rooftop (teamId + department) or ALL live rooftops (no filter),
-//   · still respects dry-run: a send is real only when server DRY_RUN=false AND the
-//     rooftop's dry_run=false (or pass dryRun:true to force a suppressed preview).
-// opts: { cadence:'daily'|'weekly'|'monthly', teamId?, department?, dryRun? }
+// opts: { cadence:'daily'|'weekly'|'monthly', teamId?, department?, localDate?, force?, dryRun? }
+//
+// WITH localDate (a named period, in the cron's own key convention — see windowForPeriod): builds
+// exactly that period, upserts THAT row, honours weekly_enabled / monthly_enabled (daily_enabled for
+// daily), skips a period already sent unless `force`, and takes the same atomic send-claim the cron
+// takes, so the cron and a manual send can never both deliver one period.
+//
+// WITHOUT localDate (the original behaviour): rolling windows ending yesterday, no already-sent guard,
+// bypassing the send-day/send-hour gates; can target ONE rooftop or ALL live rooftops.
+//
+// Both: dry-run respected (server DRY_RUN + the rooftop's dry_run; dryRun:true forces a held preview),
+// churn gate, daily pause, and `force` is the DANGER override that also sends a no-value digest.
 async function generateAndSendNow(opts) {
   opts = opts || {};
   resetApiCache(); // an explicit "generate now" always reads fresh numbers
   const cadence = (opts.cadence === "weekly" || opts.cadence === "monthly") ? opts.cadence : "daily";
-  // DANGER override: when true, send even a no-value digest (manual force-send).
+  // DANGER override: when true, send even a no-value digest (manual force-send) / re-send a sent period.
   const force = opts.force === true;
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const onlyTeam = opts.teamId ? String(opts.teamId) : null;
   const onlyDept = opts.department === "service" ? "service" : opts.department === "sales" ? "sales" : null;
   const forceDry = opts.dryRun === true;
+  const periodKey = opts.localDate ? String(opts.localDate) : null;
+  if (periodKey) windowForPeriod("America/New_York", cadence, periodKey); // reject a malformed date before touching anything
+  const enabledCol = cadence === "weekly" ? "weekly_enabled" : cadence === "monthly" ? "monthly_enabled" : "daily_enabled";
 
-  const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,daily_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date"),
-    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
-  ]);
-  if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
-  const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
-  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
-  const recOf = new Map();
-  for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-
-  let targets = (liveRes.data ?? []);
+  const { live, cfgOf, recOf } = await loadFleet("team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,weekly_send_dow,monthly_send_day,daily_template,digest_focus,sms_enabled,lifecycle_status,churn_date");
+  let targets = live;
   if (onlyTeam) targets = targets.filter((L) => L.team_id === onlyTeam);
   if (onlyDept) targets = targets.filter((L) => L.department === onlyDept);
 
-  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, paused: 0, errors: 0, churned: 0, details: [] };
+  const out = { cadence, scope: onlyTeam ? "rooftop" : "all", localDate: periodKey, sent: 0, suppressed: 0, no_recipients: 0, no_data: 0, paused: 0, already_sent: 0, held: 0, errors: 0, churned: 0, details: [] };
   const smsFailures = []; // on-demand digest-SMS failures this pass → shared Slack breakage alert (SMS)
 
   const process1 = async (L) => {
     const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || c?.team_name || "";
+    const note = (status, extra) => out.details.push({ team: L.team_id, dept: L.department, name, status, ...(extra || {}) });
     // Same pause toggle the daily cron honors (roi_rooftop_config.daily_enabled) — a CSM who paused
-    // a rooftop's digest must not have a manual "Generate & send now" bypass that hold.
-    if (cadence === "daily" && c && c.daily_enabled === false) { out.paused++; return; }
-    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
-    const w = onDemandWindow(tz, cadence);
+    // a rooftop's digest must not have a manual "Generate & send now" bypass that hold. A named weekly /
+    // monthly period also needs its cadence switched on.
+    if (cadence === "daily" && c && c.daily_enabled === false) { out.paused++; note("paused", { reason: "daily_enabled=false" }); return; }
+    if (periodKey && cadence !== "daily" && (!c || c[enabledCol] !== true)) { out.paused++; note("paused", { reason: `${enabledCol}=false` }); return; }
     const Dep = L.department === "service" ? "Service" : "Sales";
     const Cad = cadence === "weekly" ? "Weekly" : cadence === "monthly" ? "Monthly" : "Daily";
     const subject = `${Dep} ${Cad} Digest — ${name}`;
-    const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "manual" };
+    let tz = null, w = null, base = null, prior = null;
     const upsert = async (extra) => {
       const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" }).select("id");
       if (error) throw new Error(`roi_digest_runs write failed: ${error.message}`);
     };
-    const note = (status, extra) => out.details.push({ team: L.team_id, dept: L.department, name, status, ...(extra || {}) });
+    // A hold never overwrites a period somebody already claimed or sent (only reachable with `force`).
+    const writeHold = (extra) => (prior && prior.message_id ? Promise.resolve() : upsert(extra));
     try {
+      tz = await resolveTz(sb, L.team_id, c?.timezone, name);
+      assertValidTz(tz);
+      w = periodKey ? windowForPeriod(tz, cadence, periodKey) : onDemandWindow(tz, cadence);
+      base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "manual" };
+      if (periodKey) {
+        ({ data: prior } = await sb.from("roi_digest_runs").select("id,status,reason,message_id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).maybeSingle());
+        // In flight right now: never, even forced (a second send would race the first).
+        if (prior && prior.status === "sending") { out.already_sent++; note("in_flight"); return; }
+        if (prior && (prior.status === "sent" || prior.message_id) && !force) { out.already_sent++; note("already_sent", { previous: prior.status }); return; }
+      }
       // CHURN GATE — a manual "Generate & send now" must not bypass it either (same reasoning as
       // the daily_enabled pause above). See subscriptions.cjs isChurned.
       if (isChurned(c, w.localDate)) {
-        await upsert({ status: "not_sent", reason: "churned", reason_detail: `lifecycle=${c?.lifecycle_status ?? "?"}`, subject });
+        await writeHold({ status: "not_sent", reason: "churned", reason_detail: `lifecycle=${c?.lifecycle_status ?? "?"}`, subject });
         out.churned++; note("churned");
         return;
       }
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
-      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing", subject }); out.no_recipients++; note("no_recipients"); return; }
-      const day = await getDayWithLiveness(L.team_id, L.department, w);
-      const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
-      const ai = await getActionItems(L.team_id, L.department, w);
-      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      if (!emails.length) {
+        const unsub = eligibleButUnsubscribed(recOf.get(L.team_id), L.department);
+        await writeHold({ status: "not_sent", reason: unsub ? "unsubscribed" : "recipients_missing", subject });
+        out.no_recipients++; note(unsub ? "unsubscribed" : "no_recipients"); return;
+      }
+      const { m, ai, report } = await buildDigestMetrics({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, w });
       const tpl = pickTemplate(c, cadence);
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
       const g = guardrailFor(tpl, m);
-      if (!g.ok && !force) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
-      const camps = await getCampaigns(L.team_id, L.department, w);
-      const dollarRate = digestDollarRate(L.department);
-      let enr = { appointments: [], topVehicles: [], warmLeads: [] };
-      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
-      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
-      // Digest SMS companion — the cron sends this alongside the email (subscribedSmsRecips), but this
-      // on-demand path used to skip it entirely, so a manual re-send silently dropped the SMS channel
-      // the rooftop would otherwise have gotten. Before the email dry gate so a held email doesn't block SMS.
-      const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, cadence, c && c.sms_enabled);
-      if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true || forceDry)) {
-        const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
-        const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
-        if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
-      }
+      if (!g.ok && !force) { await writeHold({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; note("no_data", { reason: g.reason }); return; }
+      const camps = await getCampaigns(L.team_id, L.department, w, L.enterprise_id);
+      const { dollarRate, enr } = await enrichFor({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, tz, w, report, cadence });
+      const metricsFull = { ...metrics, campaigns: camps, ...enrichedFields(enr), dollarRate };
+      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence, { w, cfg: c || {} });
       const dry = forceDry || DRY_RUN || L.dry_run === true;
-      if (dry) { await upsert({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
+      if (dry) { await writeHold({ status: "suppressed", reason: forceDry ? "manual_dry_run" : (L.dry_run === true ? "dry_run" : "server_dry_run"), metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; note("suppressed"); return; }
       const sentAt = new Date().toISOString();
+      let lockId = null;
+      if (periodKey && !(force && prior && prior.message_id)) {
+        // The cron's own at-most-once claim: the row exists first (queued), then message_id NULL → lock.
+        await upsert({ status: "queued", reason: null, reason_detail: null, metrics: metricsFull, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
+        lockId = `manual-${L.team_id}-${L.department}-${cadence}-${w.localDate}`;
+        const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
+          .update({ status: "sending", message_id: lockId, reason_detail: claimDetail() })
+          .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate)
+          .is("message_id", null)
+          .select("id");
+        if (claimErr) throw new Error(`send-claim failed: ${claimErr.message}`);
+        if (!claim || !claim.length) { out.already_sent++; note("already_sent"); return; }
+        prior = { status: "sending", message_id: lockId, ownClaim: true };
+      }
       const messageId = await sendMailAttributed(emails, subject, html, { force });
-      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || `manual-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
+      await upsert({ status: "sent", reason: null, reason_detail: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || lockId || `manual-${cadence}-${sentAt}`, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++; note("sent", { recipients: emails.length });
       console.log(`  ✓ SENT (on-demand) ${cadence} ${name} [${L.department}]`);
-    } catch (e) { out.errors++; note("error", { error: String(e).slice(0, 160) }); console.log(`  ✗ on-demand ${cadence} ${name} [${L.department}] error: ${String(e).slice(0, 160)}`); }
+      // Digest SMS companion — only once the email itself went out.
+      await smsAfterSend({ L, c, recOf, cadence, w, tz, name, m, smsFailures });
+    } catch (e) {
+      const code = e && e.code;
+      const detail = String(e && e.message ? e.message : e).slice(0, 400);
+      const isHold = !!HOLD_REASON[code];
+      // A no-value block counts as no_data so the tracker offers the DANGER override (it keyed on that).
+      if (code === "BLOCKED_NO_VALUE") out.no_data++; else if (isHold) out.held++; else out.errors++;
+      note(isHold ? "held" : "error", isHold ? { reason: HOLD_REASON[code] } : { error: detail.slice(0, 160) });
+      console.log(`  ✗ on-demand ${cadence} ${name} [${L.department}] ${isHold ? "held" : "error"}: ${detail.slice(0, 160)}`);
+      // A named period records its outcome on its row, like the cron: a claimed row must not stay
+      // 'sending' (it keeps its claim either way, so it is never resent automatically).
+      if (periodKey && base && (!prior || !prior.message_id || prior.ownClaim)) {
+        try { await upsert(isHold ? { status: "not_sent", reason: HOLD_REASON[code], reason_detail: detail } : { status: "error", reason: "error", reason_detail: detail }); } catch { /* best-effort */ }
+      }
+    }
   };
 
   const POOL = Number(process.env.CRON_POOL || 10); let _i = 0;
@@ -1512,7 +2025,7 @@ async function generateAndSendNow(opts) {
 // and hand it back so the drawer can show it BEFORE the user manually triggers a
 // send. Read-only by construction — it touches none of the send/upsert paths, so
 // it can never email or mutate roi_digest_runs. Mirrors process1's build steps.
-// opts: { cadence:'daily'|'weekly'|'monthly', teamId, department }
+// opts: { cadence:'daily'|'weekly'|'monthly', teamId, department, localDate? }
 async function previewDigestNow(opts) {
   opts = opts || {};
   resetApiCache();
@@ -1522,74 +2035,93 @@ async function previewDigestNow(opts) {
   const department = opts.department === "service" ? "service" : "sales";
   if (!teamId) throw new Error("teamId is required");
 
-  const [liveRes, cfgRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,department").eq("team_id", teamId).eq("department", department).maybeSingle(),
-    sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_template,digest_focus").eq("team_id", teamId).maybeSingle(),
-  ]);
+  const cfgRes = await sb.from("roi_rooftop_config").select("team_id,enterprise_id,rooftop_name,team_name,timezone,daily_template,digest_focus,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day").eq("team_id", teamId).maybeSingle();
   const cfg = cfgRes.data || {};
   const name = cfg.rooftop_name || cfg.team_name || "";
   const tz = await resolveTz(sb, teamId, cfg.timezone, name);
+  assertValidTz(tz);
   const enterpriseId = cfg.enterprise_id || ""; // enterprise_id is on roi_rooftop_config, not roi_live_departments
-  const w = onDemandWindow(tz, cadence);
+  const w = opts.localDate ? windowForPeriod(tz, cadence, String(opts.localDate)) : onDemandWindow(tz, cadence);
   const Dep = department === "service" ? "Service" : "Sales";
   const Cad = cadence === "weekly" ? "Weekly" : cadence === "monthly" ? "Monthly" : "Daily";
   const subject = `${Dep} ${Cad} Digest — ${name}`;
 
-  // Same metric assembly as process1 (on-demand send), so the preview is byte-identical to what sends.
-  const day = await getDayWithLiveness(teamId, department, w);
-  const mtd = await getMetrics(teamId, department, w, "mtd");
-  const ai = await getActionItems(teamId, department, w);
-  const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+  // Same metric assembly as the send paths, so the preview is byte-identical to what sends.
+  const { m, ai, report } = await buildDigestMetrics({ teamId, entId: enterpriseId, dept: department, w });
   const tpl = pickTemplate(cfg, cadence);
   const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(cfg, m) };
   const g = guardrailFor(tpl, m);
-  const camps = await getCampaigns(teamId, department, w);
-  const dollarRate = digestDollarRate(department);
-  let enr = { appointments: [], topVehicles: [], warmLeads: [] };
-  try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(teamId, { dollarRate, dept: department, enterpriseId, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
-  const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
-  const html = renderDigest(tpl, name, department, w.dateLabel, enterpriseId, teamId, w.localDate, tz, metricsFull, camps, cadence);
-  return { ok: true, cadence, teamId, department, name, subject, dateLabel: w.dateLabel, hasData: g.ok, reason: g.ok ? null : g.reason, metrics: metricsFull, html };
+  const camps = await getCampaigns(teamId, department, w, enterpriseId);
+  const { dollarRate, enr } = await enrichFor({ teamId, entId: enterpriseId, dept: department, tz, w, report, cadence });
+  const metricsFull = { ...metrics, campaigns: camps, ...enrichedFields(enr), dollarRate };
+  const html = renderDigest(tpl, name, department, w.dateLabel, enterpriseId, teamId, w.localDate, tz, metricsFull, camps, cadence, { w, cfg });
+  return { ok: true, cadence, teamId, department, name, subject, dateLabel: w.dateLabel, localDate: w.localDate, hasData: g.ok, reason: g.ok ? null : g.reason, metrics: metricsFull, html };
 }
 
-async function runCadence(cadence) {
+// On a catch-up day (after the send day), a period is still OWED only when nothing decided it yet:
+// not visited, waiting, failed before its claim, or held for a reason a human may have fixed since. A
+// period decided on its send day (no data, dry-run, churned...) is not re-fetched every hour all week.
+function owedOnCatchUp(prior, L) {
+  if (!prior) return true;
+  if (["scheduled", "queued", "error"].includes(prior.status)) return true;
+  if (prior.status === "not_sent" && (REEVALUATE_REASONS.includes(prior.reason) || prior.reason === "pass_killed")) return true;
+  return prior.status === "suppressed" && L.dry_run === false;
+}
+
+async function runCadence(cadence, opts = {}) {
   if (cadence !== "weekly" && cadence !== "monthly") return { skipped: true };
+  return withPassTrail(`roi-digest-${cadence}`, opts, () => runCadencePass(cadence, opts));
+}
+async function runCadencePass(cadence, opts) {
   const passStart = Date.now();
   resetApiCache();
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
   const enabledCol = cadence === "weekly" ? "weekly_enabled" : "monthly_enabled";
-  const [liveRes, cfgRes, recRes] = await Promise.all([
-    sb.from("roi_live_departments").select("team_id,department,dry_run").eq("is_live", true),
-    sb.from("roi_rooftop_config").select(`team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,churn_date,${enabledCol}`),
-    selectRecipients(sb, "team_id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,subscriptions,verified_at"),
-  ]);
-  if (liveRes.error || cfgRes.error || recRes.error) throw new Error((liveRes.error || cfgRes.error || recRes.error).message);
-  const cfgOf = new Map((cfgRes.data ?? []).map((c) => [c.team_id, c]));
-  for (const L of (liveRes.data ?? [])) L.enterprise_id = cfgOf.get(L.team_id)?.enterprise_id || ""; // enterprise_id is on cfg, not live
-  const recOf = new Map();
-  for (const r of recRes.data ?? []) { const a = recOf.get(r.team_id) ?? []; a.push(r); recOf.set(r.team_id, a); }
-  const IGNORE_HOUR = process.env.IGNORE_SEND_HOUR === "true";
-  const IGNORE_DAY = process.env.IGNORE_SEND_DAY === "true"; // testing: ignore the Mon/1st gate
-  const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  // FORCE_RESEND=true → re-send even if a 'sent' row already exists for that date (manual backfill send) — see runOnce.
-  const FORCE_RESEND = process.env.FORCE_RESEND === "true";
-  const out = { sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, no_data: 0, before_hour: 0, errors: 0, churned: 0, unreached: 0 };
+  const Cad = cadence === "weekly" ? "Weekly" : "Monthly";
+  const { live, cfgOf, recOf } = await loadFleet(`team_id,enterprise_id,rooftop_name,team_name,timezone,digest_send_hour,digest_send_minute,daily_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,churn_date,${enabledCol}`);
+  const knobs = operatorKnobs(opts);
+  const { IGNORE_HOUR, IGNORE_DAY, ONLY, FORCE_RESEND } = knobs;
+  const out = { targets: 0, sent: 0, suppressed: 0, not_due: 0, already_sent: 0, no_recipients: 0, unsubscribed: 0, no_data: 0, before_hour: 0, errors: 0, churned: 0, stale_held: 0, caught_up: 0, missed: 0, unreached: 0, ignoredEnv: knobs.ignored };
+  const failures = []; // genuine weekly/monthly send failures → Slack breakage alert
   const smsFailures = []; // genuine weekly/monthly digest-SMS failures this pass → Slack breakage alert (SMS)
+  const staleHeld = [];
+  // Same freshness hard-gate as the daily pass: a period whose last day the aggregate hasn't reached is
+  // held, not emailed as frozen zeros. One probe per pass; fail-open when unknown.
+  const freshness = await probeAggregateFreshness();
+  const scoped = live.filter((L) => (!ONLY.length || ONLY.includes(L.team_id)) && cfgOf.get(L.team_id)?.[enabledCol] === true);
+  await primeTeamDetails(scoped.filter((L) => !cfgOf.get(L.team_id)?.timezone).map((L) => L.team_id));
+  const index = await readRunIndex(cadence, isoDaysAgo(cadence === "weekly" ? 21 : 75));
+  const winOf = (L) => { const c = cfgOf.get(L.team_id); try { return cadenceWindow(isValidTz(c?.timezone) ? c.timezone : "America/New_York", cadence, c); } catch { return {}; } };
+  const targets = prioritize(scoped, index, (L) => winOf(L).localDate);
+  out.targets = targets.length;
 
   const process1 = async (L) => {
     const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || c?.team_name || "";
-    if (!c || c[enabledCol] !== true) return;
-    const tz = await resolveTz(sb, L.team_id, c?.timezone, name);
-    const w = cadenceWindow(tz, cadence, c);
-    if (!IGNORE_DAY && !w.sendDue) { out.not_due++; return; }
-    const base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
+    let tz = null, w = null, base = null;
     const upsert = async (extra) => {
       const { error } = await sb.from("roi_digest_runs").upsert({ ...base, ...extra }, { onConflict: "team_id,department,cadence,local_date" }).select("id");
       if (error) throw new Error(`roi_digest_runs write failed: ${error.message}`);
     };
     try {
-      const { data: prior } = await sb.from("roi_digest_runs").select("id,status").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).maybeSingle();
-      if (prior && (prior.status === "sent" || prior.status === "sending") && !FORCE_RESEND) { out.already_sent++; return; }
+      tz = await resolveTz(sb, L.team_id, c?.timezone, name);
+      assertValidTz(tz);
+      w = cadenceWindow(tz, cadence, c);
+      base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
+      if (!IGNORE_DAY && !w.sendDue) {
+        // A monthly period past its catch-up window that never went out: recorded ONCE, so the tracker
+        // shows a missed digest instead of an empty cell or a 'scheduled' that will never move.
+        const row = index.get(`${L.team_id}|${L.department}|${w.localDate}`);
+        if (w.gaveUp && !isChurned(c, w.localDate) && (!row || (["scheduled", "queued"].includes(row.status) && !row.message_id))) {
+          await upsert({ status: "not_sent", reason: "missed_send_day", reason_detail: `not sent within ${MONTHLY_MAX_LATE_DAYS} days of its ${w.sendDate} send day` });
+          out.missed++;
+          console.log(`  · ${name} [${L.department}] ${cadence} not_sent → missed_send_day (${w.localDate})`);
+        } else out.not_due++;
+        return;
+      }
+      const { data: prior } = await sb.from("roi_digest_runs").select("id,status,reason,message_id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).maybeSingle();
+      // Sent, in flight, or claimed (message_id) → finished. Never flipped back to queued/scheduled.
+      if (prior && (prior.status === "sent" || prior.status === "sending" || prior.message_id) && !FORCE_RESEND) { out.already_sent++; return; }
+      if (w.lateDays > 0 && !owedOnCatchUp(prior, L)) { out.not_due++; return; }
       // CHURN GATE — see runOnce / subscriptions.cjs isChurned. After the already-sent check.
       if (isChurned(c, w.localDate)) {
         await upsert({ status: "not_sent", reason: "churned", reason_detail: `lifecycle=${c?.lifecycle_status ?? "?"} churn_date=${c?.churn_date ? String(c.churn_date).slice(0, 10) : "none"}` });
@@ -1598,39 +2130,42 @@ async function runCadence(cadence) {
         return;
       }
       const emails = subscribedEmails(recOf.get(L.team_id), L.department, cadence);
-      if (!emails.length) { await upsert({ status: "not_sent", reason: "recipients_missing" }); out.no_recipients++; return; }
-      const subject = `${L.department === "service" ? "Service" : "Sales"} ${cadence === "weekly" ? "Weekly" : "Monthly"} Digest — ${name}`;
+      if (!emails.length) {
+        const unsub = eligibleButUnsubscribed(recOf.get(L.team_id), L.department);
+        await upsert({ status: "not_sent", reason: unsub ? "unsubscribed" : "recipients_missing", reason_detail: unsub ? `verified recipients exist but none is subscribed to the ${cadence} digest` : null });
+        if (unsub) out.unsubscribed++; else out.no_recipients++;
+        return;
+      }
+      const subject = `${L.department === "service" ? "Service" : "Sales"} ${Cad} Digest — ${name}`;
       // Send-time gate BEFORE any numbers are fetched. A weekly/monthly window is a whole week or month
       // (34s for one rooftop's month on 2026-10-08), the tracker previews these on demand rather than
       // from stored metrics, and every pass until the send time used to re-fetch them just to write
-      // "scheduled". Now that is one cheap write; the send-time visit does the work.
+      // "scheduled". Now that is one cheap write; the send-time visit does the work. A catch-up day waits
+      // for the send time too. Only a fresh or already-scheduled row is (re)written as scheduled: a
+      // failure stays visible until the send-time visit retries it.
       const sendHour = c?.digest_send_hour ?? 7;
       const sendMinute = c?.digest_send_minute ?? 0;
       const beforeSendTime = w.localHour < sendHour || (w.localHour === sendHour && (w.localMinute ?? 0) < sendMinute);
-      if (!IGNORE_HOUR && beforeSendTime) { await upsert({ status: "scheduled", reason: "before_send_hour", subject, recipients: emails.map((e) => ({ email: e, received: false })) }); out.before_hour++; return; }
-      const day = await getDayWithLiveness(L.team_id, L.department, w);
-      const mtd = await getMetrics(L.team_id, L.department, w, "mtd");
-      const ai = await getActionItems(L.team_id, L.department, w);
-      const m = { ...day, actionItemsTotal: ai.total, actionItemsOverdue: ai.overdue, actionItemsClosedYesterday: ai.closedYesterday, appointmentsYesterdayMTD: mtd.appointmentsYesterday, appointmentsInboundMTD: mtd.appointmentsInbound, warmTransfersMTD: mtd.warmTransfers, inboundUniqueLeadsMTD: mtd.inboundUniqueLeads, outboundUniqueReachedMTD: mtd.outboundUniqueReached, outboundConnectRateMTD: mtd.outboundConnectRate, outboundAppointmentsSetMTD: mtd.outboundAppointmentsSet, callingDuringMTD: mtd.callingDuring, callingAfterMTD: mtd.callingAfter, qualifiedLeadsMTD: mtd.qualifiedLeads };
+      if (!IGNORE_HOUR && beforeSendTime) {
+        if (!prior || prior.status === "scheduled") await upsert({ status: "scheduled", reason: "before_send_hour", subject, recipients: emails.map((e) => ({ email: e, received: false })) });
+        out.before_hour++; return;
+      }
+      if (aggregateStaleForDate(freshness, w.lastDay)) {
+        await upsert({ status: "not_sent", reason: "aggregate_stale", reason_detail: `agg newest day ${freshness.maxActivityDay} < period end ${w.lastDay}` });
+        out.stale_held++; staleHeld.push(name);
+        console.log(`  · ${name} [${L.department}] ${cadence} HELD → aggregate_stale (agg max=${freshness.maxActivityDay} < ${w.lastDay})`);
+        return;
+      }
+      const { m, ai, report } = await buildDigestMetrics({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, w });
       const tpl = pickTemplate(c, cadence); // weekly/monthly → always v2
       const metrics = { ...m, actionItems: ai.items, reportDate: w.localDate, daily_template: tpl, digest_focus: pickFocus(c, m) };
-      await upsert({ status: "queued", reason: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
+      await upsert({ status: "queued", reason: null, reason_detail: null, metrics, subject, recipients: emails.map((e) => ({ email: e, received: false })) });
       const g = guardrailFor(tpl, m);
       if (!g.ok) { await upsert({ status: "not_sent", reason: g.reason, metrics, subject }); out.no_data++; return; }
-      const camps = await getCampaigns(L.team_id, L.department, w);
-      const dollarRate = digestDollarRate(L.department);
-      let enr = { appointments: [], topVehicles: [], warmLeads: [] };
-      try { const { enrichRooftop } = await import("./digestEnrich.js"); enr = await enrichRooftop(L.team_id, { dollarRate, dept: L.department, enterpriseId: L.enterprise_id, tz, start: w.apiStart, end: w.apiEnd, apiBase: REPORTING_API_BASE, token: process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || undefined }); } catch { /* degrade */ }
-      const metricsFull = { ...metrics, campaigns: camps, appointments: enr.appointments, topVehicles: enr.topVehicles, warmLeads: enr.warmLeads, dollarRate };
-      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence);
-      // Digest SMS (weekly/monthly) — terse summary to subscribers with a phone. Before the email
-      // dry gate so held emails don't block SMS; own SMS_DRY_RUN + dedupe.
-      const smsRecips = subscribedSmsRecips(recOf.get(L.team_id), L.department, cadence, c && c.sms_enabled);
-      if (smsRecips.length && !(SMS_DRY_RUN || L.dry_run === true)) {
-        const reportLink = links(L.enterprise_id, L.team_id, L.department, w.localDate, tz).reports;
-        const smsRes = await sendDigestSms(sb, { team_id: L.team_id, enterprise_id: L.enterprise_id, department: L.department }, cadence, w.localDate, smsRecips, T.renderDigestSms({ cadence, rooftopName: name, dept: L.department, metrics: m, link: reportLink }));
-        if (smsRes && smsRes.error) smsFailures.push({ rooftop: name, dept: L.department, error: smsRes.error });
-      }
+      const camps = await getCampaigns(L.team_id, L.department, w, L.enterprise_id);
+      const { dollarRate, enr } = await enrichFor({ teamId: L.team_id, entId: L.enterprise_id, dept: L.department, tz, w, report, cadence });
+      const metricsFull = { ...metrics, campaigns: camps, ...enrichedFields(enr), dollarRate };
+      const html = renderDigest(tpl, name, L.department, w.dateLabel, L.enterprise_id, L.team_id, w.localDate, tz, metricsFull, camps, cadence, { w, cfg: c });
       const dry = DRY_RUN || L.dry_run === true;
       if (dry) { await upsert({ status: "suppressed", reason: "dry_run", metrics: metricsFull, subject, rendered_html: html }); out.suppressed++; return; }
       // Atomic send-claim (at-most-once per customer · dept · cadence · period) — see runOnce for rationale.
@@ -1638,7 +2173,7 @@ async function runCadence(cadence) {
       const lockId = `cron-${L.team_id}-${L.department}-${cadence}-${w.localDate}`;
       if (!FORCE_RESEND) {
         const { data: claim, error: claimErr } = await sb.from("roi_digest_runs")
-          .update({ status: "sending", message_id: lockId })
+          .update({ status: "sending", message_id: lockId, reason_detail: claimDetail() })
           .eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate)
           .is("message_id", null)
           .select("id");
@@ -1646,22 +2181,42 @@ async function runCadence(cadence) {
         if (!claim || !claim.length) { out.already_sent++; return; }
       }
       const messageId = await sendMailAttributed(emails, subject, html);
-      await upsert({ status: "sent", reason: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || lockId, recipients: emails.map((e) => ({ email: e, received: true })) });
+      await upsert({ status: "sent", reason: null, reason_detail: null, metrics: metricsFull, subject, rendered_html: html, send_path: "raw_html", sent_at: sentAt, message_id: messageId || lockId, recipients: emails.map((e) => ({ email: e, received: true })) });
       out.sent++;
-      console.log(`  ✓ SENT ${cadence} ${name} [${L.department}]`);
-    } catch (e) { out.errors++; console.log(`  ✗ ${cadence} ${name} [${L.department}] error: ${String(e).slice(0, 160)}`); }
+      if (w.lateDays > 0) out.caught_up++;
+      console.log(`  ✓ SENT ${cadence} ${name} [${L.department}]${w.lateDays > 0 ? ` (caught up ${w.lateDays}d after its send day)` : ""}`);
+      await smsAfterSend({ L, c, recOf, cadence, w, tz, name, m, smsFailures });
+    } catch (e) {
+      out.errors++;
+      // Same outcome mapping as the daily pass: holds → not_sent, anything else → error + Slack. Used to
+      // only bump a counter, so a throw after the claim left the row 'sending' forever with no trace.
+      const code = e && e.code;
+      const isHold = !!HOLD_REASON[code];
+      const detail = String(e && e.message ? e.message : e).slice(0, 400);
+      console.log(`  ✗ ${cadence} ${name} [${L.department}] ${isHold ? "held" : "FAILED"}: ${detail.slice(0, 160)}`);
+      if (!base) base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: winOf(L).localDate || safeLocalDate(null), dealer_timezone: String(tz || c?.timezone || "") || null, trigger: "cron" };
+      try {
+        await upsert(isHold ? { status: "not_sent", reason: HOLD_REASON[code], reason_detail: detail } : { status: "error", reason: "error", reason_detail: detail });
+      } catch { /* one failure must not halt the pass */ }
+      if (!isHold) failures.push({ rooftop: name, dept: L.department, error: detail.slice(0, 200) });
+    }
   };
-  const scoped = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
-  await primeTeamDetails(scoped.filter((L) => cfgOf.get(L.team_id)?.[enabledCol] === true && !cfgOf.get(L.team_id)?.timezone).map((L) => L.team_id));
-  const targets = prioritize(scoped, await readRunStatuses(cadence, isoDaysAgo(cadence === "weekly" ? 10 : 62)),
-    (L) => { const c = cfgOf.get(L.team_id); return cadenceWindow(c?.timezone || "America/New_York", cadence, c).localDate; });
   const POOL = Number(process.env.CRON_POOL || 10);
   const unreached = await runBudgetedPool(targets, POOL, passStart, process1);
   out.unreached = unreached.length;
   console.log(`  ${cadence} summary:`, JSON.stringify(out));
-  await reportUnreached(`${cadence === "weekly" ? "Weekly" : "Monthly"} digest`, unreached, targets.length, (L) => cfgOf.get(L.team_id)?.rooftop_name || cfgOf.get(L.team_id)?.team_name || L.team_id);
+  await reportUnreached(`${Cad} digest`, unreached, targets.length, (L) => cfgOf.get(L.team_id)?.rooftop_name || cfgOf.get(L.team_id)?.team_name || L.team_id);
+  if (staleHeld.length) {
+    try {
+      await postSystemicAlert({ source: `${Cad} digest`, title: `${staleHeld.length} ${cadence} digest(s) HELD — reporting aggregate is stale`,
+        detail: `agent_daily's newest day (${freshness.maxActivityDay}) is behind the period's last day. Held; the next pass retries while the period is still owed. Rooftops: ${staleHeld.slice(0, 12).join(", ")}${staleHeld.length > 12 ? ` +${staleHeld.length - 12} more` : ""}.`,
+        windowLabel: `${cadence} digest cron` });
+    } catch (e) { console.warn("[roi-cron] cadence stale-hold alert skipped:", String(e).slice(0, 140)); }
+  }
+  await postBreakageAlert({ source: `${Cad} digest`, failures, sentOk: out.sent, windowLabel: `${cadence} digest send pass` })
+    .catch((e) => console.warn("[roi-cron] cadence slack alert skipped:", String(e).slice(0, 140)));
   // Slack breakage alert for the weekly/monthly digest SMS channel (same tiered thresholds).
-  await postBreakageAlert({ source: `${cadence === "weekly" ? "Weekly" : "Monthly"} digest SMS`, failures: smsFailures, sentOk: null, windowLabel: `${cadence} digest send pass` })
+  await postBreakageAlert({ source: `${Cad} digest SMS`, failures: smsFailures, sentOk: null, windowLabel: `${cadence} digest send pass` })
     .catch((e) => console.warn("[roi-cron] cadence sms slack alert skipped:", String(e).slice(0, 140)));
   return out;
 }
@@ -1722,6 +2277,36 @@ WHERE isTestCall = 0 AND createdAt >= today() - 30 AND teamId != ''
 GROUP BY t, d
 HAVING d != '' AND calls >= ${ACTIVITY_DEPT_MIN_CALLS}`;
 
+// Name + test flags for a set of teams, in ONE ClickHouse read (eventila mirrors the Spyne team settings).
+// Map team_id → { team_name, enterprise_id, enterprise_name, test }. Never throws (empty on failure).
+const chLit = (v) => "'" + String(v == null ? "" : v).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+async function teamInfoCH(runClickhouse, teamIds) {
+  const ids = [...new Set((teamIds || []).filter(Boolean).map(String))];
+  const out = new Map();
+  if (!ids.length) return out;
+  try {
+    const rows = await runClickhouse(
+      "SELECT t.team_id AS t, t.team_name AS team_name, t.enterprise_id AS e, toUInt8(ifNull(t.is_test_account, 0)) AS team_test," +
+      " ifNull(ed.name, '') AS enterprise_name, toUInt8(ifNull(ed.is_test, 0)) AS ent_test" +
+      " FROM (SELECT team_id, team_name, enterprise_id, is_test_account FROM eventila.enterprise_team_details FINAL" +
+      "   WHERE _peerdb_is_deleted = 0 AND team_id IN (" + ids.map(chLit).join(",") + ")) t" +
+      " LEFT JOIN (SELECT enterprise_id, any(name) AS name, max(ifNull(is_test_account, 0)) AS is_test FROM eventila.enterprise_details" +
+      "   WHERE _peerdb_is_deleted = 0 GROUP BY enterprise_id) ed ON t.enterprise_id = ed.enterprise_id");
+    for (const r of rows || []) {
+      const t = String(r.t || "").trim(); if (!t) continue;
+      out.set(t, { team_name: String(r.team_name || "").trim(), enterprise_id: String(r.e || "").trim(), enterprise_name: String(r.enterprise_name || "").trim(), test: Number(r.team_test) === 1 || Number(r.ent_test) === 1 });
+    }
+  } catch (e) { console.warn("[sync-live] team-info lookup failed:", String(e && e.message ? e.message : e).slice(0, 140)); }
+  return out;
+}
+// Internal test rooftops never enter the program: the known test team, eventila's test flag on the team
+// or its enterprise, or "test" anywhere in either name.
+function isTestTeam(teamId, info) {
+  if (TEST_TEAM_IDS.has(teamId)) return true;
+  const i = info && info.get(teamId);
+  return !!(i && (i.test || /test/i.test(i.team_name) || /test/i.test(i.enterprise_name)));
+}
+
 async function syncLive() {
   const ts = new Date().toISOString();
   if (!SB_URL || !SB_KEY) throw new Error("Missing ROI_SUPABASE_URL / ROI_SUPABASE_SERVICE_KEY");
@@ -1766,13 +2351,14 @@ async function syncLive() {
   // churned rooftop's departments from its own wind-down traffic. Best-effort: a read failure
   // must not break discovery, it just falls back to the ledger-only set.
   try {
-    const { data: cfgChurn } = await sb.from("roi_rooftop_config").select("team_id,lifecycle_status,churn_date");
+    const { data: cfgChurn } = await readAll("roi_rooftop_config", "team_id,lifecycle_status,churn_date");
     const today = ts.slice(0, 10);
     for (const c of (cfgChurn ?? [])) if (isChurned(c, today)) churned.add(c.team_id);
   } catch (e) { console.warn("[sync-live] sticky-churn read skipped:", String(e).slice(0, 120)); }
   const eligible = (t) => (liveT.has(t) || activeT.has(t)) && !churned.has(t);
 
   // normalize → {team_id, department}; held as is_live=true + dry_run=true — eligible teams only
+  const entOf = new Map(); // team → enterprise, from the onboarding candidates (for a new config row)
   const seen = new Set();
   const cand = [];
   let skipped = 0;
@@ -1781,6 +2367,7 @@ async function syncLive() {
     const department = String(r.d ?? r.department ?? "").trim().toLowerCase();
     if (!team_id || (department !== "sales" && department !== "service")) continue;
     if (!eligible(team_id)) { skipped++; continue; }   // outside the Live/active-minus-churn universe
+    if (r.e && !entOf.has(team_id)) entOf.set(team_id, String(r.e).trim());
     const k = `${team_id}|${department}`;
     if (seen.has(k)) continue;
     seen.add(k);
@@ -1806,8 +2393,17 @@ async function syncLive() {
     fromActivity++;
   }
 
+  // Test rooftops never enter the program (one ClickHouse read gives names + test flags for every
+  // candidate team; the same names seed the config rows below).
+  const info = await teamInfoCH(runClickhouse, cand.map((c) => c.team_id));
+  const testTeams = new Set(cand.map((c) => c.team_id).filter((t) => isTestTeam(t, info)));
+  if (testTeams.size) {
+    for (let i = cand.length - 1; i >= 0; i--) if (testTeams.has(cand[i].team_id)) cand.splice(i, 1);
+    console.log(`[sync-live] skipped ${testTeams.size} test team(s): ${[...testTeams].slice(0, 10).join(", ")}`);
+  }
+
   // figure out which (team,dept) are genuinely new (for reporting)
-  const { data: existing, error: exErr } = await sb.from("roi_live_departments").select("team_id,department");
+  const { data: existing, error: exErr } = await readAll("roi_live_departments", "team_id,department", { order: ["team_id", "department"] });
   if (exErr) throw new Error(`read roi_live_departments failed: ${exErr.message}`);
   const have = new Set((existing ?? []).map((e) => `${e.team_id}|${e.department}`));
   const fresh = cand.filter((c) => !have.has(`${c.team_id}|${c.department}`));
@@ -1819,7 +2415,27 @@ async function syncLive() {
     if (error) throw new Error(`upsert roi_live_departments failed: ${error.message}`);
   }
 
-  const summary = { candidates: cand.length, skipped_ineligible: skipped, from_activity: fromActivity, new_rooftops: fresh.length, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
+  // A discovered team with no roi_rooftop_config row could not be configured at all (the tracker's
+  // config endpoint 404s) and would send under a blank name if flipped live (58 teams on 2026-10-09).
+  // Seed a default row: identifiers + the team's name, every toggle at its column default. Sending stays
+  // held by the live row's dry_run=true. ignoreDuplicates: an existing row is never touched.
+  let configsCreated = 0;
+  try {
+    const { data: cfgRows, error: cfgErr } = await readAll("roi_rooftop_config", "team_id");
+    if (cfgErr) throw new Error(cfgErr.message);
+    const haveCfg = new Set((cfgRows || []).map((r) => r.team_id));
+    const seeds = [...new Set(cand.map((c) => c.team_id))]
+      .filter((t) => !haveCfg.has(t) && info.has(t) && info.get(t).team_name && !isTestTeam(t, info))
+      .map((t) => ({ team_id: t, enterprise_id: entOf.get(t) || info.get(t).enterprise_id || null, team_name: info.get(t).team_name, rooftop_name: info.get(t).team_name }));
+    for (let i = 0; i < seeds.length; i += 500) {
+      const { error } = await sb.from("roi_rooftop_config").upsert(seeds.slice(i, i + 500), { onConflict: "team_id", ignoreDuplicates: true });
+      if (error) throw new Error(error.message);
+    }
+    configsCreated = seeds.length;
+    if (seeds.length) console.log(`[sync-live] created ${seeds.length} default roi_rooftop_config row(s): ${seeds.slice(0, 10).map((x) => x.team_name).join(", ")}`);
+  } catch (e) { console.warn("[sync-live] default config rows skipped:", String(e && e.message ? e.message : e).slice(0, 140)); }
+
+  const summary = { candidates: cand.length, skipped_ineligible: skipped, skipped_test: testTeams.size, from_activity: fromActivity, new_rooftops: fresh.length, configs_created: configsCreated, new_list: fresh.map((c) => `${c.team_id}:${c.department}`).slice(0, 100) };
   await sb.from("roi_cron_runs").insert({ source: "sync-live", ok: true, summary }).then(() => {}, () => {});
   console.log(`[sync-live] eligible candidates=${cand.length} (${fromActivity} from call activity, skipped ${skipped} outside Live/active-minus-churn) new=${fresh.length}`);
   return { ranAt: ts, ...summary };
@@ -2013,7 +2629,7 @@ async function syncLifecycle() {
   // Manual churn is sticky: user-confirmed churns (e.g. the Edwards group) can have NO churn
   // signal in the ledger at all. Never downgrade a rooftop already churn in roi_rooftop_config,
   // and never blank a stored churn_date. (~320 rows — under PostgREST's 1000-row cap.)
-  const { data: existingRows, error: exErr } = await sb.from("roi_rooftop_config").select("team_id,lifecycle_status,churn_date");
+  const { data: existingRows, error: exErr } = await readAll("roi_rooftop_config", "team_id,lifecycle_status,churn_date");
   if (exErr) throw new Error(`read roi_rooftop_config (churn guard) failed: ${exErr.message}`);
   const existing = new Map((existingRows ?? []).map((e) => [e.team_id, e]));
   let preservedChurn = 0;
@@ -2078,7 +2694,13 @@ function withCronTrail(source, fn) {
 }
 
 // Importable surface for the Vercel serverless cron + tests.
-module.exports = { runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail, syncLive: withCronTrail("sync-live", syncLive), syncLifecycle: withCronTrail("sync-lifecycle", syncLifecycle), apiMetrics, apiActionItems, apiCampaigns };
+module.exports = {
+  runOnce, runCadence, generateAndSendNow, previewDigestNow, backfill, rerender, renderStoredDigest, renderHtml, renderHtmlV1, renderDigest, pickTemplate, sendMail,
+  syncLive: withCronTrail("sync-live", syncLive), syncLifecycle: withCronTrail("sync-lifecycle", syncLifecycle),
+  apiMetrics, apiActionItems, apiCampaigns, buildDigestMetrics,
+  // pure helpers (tests + the tracker routes)
+  windowForPeriod, cadenceWindow, onDemandWindow, links, rooftopRungsFor, nextReportLabel, prioritize,
+};
 
 // CLI entrypoint — only runs when invoked directly (`node runner.cjs ...`), never on require.
 if (IS_CLI) {
@@ -2091,10 +2713,14 @@ if (IS_CLI) {
       await backfill(start, end);
       return;
     }
-    await runOnce();
+    // The CLI is the ONE entry that honours the operator knobs (ONLY_TEAMS, IGNORE_SEND_HOUR,
+    // RUN_LOCAL_DATE, FORCE_RESEND, IGNORE_SEND_DAY); the scheduled cron ignores them.
+    const cad = process.argv.indexOf("--cadence");
+    if (cad !== -1) { await runCadence(process.argv[cad + 1], { cli: true }); return; }
+    await runOnce({ cli: true });
     if (process.argv.includes("--loop")) {
       console.log("\n[loop] next pass in 60 min …");
-      setInterval(() => { runOnce().catch((e) => console.error("pass failed:", e)); }, 60 * 60 * 1000);
+      setInterval(() => { runOnce({ cli: true }).catch((e) => console.error("pass failed:", e)); }, 60 * 60 * 1000);
     }
   })();
 }
