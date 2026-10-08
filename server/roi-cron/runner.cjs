@@ -163,14 +163,10 @@ async function readAll(table, cols, opts = {}) {
     if (!data || data.length < 1000) return { data: out, error: null };
   }
 }
+// emailHealth.selectRecipients pages internally. Wrapping it in a second paging loop (a `.range()` in the
+// filter) made every outer page return the whole table, which never terminates past 1,000 recipients.
 async function selectRecipientsAll(cols) {
-  const out = [];
-  for (let from = 0; ; from += 1000) {
-    const res = await selectRecipients(sb, cols, (q) => q.order("team_id", { ascending: true }).order("email", { ascending: true }).range(from, from + 999));
-    if (res.error) return res;
-    out.push(...(res.data || []));
-    if (!res.data || res.data.length < 1000) return { data: out, error: null };
-  }
+  return selectRecipients(sb, cols);
 }
 const LIVE_COLS = "team_id,department,dry_run";
 const LIVE_FILTER = { filter: (q) => q.eq("is_live", true), order: ["team_id", "department"] };

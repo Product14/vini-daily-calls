@@ -653,15 +653,11 @@ async function pageAll(build) {
     if (rows.length < PAGE_ROWS) return { data: all, error: null };
   }
 }
+// emailHealth.selectRecipients pages internally; a second paging loop around it never terminates past
+// 1,000 recipients (each outer page returned the whole table).
 async function selectRecipientsPaged(cols) {
-  const all = [];
-  for (let from = 0; ; from += PAGE_ROWS) {
-    const res = await selectRecipients(sb, cols, (q) => q.order("id", { ascending: true }).range(from, from + PAGE_ROWS - 1));
-    if (res.error) return { data: null, error: res.error };
-    const rows = res.data || [];
-    all.push(...rows);
-    if (rows.length < PAGE_ROWS) return { data: all, error: null };
-  }
+  const res = await selectRecipients(sb, cols);
+  return res.error ? { data: null, error: res.error } : { data: res.data || [], error: null };
 }
 
 // ── Orphan reaper (2026-10-09, A3-18 / A5-07) ──────────────────────────────────────────────────────
