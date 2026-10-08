@@ -2075,8 +2075,29 @@ async function previewDigestNow(opts) {
 function owedOnCatchUp(prior, L) {
   if (!prior) return true;
   if (["scheduled", "queued", "error"].includes(prior.status)) return true;
-  if (prior.status === "not_sent" && (REEVALUATE_REASONS.includes(prior.reason) || prior.reason === "pass_killed")) return true;
+  // (pass_killed is deliberately NOT owed: a reaped row is a missed send, never retried automatically.)
+  if (prior.status === "not_sent" && REEVALUATE_REASONS.includes(prior.reason)) return true;
   return prior.status === "suppressed" && L.dry_run === false;
+}
+
+// ── Catch-up floor ──────────────────────────────────────────────────────────────────────────────────
+// Catch-up (a period sent AFTER its send day) applies only to periods whose send day falls on or after
+// the day this code first ran. Periods the old code missed (the 2026-10-01 monthly stuck in 'scheduled',
+// the week ending 2026-10-04 that wrote nothing) are recorded as missed and NEVER sent automatically.
+// Floor = the UTC date of the earliest roi_cron_runs row this cadence's pass has written (A21 trail);
+// today when there is none yet (the first pass after deploy) or the read fails. CADENCE_CATCHUP_NOT_BEFORE
+// (YYYY-MM-DD) overrides it, for an explicit human decision only.
+async function catchupFloor(cadence) {
+  const env = String(process.env.CADENCE_CATCHUP_NOT_BEFORE || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(env)) return env;
+  const today = new Date().toISOString().slice(0, 10);
+  try {
+    const { data, error } = await sb.from("roi_cron_runs").select("created_at").eq("source", `roi-digest-${cadence}`)
+      .order("created_at", { ascending: true }).limit(1);
+    if (error || !data || !data[0] || !data[0].created_at) return today;
+    const first = String(data[0].created_at).slice(0, 10);
+    return first < today ? first : today;
+  } catch { return today; }
 }
 
 async function runCadence(cadence, opts = {}) {
@@ -2105,6 +2126,8 @@ async function runCadencePass(cadence, opts) {
   const winOf = (L) => { const c = cfgOf.get(L.team_id); try { return cadenceWindow(isValidTz(c?.timezone) ? c.timezone : "America/New_York", cadence, c); } catch { return {}; } };
   const targets = prioritize(scoped, index, (L) => winOf(L).localDate);
   out.targets = targets.length;
+  const floor = await catchupFloor(cadence);
+  out.catchupFloor = floor;
 
   const process1 = async (L) => {
     const c = cfgOf.get(L.team_id); const name = c?.rooftop_name || c?.team_name || "";
@@ -2118,6 +2141,18 @@ async function runCadencePass(cadence, opts) {
       assertValidTz(tz);
       w = cadenceWindow(tz, cadence, c);
       base = { enterprise_id: L.enterprise_id, team_id: L.team_id, department: L.department, cadence, local_date: w.localDate, dealer_timezone: tz, trigger: "cron" };
+      // A late period whose send day predates the catch-up floor was missed by code that had no catch-up:
+      // recorded once as missed, never fetched, never sent. A sent or claimed row is never touched.
+      if (w.lateDays > 0 && w.sendDate < floor) {
+        const { data: pre } = await sb.from("roi_digest_runs").select("id,status,reason,message_id").eq("team_id", L.team_id).eq("department", L.department).eq("cadence", cadence).eq("local_date", w.localDate).maybeSingle();
+        // Only an UNDECIDED, unclaimed row (none / scheduled / queued / error) becomes missed. A row that
+        // was sent, claimed, or deliberately held (no data, dry-run, churned...) keeps what it says.
+        if (pre && (pre.message_id || !["scheduled", "queued", "error"].includes(pre.status))) { out.not_due++; return; }
+        await upsert({ status: "not_sent", reason: "missed_send_day", reason_detail: `missed before catch-up existed (send day ${w.sendDate}); not sent automatically` });
+        out.missed++;
+        console.log(`  · ${name} [${L.department}] ${cadence} not_sent → missed_send_day (send day ${w.sendDate} < catch-up floor ${floor})`);
+        return;
+      }
       if (!IGNORE_DAY && !w.sendDue) {
         // A monthly period past its catch-up window that never went out: recorded ONCE, so the tracker
         // shows a missed digest instead of an empty cell or a 'scheduled' that will never move.

@@ -184,6 +184,7 @@ test("A18: windowForPeriod maps each cadence's period key to exactly the cron's 
 test("A17: a weekly period missed on its send day is still sent two days later (same period, not a new one)", async () => {
   const sendDow = (TODAY_DOW - 2 + 7) % 7;
   const { runner, db, log } = load({ cfg: { weekly_send_dow: sendDow } });
+  db.roi_cron_runs.push({ id: "c0", source: "roi-digest-weekly", ok: true, summary: {}, created_at: `${daysAgo(30)}T12:00:00.000Z` }); // catch-up existed then
   installFetch(log);
   const out = await quiet(() => runner.runCadence("weekly"));
   const rows = rowsOf(db, "weekly");
@@ -423,4 +424,72 @@ test("A29: no digest SMS for a held email (dry-run rooftop, v2 lock); one SMS af
   assert.equal(rowsOf(db, "daily")[0].status, "sent");
   assert.equal(db.roi_event_sms.length, 1);
   assert.ok(log.seq.indexOf("mail:post") < log.seq.indexOf("roi_event_sms:insert"), "SMS only after the email went out");
+});
+
+// ── Catch-up floor: periods missed BEFORE catch-up existed are never sent automatically ─────────────
+const dim = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+// a monthly_send_day that makes today exactly 8 days after the send day
+const SEND_DAY_8_LATE = NOW.D > 8 ? NOW.D - 8 : dim(NOW.M === 1 ? NOW.Y - 1 : NOW.Y, NOW.M === 1 ? 12 : NOW.M - 1) - (8 - NOW.D);
+const LIVE_SEND = { live: { dry_run: false }, env: { DRY_RUN: "false" } };
+
+test("floor: first pass after deploy, a monthly 8 days late → no fetch, no send, the stuck row becomes missed_send_day", async () => {
+  const { runner, db, log } = load({ cfg: { monthly_send_day: SEND_DAY_8_LATE }, ...LIVE_SEND });
+  const w = runner.cadenceWindow(TZ, "monthly", { monthly_send_day: SEND_DAY_8_LATE });
+  assert.equal(w.lateDays, 8);
+  db.roi_digest_runs.push({ id: "s1", team_id: "t1", department: "service", cadence: "monthly", local_date: w.localDate, status: "scheduled", reason: "before_send_hour", message_id: null });
+  installFetch(log);
+  const out = await quiet(() => runner.runCadence("monthly"));
+  assert.equal(out.catchupFloor, new Date().toISOString().slice(0, 10), "no trail yet → floor is today");
+  assert.equal(reportsCalls(log).length, 0);
+  assert.equal(log.mail.length, 0);
+  const row = rowsOf(db, "monthly")[0];
+  assert.deepEqual([row.status, row.reason], ["not_sent", "missed_send_day"]);
+  assert.match(row.reason_detail, new RegExp(`missed before catch-up existed \\(send day ${w.sendDate}\\); not sent automatically`));
+  const writes = log.writes.length;
+  await quiet(() => runner.runCadence("monthly"));
+  assert.equal(log.writes.length, writes, "recorded once");
+  assert.equal(log.mail.length, 0);
+});
+
+test("floor: when catch-up already existed on the send day, the late period is caught up and sent", async () => {
+  const { runner, db, log } = load({ cfg: { monthly_send_day: SEND_DAY_8_LATE }, ...LIVE_SEND });
+  db.roi_cron_runs.push({ id: "c0", source: "roi-digest-monthly", ok: true, summary: {}, created_at: `${daysAgo(60)}T03:40:00.000Z` });
+  installFetch(log);
+  const out = await quiet(() => runner.runCadence("monthly"));
+  assert.equal(out.catchupFloor, daysAgo(60));
+  assert.equal(out.sent, 1);
+  assert.equal(out.caught_up, 1);
+  assert.equal(log.mail.length, 1);
+  assert.equal(rowsOf(db, "monthly")[0].status, "sent");
+  // the explicit human override works the same way
+  const o2 = load({ cfg: { monthly_send_day: SEND_DAY_8_LATE }, ...LIVE_SEND, env: { DRY_RUN: "false", CADENCE_CATCHUP_NOT_BEFORE: daysAgo(20) } });
+  installFetch(o2.log);
+  assert.equal((await quiet(() => o2.runner.runCadence("monthly"))).sent, 1);
+});
+
+test("floor: an on-time send day is unaffected on the very first pass after deploy", async () => {
+  const { runner, db, log } = load({ cfg: { monthly_send_day: NOW.D }, ...LIVE_SEND });
+  installFetch(log);
+  const out = await quiet(() => runner.runCadence("monthly"));
+  assert.equal(out.sent, 1);
+  assert.equal(log.mail.length, 1);
+  assert.equal(rowsOf(db, "monthly")[0].status, "sent");
+});
+
+test("floor: a sent (or claimed, or deliberately held) late period is never touched", async () => {
+  const { runner, db, log } = load({ cfg: { monthly_send_day: SEND_DAY_8_LATE }, ...LIVE_SEND });
+  const w = runner.cadenceWindow(TZ, "monthly", { monthly_send_day: SEND_DAY_8_LATE });
+  const sent = { id: "s1", team_id: "t1", department: "service", cadence: "monthly", local_date: w.localDate, status: "sent", reason: null, message_id: "mid-old", sent_at: "x" };
+  db.roi_digest_runs.push({ ...sent });
+  installFetch(log);
+  await quiet(() => runner.runCadence("monthly"));
+  assert.deepEqual(rowsOf(db, "monthly")[0], sent);
+  assert.equal(log.writes.length, 0);
+  assert.equal(log.mail.length, 0);
+  const held = load({ cfg: { monthly_send_day: SEND_DAY_8_LATE }, ...LIVE_SEND });
+  held.db.roi_digest_runs.push({ id: "s2", team_id: "t1", department: "service", cadence: "monthly", local_date: w.localDate, status: "not_sent", reason: "no_data", message_id: null });
+  installFetch(held.log);
+  await quiet(() => held.runner.runCadence("monthly"));
+  assert.equal(held.db.roi_digest_runs[0].reason, "no_data");
+  assert.equal(held.log.writes.length, 0);
 });
