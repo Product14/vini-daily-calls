@@ -36,10 +36,39 @@ const remembered = (teamId) => {
 // zone (2026-10-08: "Evansville" set to Africa/Abidjan, "Davidson Autos Watertown" to Asia/Calcutta),
 // and persisting it would leave the rooftop further off than the America/New_York default. Such a
 // value is logged and treated as unresolved; the setting itself needs fixing in Spyne.
+//
+// EXPLICIT ALLOWLIST (2026-10-09). The previous test was "anything under America/", which let Mexican
+// and Central/South American zones through (America/Cancun, America/Costa_Rica, America/Bahia_Banderas
+// all seen in prod runs, A1 F12) and silently shifted those rooftops' windows. Only US (lower 48,
+// Alaska, Hawaii, Puerto Rico) and Canadian zones, plus their legacy US/* and Canada/* links, are accepted.
+const NORTH_AMERICAN_TZ = new Set([
+  // United States — Eastern / Central / Mountain / Pacific / Alaska / Hawaii / Puerto Rico
+  "America/New_York", "America/Detroit", "America/Kentucky/Louisville", "America/Kentucky/Monticello", "America/Louisville",
+  "America/Indiana/Indianapolis", "America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Indiana/Marengo",
+  "America/Indiana/Petersburg", "America/Indiana/Vevay", "America/Indiana/Tell_City", "America/Indiana/Knox", "America/Indianapolis",
+  "America/Fort_Wayne", "America/Knox_IN",
+  "America/Chicago", "America/Menominee", "America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/North_Dakota/Beulah",
+  "America/Denver", "America/Boise", "America/Phoenix", "America/Shiprock",
+  "America/Los_Angeles",
+  "America/Anchorage", "America/Juneau", "America/Sitka", "America/Metlakatla", "America/Yakutat", "America/Nome", "America/Adak", "America/Atka",
+  "Pacific/Honolulu", "America/Puerto_Rico",
+  "US/Eastern", "US/East-Indiana", "US/Indiana-Starke", "US/Michigan", "US/Central", "US/Mountain", "US/Arizona", "US/Pacific",
+  "US/Alaska", "US/Aleutian", "US/Hawaii",
+  // Canada
+  "America/Toronto", "America/Montreal", "America/Nipigon", "America/Thunder_Bay", "America/Iqaluit", "America/Pangnirtung",
+  "America/Atikokan", "America/Winnipeg", "America/Rainy_River", "America/Resolute", "America/Rankin_Inlet",
+  "America/Regina", "America/Swift_Current", "America/Edmonton", "America/Cambridge_Bay", "America/Yellowknife", "America/Inuvik",
+  "America/Dawson_Creek", "America/Fort_Nelson", "America/Creston", "America/Whitehorse", "America/Dawson", "America/Vancouver",
+  "America/Halifax", "America/Glace_Bay", "America/Moncton", "America/Goose_Bay", "America/St_Johns", "America/Blanc-Sablon",
+  "Canada/Atlantic", "Canada/Central", "Canada/Eastern", "Canada/Mountain", "Canada/Newfoundland", "Canada/Pacific",
+  "Canada/Saskatchewan", "Canada/Yukon",
+]);
+const isNorthAmericanTz = (tz) => NORTH_AMERICAN_TZ.has(String(tz || "").trim());
 const plausibleTz = (tz, teamId) => {
   if (!tz) return null;
-  if (/^America\//.test(tz) || tz === "Pacific/Honolulu") return tz;
-  console.warn(`[tz] ${teamId} team settings say "${tz}" — not a North American zone, ignored (fix the team's timezone in Spyne)`);
+  const z = String(tz).trim();
+  if (isNorthAmericanTz(z)) return z;
+  console.warn(`[tz] ${teamId} team settings say "${z}" — not a US/Canada zone, ignored (fix the team's timezone in Spyne)`);
   return null;
 };
 const parseWorkingDays = (s) => {
@@ -110,7 +139,10 @@ async function fetchTeamTzLive(teamId) {
 
 // configuredTz → live Spyne lookup (persisted back) → "America/New_York" (logged, never silent).
 async function resolveTz(sb, teamId, configuredTz, rooftopLabel) {
-  if (configuredTz) return configuredTz;
+  // The configured value goes through the same allowlist: it is free text in the tracker drawer (no
+  // validation, A1 F12), and an unknown zone would also crash every Intl call made with it.
+  if (configuredTz && isNorthAmericanTz(configuredTz)) return String(configuredTz).trim();
+  if (configuredTz) console.warn(`[tz] ${rooftopLabel || teamId} roi_rooftop_config.timezone "${configuredTz}" is not a US/Canada zone — ignored, resolving from team settings`);
   const live = await fetchTeamTzLive(teamId);
   if (live) {
     if (!_persisted.has(`${teamId}:tz`)) {
@@ -157,4 +189,19 @@ async function resolveWorkingHours(sb, teamId, cachedWorkingDays, rooftopLabel, 
   return { startTime: String(today.start_time), endTime: String(today.end_time) };
 }
 
-module.exports = { resolveTz, resolveWorkingHours, fetchTeamTzLive, fetchTeamWorkingDaysLive, primeTeamDetails, fetchTeamDetailsCH };
+/* Today's dealer-local working status — what resolveWorkingHours() can't say, because it returns null
+ * both for "closed today" and for "we don't know the hours". The overdue digest needs the difference:
+ * it must stay silent on a CLOSED day (28 digests went out on Sunday 10-05 through the fallback hours,
+ * A3-17) but still fire on its fallback hours when the schedule is simply unknown.
+ *   { status: 'open', startTime, endTime } | { status: 'closed' } | { status: 'unknown' } */
+async function resolveWorkingDay(sb, teamId, cachedWorkingDays, rooftopLabel, tz) {
+  const hours = await resolveWorkingHours(sb, teamId, cachedWorkingDays, rooftopLabel, tz);
+  if (hours) return { status: "open", ...hours };
+  const known = cachedWorkingDays || (remembered(teamId) || {}).workingDays || null;
+  if (!known || typeof known !== "object") return { status: "unknown" };
+  const today = known[todayWeekday(tz)];
+  if (today && today.is_working === false) return { status: "closed" };
+  return { status: "unknown" };
+}
+
+module.exports = { resolveTz, resolveWorkingHours, resolveWorkingDay, isNorthAmericanTz, NORTH_AMERICAN_TZ, fetchTeamTzLive, fetchTeamWorkingDaysLive, primeTeamDetails, fetchTeamDetailsCH };
