@@ -1,10 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { createPortal } from "react-dom";
 import {
-  NOT_SENT_REASON_CTA,
-  NOT_SENT_REASON_LABEL,
-  computeSummary,
-  reasonBreakdown,
   EMAIL_TYPES,
   TRANSACTIONAL_TYPES,
   SUBSCRIPTION_TYPES,
@@ -12,20 +8,22 @@ import {
   type Cadence,
   type DeptKind,
   type LifecycleStatus,
-  type NotSentReason,
   type RooftopRow,
   type RooftopConfig,
   type EmailTypeKey,
   type SubType,
   type SendCell,
 } from "./mockData";
-import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, updateRooftopDryRun, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventEmailsByType, countDigestSent, countEventByMetric, loadTeamRecipients, trackerAuthHeaders, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient } from "./dataSource";
+import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRooftopConfig, updateRooftopLiveStatus, updateRooftopDryRun, loadEventCounts, loadEventFeed, loadEventDayCounts, loadEventDayCountsByType, loadEventEmailsForDay, loadEventStatusCounts, loadEligibleRecipients, countDigestSent, countEventByMetric, loadTeamRecipients, trackerAuthHeaders, anchorRow, type AuditEntry, type EventCounts, type EventEmailRow, type EventEmailDayRow, type EventDayCounts, type TeamRecipient, type EligibleRecipients } from "./dataSource";
 import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
 import { columnDate, periodLabel } from "./periodBuckets";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
-import { isPipelineConfigured, runPreviewPipeline, runRespectPipeline } from "./pipeline";
 import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow } from "./sendDigest";
-import { confirmDialog, promptDialog } from "../ui/dialogs";
+import { confirmDialog } from "../ui/dialogs";
+import {
+  STATE_META, liveAnchor, latestDueKey, summarizeDue, columnStats, rooftopCounts, actionBoard, rowMatchesBoard, txKpi, neutralizeTracking,
+  type BoardKey, type BuiltCell, type DueRow, type TxStatusCounts,
+} from "./trackerModel.ts";
 
 /** Pretty-print a phone for display + storage. US numbers (10 digits, or 11 with a leading 1) →
  * "+1 (555) 123-4567". Anything else keeps a leading "+" and its digits, so international / partial
@@ -91,7 +89,11 @@ export function EmailerTracker() {
   // Agent-product filter — Sales/Service × Inbound/Outbound. Digests are stored per dept, so
   // IB/OB map onto their dept's rows (they share one digest); the picker still reads as products.
   const [productFilter, setProductFilter] = useState<"all" | "sales_ib" | "sales_ob" | "service_ib" | "service_ob">("all");
-  const [reasonFilter, setReasonFilter] = useState<NotSentReason | "all">("all");
+  // Action-board chip filter: rows whose latest due cell files under that chip.
+  const [reasonFilter, setReasonFilter] = useState<BoardKey | "all">("all");
+  // Transactional KPI window (days). One window for every number in the strip (C6).
+  const [txWindow, setTxWindow] = useState(30);
+  const [txStatus, setTxStatus] = useState<Record<string, TxStatusCounts> | null | undefined>(undefined);
   const [groupBy, setGroupBy] = useState<"rooftop" | "csm">("rooftop");
   const [sentNow, setSentNow] = useState<Record<string, true>>({});
   const [activeCell, setActiveCell] = useState<{ rooftop: RooftopRow; cell: SendCell } | null>(null);
@@ -122,11 +124,7 @@ export function EmailerTracker() {
   const [lastSynced, setLastSynced] = useState<Date>(new Date());
   const [loading, setLoading] = useState(true); // start in loading so we never flash mock/empty
   const [loadedOnce, setLoadedOnce] = useState(false);
-  // Global manual pipeline triggers
-  const [previewState, setPreviewState] = useState<"idle" | "running" | "done" | "error">("idle");
-  const [previewMsg, setPreviewMsg] = useState("");
-  const [liveState, setLiveState] = useState<"idle" | "running" | "done" | "error">("idle");
-  const [liveMsg, setLiveMsg] = useState("");
+  const [serverDryRun, setServerDryRun] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -138,6 +136,7 @@ export function EmailerTracker() {
       setRooftops(res.rooftops);
       setLifecycleRooftops(lifecycleOnly);
       setToday(res.today);
+      setServerDryRun(res.serverDryRun === true);
       setSourceKind(res.source);
       setSource(res.source === "supabase" ? "Supabase · roi_digest_runs" : res.source === "error" ? "Connection error" : "Not connected");
       setLastSynced(res.lastSynced);
@@ -154,107 +153,11 @@ export function EmailerTracker() {
     void reload();
   }, [reload]);
 
-  // PREVIEW ALL (Spyne-only): a REAL send across all rooftops, but cron4 filters
-  // every recipient list down to @spyne.ai addresses — no customer is emailed.
-  // Subject is prefixed "[PREVIEW]". Needs a mail token, like a live send.
-  const runSpynePreviewAll = useCallback(async () => {
-    const pw = await promptDialog({
-      title: "Send a preview to reviewers?",
-      message:
-        "This sends real email, but only to the internal reviewers devansh.hasija@spyne.ai and " +
-        "subhav.malhotra@spyne.ai, for every rooftop. No customer, and no other address, receives " +
-        "anything. The subject starts with [PREVIEW].",
-      label: "Send password",
-      secret: true,
-      confirmLabel: "Send preview",
-    });
-    if (pw == null) return; // cancelled
-    if (!pw.trim()) {
-      setPreviewState("error");
-      setPreviewMsg("Preview cancelled — the send password is required.");
-      setTimeout(() => setPreviewState("idle"), 5000);
-      return;
-    }
-    setPreviewState("running");
-    setPreviewMsg("");
-    const r = await runPreviewPipeline({ sendOverride: pw.trim() }); // no team → all rooftops; cron4 keeps @spyne.ai only
-    if (r.simulated) {
-      setPreviewState("done");
-      setPreviewMsg("Simulated — no backend configured.");
-    } else if (r.overrideRequired) {
-      setPreviewState("error");
-      setPreviewMsg("Wrong send password — nothing was sent.");
-    } else if (r.authFailed || r.status === 401 || r.status === 403) {
-      setPreviewState("error");
-      setPreviewMsg("Mail token rejected/expired. Open a rooftop’s “Send now” to paste a fresh token, then retry.");
-    } else if (r.status === 404) {
-      setPreviewState("error");
-      setPreviewMsg("Functions not deployed yet.");
-    } else if (r.ok) {
-      setPreviewState("done");
-      setPreviewMsg(`Preview sent to reviewers only · ${r.counts?.preview ?? 0} previewed (dealer not sent, not counted) · ${r.counts?.skipped ?? 0} skipped (no recipients) · ${r.counts?.errors ?? 0} errors.`);
-      await reload();
-    } else {
-      setPreviewState("error");
-      setPreviewMsg(r.error ?? `Error ${r.status ?? ""}`);
-    }
-    setTimeout(() => setPreviewState("idle"), 6000);
-  }, [reload]);
+  // The header's "Send live (N)", "Preview (Spyne only)" and the drawer's "Re-run (dry-run)" are
+  // gone: they called the legacy Supabase edge pipeline (cron1→4) from the browser with the public
+  // key, outside tracker sign-in and without the verified / churn / subscription gates (A4 F3,
+  // A5-12). Sends now go only through the signed-in, gated Express routes.
 
-  // SEND LIVE (respect flags): real emails to live rooftops (dry_run=false), dry ones suppressed.
-  const runSendLiveAll = useCallback(async () => {
-    const liveCount = rooftops.filter((r) => r.dryRun === false).length;
-    if (liveCount === 0) {
-      setLiveState("error");
-      setLiveMsg("No live rooftops. Flip a rooftop's toggle to “Live” first — dry rooftops are never emailed.");
-      setTimeout(() => setLiveState("idle"), 5000);
-      return;
-    }
-    // Manual bulk live send requires a typed password (anti-churn / deliberate-send
-    // guard). It's forwarded to cron4 as x-send-override and must match the override
-    // password; the scheduled cron is exempt (it carries no FE mail token).
-    const pw = await promptDialog({
-      title: `Send real emails to ${liveCount} live rooftop${liveCount === 1 ? "" : "s"}?`,
-      message: "This emails real customers through mail.spyne.ai. Dry-run rooftops are skipped. This is not a preview.",
-      label: "Send password",
-      secret: true,
-      tone: "danger",
-      confirmLabel: "Send live",
-    });
-    if (pw == null) return; // cancelled
-    if (!pw.trim()) {
-      setLiveState("error");
-      setLiveMsg("Send cancelled — the send password is required.");
-      setTimeout(() => setLiveState("idle"), 5000);
-      return;
-    }
-    setLiveState("running");
-    setLiveMsg("");
-    const r = await runRespectPipeline({ sendOverride: pw.trim() }); // no team → all rooftops; honours each dry_run flag
-    if (r.simulated) {
-      setLiveState("done");
-      setLiveMsg("Simulated — no backend configured. Nothing sent.");
-    } else if (r.overrideRequired) {
-      setLiveState("error");
-      setLiveMsg("Wrong send password — nothing was sent.");
-    } else if (r.authFailed || r.status === 401 || r.status === 403) {
-      setLiveState("error");
-      setLiveMsg("Mail token rejected/expired. Open a live rooftop’s “Send now” to paste a fresh token, then retry.");
-    } else if (r.status === 404) {
-      setLiveState("error");
-      setLiveMsg("Functions not deployed yet.");
-    } else if (r.ok) {
-      setLiveState("done");
-      setLiveMsg(`Sent · ${r.counts?.sent ?? 0} live · ${r.counts?.suppressed ?? 0} held (dry) · ${r.counts?.errors ?? 0} errors.`);
-      await reload();
-    } else {
-      setLiveState("error");
-      setLiveMsg(r.error ?? `Error ${r.status ?? ""}`);
-    }
-    setTimeout(() => setLiveState("idle"), 6000);
-  }, [rooftops, reload]);
-
-  const liveCount = useMemo(() => rooftops.filter((r) => r.dryRun === false).length, [rooftops]);
   // The 4-agent filter → a direction (inbound/outbound) for transactional counts + drill-down.
   // "all" = both directions (the department total). sales_ib/service_ib → inbound; *_ob → outbound.
   const prodDir: "inbound" | "outbound" | null = productFilter === "all" ? null : productFilter.endsWith("ib") ? "inbound" : "outbound";
@@ -267,12 +170,12 @@ export function EmailerTracker() {
   const csms = useMemo(() => Array.from(new Set(rooftops.map((r) => r.csm))), [rooftops]);
   const syncedMinAgo = Math.max(0, Math.round((Date.now() - lastSynced.getTime()) / 60000));
 
-  // History window navigation. `today` is the effective right-most date (= anchor when set, else the
-  // live anchor). Stepping moves the window by a full page (colCount) of the current cadence; stepping
+  // History window navigation. `effAnchor` is the effective right-most date (= anchor when set, else
+  // the live anchor computed from the tab's rows). Stepping moves the window by a full page (colCount) of the current cadence; stepping
   // forward past the live anchor snaps back to live (anchor=null).
   const isoToday = new Date().toISOString().slice(0, 10);
   const stepAnchor = (dir: -1 | 1) => {
-    const base = anchor ?? today;
+    const base = anchor ?? effAnchor;
     if (!base) return;
     const [y, m, d] = base.split("-").map(Number);
     const dt = new Date(Date.UTC(y, m - 1, d));
@@ -284,32 +187,50 @@ export function EmailerTracker() {
     setAnchor(dir === 1 && next >= isoToday ? null : next);
   };
 
-  // How many DISTINCT rooftops (team_ids) sit in each lifecycle stage — powers the tab bar's count
-  // badges. Computed over the full unfiltered universe (grid + lifecycle-only), never search/CSM-scoped.
-  const tabCounts = useMemo(() => {
-    const teams: Record<LifecycleStatus, Set<string>> = { onboarding: new Set(), contracting: new Set(), live: new Set(), churn: new Set() };
-    for (const r of rooftops) if (r.team_id) teams[r.lifecycleStatus ?? "live"].add(r.team_id);
-    for (const r of lifecycleRooftops) if (r.team_id) teams[r.lifecycleStatus ?? "live"].add(r.team_id);
-    return { onboarding: teams.onboarding.size, contracting: teams.contracting.size, live: teams.live.size, churn: teams.churn.size };
-  }, [rooftops, lifecycleRooftops]);
-
-  // "Live" is the grid (digest cells + KPI strip), gated to exclude anything tagged churn — this is
-  // also what keeps a churned account's history out of the "Sent rate" KPI. Other tabs read from the
-  // lightweight lifecycle-only list (deduped by team_id against any grid row that also matches, e.g.
-  // a churned rooftop whose digest history is still around).
-  const tabBase = useMemo(() => {
-    if (lifecycleTab === "live") return rooftops.filter((r) => (r.lifecycleStatus ?? "live") !== "churn");
+  // The rows each lifecycle tab shows (no cells yet). "Live" is the grid (digest cells + KPI strip),
+  // gated to exclude anything tagged churn — this is also what keeps a churned account's history out
+  // of the "Sent rate" KPI. Other tabs read from the lightweight lifecycle-only list (deduped by
+  // team_id against any grid row that also matches, e.g. a churned rooftop whose digest history is
+  // still around).
+  const rowsForTab = useCallback((tab: LifecycleStatus): RooftopRow[] => {
+    if (tab === "live") return rooftops.filter((r) => (r.lifecycleStatus ?? "live") !== "churn");
     const seen = new Set<string>();
     const base: RooftopRow[] = [];
     for (const r of [...lifecycleRooftops, ...rooftops]) {
-      if (r.lifecycleStatus !== lifecycleTab || !r.team_id || seen.has(r.team_id)) continue;
+      if (r.lifecycleStatus !== tab || !r.team_id || seen.has(r.team_id)) continue;
       seen.add(r.team_id);
       base.push(r);
     }
     return base;
-  }, [rooftops, lifecycleRooftops, lifecycleTab]);
+  }, [rooftops, lifecycleRooftops]);
+  // ONE rooftop definition (C4): a distinct team among the rows a tab SHOWS. The Live badge used to
+  // count lifecycle stage "live" (170) while the Live grid showed 193 teams.
+  const tabCounts = useMemo(() => {
+    const n = (tab: LifecycleStatus) => rooftopCounts(rowsForTab(tab)).rooftops;
+    return { onboarding: n("onboarding"), contracting: n("contracting"), live: n("live"), churn: n("churn") };
+  }, [rowsForTab]);
+  const tabRows = useMemo(() => rowsForTab(lifecycleTab), [rowsForTab, lifecycleTab]);
 
-  const filtered = useMemo(() => {
+  // The right-most column. An explicit history date wins; else the live anchor comes from the rows
+  // on THIS tab only — the lower median of their latest due report dates — so one churned or far-off
+  // rooftop can never move it (A4 F1: a churned Guam rooftop made column 0 an empty "today" and the
+  // headline read "0 of 0" for ten hours of the US day).
+  const now = lastSynced;
+  const liveAnchorDate = useMemo(() => liveAnchor(
+    tabRows.filter((r) => !r.lifecycleOnly).map((r) => latestDueKey("daily", { timezone: r.timezone, sendHour: r.sendHour, sendMinute: r.sendMinute }, now)),
+    now,
+  ), [tabRows, now]);
+  const effAnchor = anchor ?? liveAnchorDate;
+  // Cells for the rows on screen, built against that anchor (trackerModel.buildCells).
+  const tabBase = useMemo(() => tabRows.map((r) => anchorRow(r, effAnchor, now)), [tabRows, effAnchor, now]);
+
+  const cellsOf = useCallback((r: RooftopRow) => (cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly) as BuiltCell[], [cadence]);
+  const dueRowOf = useCallback((r: RooftopRow): DueRow & { name: string } => ({
+    team_id: r.team_id, rooftop_id: r.rooftop_id, department: r.department, name: r.name, cells: cellsOf(r), dueKey: r.dueKeys?.[cadence] ?? "",
+  }), [cellsOf, cadence]);
+
+  // Search / CSM / product filters: everything on screen and every tile follows these (C4).
+  const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     const prodDept = productFilter === "all" ? null : productFilter.startsWith("sales") ? "sales" : "service";
     return tabBase.filter((r) => {
@@ -327,10 +248,14 @@ export function EmailerTracker() {
         return false;
       if (csmFilter.size && !csmFilter.has(r.csm)) return false;
       if (prodDept && r.department !== prodDept) return false;
-      if (reasonFilter !== "all" && r.current_block !== reasonFilter) return false;
       return true;
     });
-  }, [tabBase, search, csmFilter, productFilter, reasonFilter]);
+  }, [tabBase, search, csmFilter, productFilter]);
+  // …plus the action-board chip, when one is picked: rows whose latest due cell files under it.
+  const filtered = useMemo(() => (reasonFilter === "all" || lifecycleTab !== "live")
+    ? visible
+    : visible.filter((r) => rowMatchesBoard(dueRowOf(r), reasonFilter, cadence, effAnchor)),
+  [visible, reasonFilter, lifecycleTab, dueRowOf, cadence, effAnchor]);
 
   // Every known rooftop, deduped by team_id, across ALL lifecycle stages — the search box needs to
   // find a rooftop by team_id/enterprise_id regardless of which tab is currently active (a rooftop
@@ -438,29 +363,13 @@ export function EmailerTracker() {
     return m;
   }, [rooftops]);
 
-  // Per-column tallies shown above each date: sent / not-sent / not-eligible.
-  // not-eligible = not_subscribed OR scheduled — neither is a send failure: not_subscribed has
-  // no run that day, and scheduled is a pending/future run that hasn't come due. Only genuine
-  // misses (not_sent, suppressed) count as not-sent.
-  const colStats = useMemo(() => {
-    const arr = Array.from({ length: colCount }, () => ({ sent: 0, notSent: 0, notEligible: 0 }));
-    for (const r of filtered) {
-      const cells = cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly;
-      for (let i = 0; i < colCount; i++) {
-        const st = cells[i]?.status;
-        if (!st) continue;
-        if (st === "sent") arr[i].sent++;
-        else if (st === "not_subscribed" || st === "scheduled") arr[i].notEligible++;
-        else arr[i].notSent++;
-      }
-    }
-    return arr;
-  }, [filtered, cadence, colCount]);
+  // Per-column tallies shown above each date: ✓ sent · ✕ not sent · – everything else. A department
+  // that should have been emailed and wasn't is ✕ (it used to sit in "–", A4 F2).
+  const colStats = useMemo(() => columnStats(filtered.map((r) => ({ cells: cellsOf(r) })), colCount), [filtered, cellsOf, colCount]);
 
   // Per-column history for the analytics modal: sent / not-sent / opened + the rooftop lists behind
   // each, over the currently-loaded window (move the date window to see older history). Newest first.
   const trend = useMemo<TrendPoint[]>(() => {
-    const cellsOf = (r: RooftopRow) => (cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly);
     const isOpened = (c: SendCell) => (c.runs ?? []).some((run) => run.openedAt || (run.openCount ?? 0) > 0 || (run.recipients ?? []).some((x) => x.opened));
     // Recipient emails for a send (the run that actually carries the recipient list), lower-cased.
     const recipEmails = (c: SendCell) => {
@@ -482,27 +391,27 @@ export function EmailerTracker() {
         const c = cellsOf(r)[i];
         if (!c) continue;
         date = c.date;
-        if (c.status === "sent") {
+        const bucket = c.state ? STATE_META[c.state].bucket : "excluded";
+        if (bucket === "sent") {
           sent.push(r);
           const isOp = isOpened(c);
           if (isOp) opened.push(r);
           const k = cohortOf(recipEmails(c));
           if (k) { cohort[k].sent++; if (isOp) cohort[k].opened++; }
         }
-        else if (c.status === "not_subscribed" || c.status === "scheduled") { /* not eligible */ }
-        else notSent.push(r);
+        else if (bucket === "not_sent") notSent.push(r);
       }
       const eligible = sent.length + notSent.length;
       return {
         date,
-        label: formatColLabel(cadence, i, today),
+        label: formatColLabel(cadence, i, effAnchor),
         sent, notSent, opened, eligible,
         sentRate: eligible ? Math.round((sent.length / eligible) * 100) : 0,
         openRate: sent.length ? Math.round((opened.length / sent.length) * 100) : 0,
         cohort,
       };
     });
-  }, [filtered, cadence, colCount, today]);
+  }, [filtered, cadence, colCount, effAnchor, cellsOf]);
 
   // Group-by-CSM clusters a CSM's rooftops together (CSM → rooftop → dept rows). Rooftop
   // grouping (the default) keeps a rooftop's two dept rows adjacent.
@@ -548,34 +457,27 @@ export function EmailerTracker() {
     };
   }, [activeCell, ordered]);
 
-  // Summary reflects the CURRENT filter set (so filtering to one CSM updates the count + %).
-  const summary = useMemo(() => computeSummary(filtered, cadence), [filtered, cadence]);
-  // Per-transactional-type KPIs (sent rate + open rate), aggregated over the filtered rooftops.
-  // The digest `summary` above is cadence/digest-only, so the KPI strip in the Transactional view
-  // reads from here instead. `eligible` = real events that qualified (CH total when available);
-  // `sent` = emails actually generated; `opened` = sent emails whose pixel fired (from the view).
-  const txTypeStats = useMemo(() => TRANSACTIONAL_TYPES.map((t) => {
-    let eligible = 0, sent = 0, opened = 0;
-    for (const r of filtered) {
-      const ec = eventCounts.get(`${r.team_id}::${r.department}`)?.[t.key];
-      if (!ec) continue;
-      eligible += prodDir ? (ec.byDir?.[prodDir] ?? 0) : (ec.total ?? 0);
-      sent += ec.sent ?? 0;
-      opened += ec.opened ?? 0;
-    }
-    return {
-      key: t.key, label: t.label, eligible, sent, opened,
-      sentRate: eligible ? Math.round((sent / eligible) * 100) : 0,
-      openRate: sent ? Math.round((opened / sent) * 100) : 0,
-    };
-  }), [filtered, eventCounts, prodDir]);
-  const breakdown = useMemo(() => reasonBreakdown(rooftops), [rooftops]);
-  // Sourced from tabBase (not raw `rooftops`) so these KPI-strip counts stay churn-free on the Live
-  // tab, consistent with the Sent-rate KPI below. `allTeamCount` is the page-header's un-scoped total.
-  const teamCount = useMemo(() => new Set(tabBase.map((r) => r.team_id)).size, [tabBase]);
-  const allTeamCount = useMemo(() => new Set(rooftops.map((r) => r.team_id)).size, [rooftops]);
-  const salesRows = tabBase.filter((r) => r.department === "sales").length;
-  const serviceRows = tabBase.filter((r) => r.department === "service").length;
+  // KPI strip: one cell per department, its latest DUE period (C1, C24), over the current filters.
+  const summary = useMemo(() => summarizeDue(filtered.map(dueRowOf), cadence, effAnchor), [filtered, dueRowOf, cadence, effAnchor]);
+  // Transactional KPIs: roi_event_emails by status for the filtered rooftops, in one window (C6).
+  const txTeamKey = useMemo(() => Array.from(new Set(filtered.map((r) => r.team_id).filter(Boolean))).sort().join(","), [filtered]);
+  useEffect(() => {
+    if (view !== "transactional" || lifecycleTab !== "live") return;
+    let alive = true;
+    setTxStatus(undefined);
+    const ids = txTeamKey ? txTeamKey.split(",") : [];
+    void loadEventStatusCounts(ids, { department: prodDept, sinceDays: txWindow }).then((c) => { if (alive) setTxStatus(c); });
+    return () => { alive = false; };
+  }, [view, lifecycleTab, txTeamKey, prodDept, txWindow]);
+  const txTypeStats = useMemo(() => TRANSACTIONAL_TYPES.map((t) => ({ key: t.key, label: t.label, ...txKpi(txStatus?.[t.key]) })), [txStatus]);
+  // Action board (C5): the rows on screen (search / CSM / product applied, chip not), each on its
+  // latest due cell, counted in distinct rooftops and split into send failures vs setup gaps.
+  const board = useMemo(() => actionBoard(visible.map(dueRowOf), cadence, effAnchor), [visible, dueRowOf, cadence, effAnchor]);
+  const boardTotal = useMemo(() => new Set(board.flatMap((g) => g.chips.flatMap((c) => c.names))).size, [board]);
+  // C4: one rooftop definition everywhere. Header = the tab; tiles + "Showing" follow the filters.
+  const tabCountsHere = useMemo(() => rooftopCounts(tabBase), [tabBase]);
+  const shownCounts = useMemo(() => rooftopCounts(filtered), [filtered]);
+  const unitLabel = cadence === "daily" ? "day" : cadence === "weekly" ? "week" : "month";
 
   // Loader while the first load is in flight — no mock dataset is ever shown.
   if (!loadedOnce && loading) {
@@ -615,14 +517,19 @@ export function EmailerTracker() {
             <h1 className="text-[16px] font-extrabold tracking-tight text-text-primary">
               Email Tracker
             </h1>
-            <span className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-secondary">
-              {allTeamCount} rooftops · {rooftops.length} dept trackers
+            <span className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-secondary" title="Rooftops are distinct teams on this tab. Departments are the sales and service rows.">
+              {tabCountsHere.rooftops} rooftops{tabCountsHere.departments ? ` · ${tabCountsHere.departments} departments` : ""}
             </span>
+            {serverDryRun ? (
+              <span className="rounded-full bg-warning-soft px-2 py-0.5 text-[10px] font-semibold text-warning" title="DRY_RUN is on for this server: the crons and every manual send hold all email.">
+                Sending is off on this server
+              </span>
+            ) : null}
           </div>
           <div className="flex items-center gap-2 text-[11px] text-text-muted">
             <span className="tabular">{source}</span>
             <span>·</span>
-            <span className="tabular">synced {syncedMinAgo} min ago</span>
+            <span className="tabular" title="When this page last read the data, not when the crons last ran.">loaded {syncedMinAgo} min ago</span>
             <button
               type="button"
               onClick={() => void reload()}
@@ -631,63 +538,9 @@ export function EmailerTracker() {
             >
               {loading ? "Refreshing…" : "⟳ Refresh"}
             </button>
-            <button
-              type="button"
-              onClick={() => void runSpynePreviewAll()}
-              disabled={previewState === "running"}
-              title="Fire cron1→4 for every rooftop as a REAL send, but cron4 sends only to the reviewers devansh.hasija@spyne.ai + subhav.malhotra@spyne.ai — no customer is emailed. Subject prefixed “[PREVIEW]”. Needs a mail token."
-              className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold ${
-                previewState === "error"
-                  ? "border-negative/40 bg-negative-soft text-negative"
-                  : previewState === "done"
-                  ? "border-positive/40 bg-positive/10 text-positive"
-                  : "border-border-subtle bg-surface-card text-text-primary hover:bg-surface-subtle"
-              } disabled:opacity-60`}
-            >
-              {previewState === "running"
-                ? "Sending preview…"
-                : previewState === "done"
-                ? "✓ Preview sent"
-                : previewState === "error"
-                ? "Preview failed"
-                : "Preview (Spyne only)"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void runSendLiveAll()}
-              disabled={liveState === "running"}
-              title={
-                liveCount > 0
-                  ? `Send REAL emails to the ${liveCount} live rooftop(s) (dry_run=false). Dry rooftops are skipped.`
-                  : "No live rooftops — flip a rooftop to Live first. Dry rooftops are never emailed."
-              }
-              className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold ${
-                liveState === "error"
-                  ? "border-negative/40 bg-negative-soft text-negative"
-                  : liveState === "done"
-                  ? "border-positive/40 bg-positive/10 text-positive"
-                  : liveCount > 0
-                  ? "border-negative/50 bg-negative text-white hover:opacity-90"
-                  : "border-border-subtle bg-surface-subtle text-text-muted"
-              } disabled:opacity-60`}
-            >
-              {liveState === "running"
-                ? "Sending…"
-                : liveState === "done"
-                ? "✓ Sent live"
-                : liveState === "error"
-                ? "Send failed"
-                : `▶ Send live (${liveCount})`}
-            </button>
             <MissingRooftopButton />
           </div>
         </div>
-        {previewMsg || liveMsg ? (
-          <div className="mt-1 text-right text-[10px] text-text-muted">
-            {liveMsg || previewMsg}
-            {!isPipelineConfigured ? " · set VITE_SUPABASE_URL + deploy functions to run for real" : ""}
-          </div>
-        ) : null}
       </header>
 
       {/* Lifecycle stage tabs — Live is the default (day-to-day CSM view); the other three
@@ -710,43 +563,47 @@ export function EmailerTracker() {
         </div>
       </div>
 
-      {/* CSM action board — grid-only (blocked reasons apply to live digest sends). */}
-      {lifecycleTab === "live" && breakdown.length > 0 ? (
+      {/* CSM action board (C5): the rooftops on screen whose latest due {day|week|month} needs action,
+          counted in distinct rooftops, split into send failures and setup gaps. Dry-run holds are
+          deliberate and stay off the board. A chip filters the grid to its rows. */}
+      {lifecycleTab === "live" && view === "digests" && boardTotal > 0 ? (
         <div className="flex-shrink-0 border-b border-border-subtle bg-warning-soft/40 px-6 py-2.5">
-          <div className="flex flex-wrap items-baseline gap-3">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-warning">
-              Action board · {breakdown.reduce((s, b) => s + b.count, 0)} rooftops blocked
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-warning" title={`Each rooftop's latest due ${unitLabel}, ${cadence} digests`}>
+              Action board · {boardTotal} rooftop{boardTotal === 1 ? "" : "s"} need action
             </span>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {breakdown.map((b) => {
-                const active = reasonFilter === b.reason;
-                return (
-                  <button
-                    key={b.reason}
-                    type="button"
-                    onClick={() => setReasonFilter(active ? "all" : b.reason)}
-                    title={b.rooftops.join(", ")}
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
-                      active
-                        ? "border-warning bg-warning text-white"
-                        : "border-warning/40 bg-surface-card text-warning hover:bg-warning-soft"
-                    }`}
-                  >
-                    <span className="tabular">{b.count}</span>
-                    {NOT_SENT_REASON_LABEL[b.reason]}
-                  </button>
-                );
-              })}
-              {reasonFilter !== "all" ? (
-                <button
-                  type="button"
-                  onClick={() => setReasonFilter("all")}
-                  className="text-[11px] font-semibold text-text-secondary hover:underline"
-                >
-                  Clear
-                </button>
-              ) : null}
-            </div>
+            {board.filter((g) => g.chips.length).map((g) => (
+              <div key={g.group} className="flex flex-wrap items-center gap-1.5">
+                <span className={`text-[10px] font-semibold ${g.group === "failures" ? "text-negative" : "text-warning"}`}>{g.title}</span>
+                {g.chips.map((c) => {
+                  const active = reasonFilter === c.key;
+                  const tone = g.group === "failures"
+                    ? (active ? "border-negative bg-negative text-white" : "border-negative/40 bg-surface-card text-negative hover:bg-negative-soft")
+                    : (active ? "border-warning bg-warning text-white" : "border-warning/40 bg-surface-card text-warning hover:bg-warning-soft");
+                  return (
+                    <button
+                      key={c.key}
+                      type="button"
+                      onClick={() => setReasonFilter(active ? "all" : c.key)}
+                      title={`${c.rooftops} rooftop${c.rooftops === 1 ? "" : "s"}, ${c.departments} department${c.departments === 1 ? "" : "s"}: ${c.names.join(", ")}`}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${tone}`}
+                    >
+                      <span className="tabular">{c.rooftops}</span>
+                      {c.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {reasonFilter !== "all" ? (
+              <button
+                type="button"
+                onClick={() => setReasonFilter("all")}
+                className="text-[11px] font-semibold text-text-secondary hover:underline"
+              >
+                Clear
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -839,7 +696,7 @@ export function EmailerTracker() {
                   <button type="button" onClick={() => stepAnchor(-1)} className="px-1.5 text-[13px] font-bold text-text-secondary hover:text-brand-primary" aria-label="Older window">◀</button>
                   <input
                     type="date"
-                    value={anchor ?? today ?? ""}
+                    value={anchor ?? effAnchor ?? ""}
                     max={isoToday}
                     onChange={(e) => setAnchor(e.target.value && e.target.value < isoToday ? e.target.value : null)}
                     className="w-[128px] bg-transparent text-[12px] text-text-primary focus:outline-none"
@@ -882,8 +739,9 @@ export function EmailerTracker() {
           >
             Clear filters
           </button>
-          <div className="ml-auto text-[11px] text-text-muted tabular">
-            Showing {filtered.length} of {tabBase.length} rooftops
+          <div className="ml-auto text-[11px] text-text-muted tabular" title="Rooftops are distinct teams. Departments are the sales and service rows.">
+            Showing {shownCounts.rooftops} of {tabCountsHere.rooftops} rooftops
+            {lifecycleTab === "live" ? ` · ${shownCounts.departments} of ${tabCountsHere.departments} departments` : ""}
           </div>
         </div>
       </div>
@@ -892,43 +750,62 @@ export function EmailerTracker() {
         <LifecycleList rooftops={filtered} onConfigure={setConfigRooftop} onStopEmails={stopEmailerNow} onChanged={() => void reload()} />
       ) : (
         <>
-      {/* KPI strip — sits below the filters; reacts to the active filters (CSM / product / search) */}
+      {/* KPI strip — sits below the filters; every tile follows the search / CSM / product filters (C4). */}
       <div className="flex-shrink-0 border-b border-border-subtle bg-surface-background px-6 py-3">
         <div className="flex flex-wrap items-stretch gap-2">
-          <Stat label="Rooftops" value={teamCount} />
-          <Stat label="Dept trackers" value={rooftops.length} />
-          <Stat label="Sales / Service" value={`${salesRows} / ${serviceRows}`} />
+          <Stat label="Rooftops" value={shownCounts.rooftops} title="Distinct rooftops (teams) matching the filters" />
+          <Stat label="Departments" value={shownCounts.departments} title="Sales and service rows matching the filters" />
+          <Stat label="Sales / Service" value={`${shownCounts.sales} / ${shownCounts.service}`} title="Departments by type" />
           <span className="mx-1 w-px self-stretch bg-border-subtle" />
           {view === "transactional" ? (
-            /* Per-type sent rate + open rate — one card per transactional email type.
-               Sent / Opened each open a per-day analytics modal. */
-            countsReady ? txTypeStats.map((s) => (
-              <TxTypeStat
-                key={s.key}
-                s={s}
-                onSent={() => setTxAnalytics({ type: s.key, label: s.label, metric: "sent" })}
-                onOpened={() => setTxAnalytics({ type: s.key, label: s.label, metric: "opened" })}
-              />
-            )) : (
-              <span className="self-center text-[12px] text-text-muted">Loading transactional counts…</span>
-            )
+            /* One card per transactional type: every number from roi_event_emails, in the window
+               picked here (C6). Sent / Opened each open a per-day analytics modal. */
+            <>
+              <label className="flex flex-col justify-center rounded-lg border border-border-subtle bg-surface-card px-2 py-1 text-[9px] font-semibold uppercase tracking-widest text-text-muted" title="Every number in this strip counts emails created in this window">
+                Window
+                <select value={txWindow} onChange={(e) => setTxWindow(Number(e.target.value))} className="mt-0.5 bg-transparent text-[12px] font-semibold normal-case tracking-normal text-text-primary focus:outline-none">
+                  <option value={7}>Last 7 days</option>
+                  <option value={30}>Last 30 days</option>
+                  <option value={90}>Last 90 days</option>
+                </select>
+              </label>
+              {txStatus === undefined ? (
+                <span className="self-center text-[12px] text-text-muted">Loading transactional counts…</span>
+              ) : txStatus === null ? (
+                <span className="self-center text-[12px] text-negative">Couldn't load transactional counts.</span>
+              ) : txTypeStats.map((s) => (
+                <TxTypeStat
+                  key={s.key}
+                  s={s}
+                  onSent={() => setTxAnalytics({ type: s.key, label: s.label, metric: "sent" })}
+                  onOpened={() => setTxAnalytics({ type: s.key, label: s.label, metric: "opened" })}
+                />
+              ))}
+            </>
           ) : (
             <>
-              <Stat label="Sent today" value={summary.emailStatus.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} />
-              <Stat label="Not sent" value={summary.emailStatus.notSent} tone="negative" onClick={() => setAnalyticsMetric("notSent")} />
+              <div className="flex flex-col justify-center pr-1 text-[9px] font-semibold uppercase leading-tight tracking-widest text-text-muted" title={`Each department is counted once, on its latest ${unitLabel} whose send time has passed in the dealer's time zone.`}>
+                <span>Latest due {unitLabel}</span>
+                <span className="font-medium normal-case tracking-normal">{summary.departments} departments</span>
+              </div>
+              <Stat label="Sent" value={summary.sent} tone="positive" onClick={() => setAnalyticsMetric("sent")} title="Departments whose latest due digest was emailed" />
+              <Stat label="Not sent" value={summary.notSent} tone="negative" onClick={() => setAnalyticsMetric("notSent")} title="Expected but not emailed: missed, failed, delivery unknown, data not ready" />
+              <Stat label="Not set up" value={summary.setup} title="Held in dry run, nobody eligible, opted out or not classified. Not counted in the rate." />
               <Stat
                 label="Sent rate"
-                value={`${summary.emailStatus.sentRatePct}%`}
-                sub={`${summary.emailStatus.sent} of ${summary.emailStatus.sent + summary.emailStatus.notSent} eligible`}
-                tone={summary.emailStatus.sentRatePct >= 50 ? "positive" : "negative"}
+                value={`${summary.sentRatePct}%`}
+                sub={`${summary.sent} of ${summary.rated} expected`}
+                tone={summary.rated === 0 ? undefined : summary.sentRatePct >= 50 ? "positive" : "negative"}
                 onClick={() => setAnalyticsMetric("sentRate")}
+                title="Sent ÷ (sent + not sent). No activity, not set up, churned and paused departments are left out."
               />
               <Stat
-                label="Rooftops opened"
-                value={`${summary.emailStatus.openRatePct}%`}
-                sub={`${summary.emailStatus.opened} of ${summary.emailStatus.sent} sent`}
-                tone={summary.emailStatus.openRatePct >= 40 ? "positive" : summary.emailStatus.opened > 0 ? "neutral" : undefined}
+                label="Opened"
+                value={`${summary.openRatePct}%`}
+                sub={`${summary.opened} of ${summary.sent} sent`}
+                tone={summary.openRatePct >= 40 ? "positive" : summary.opened > 0 ? "neutral" : undefined}
                 onClick={() => setAnalyticsMetric("openRate")}
+                title="Sent digests whose open pixel fired. Opening an email in this tracker no longer counts."
               />
             </>
           )}
@@ -947,14 +824,14 @@ export function EmailerTracker() {
               {view === "digests"
                 ? Array.from({ length: colCount }).map((_, i) => (
                     <Th key={i} minW={104}>
-                      <div title={cadence === "daily" ? undefined : periodLabel(cadence, columnDate(today, cadence, i))}>{formatColLabel(cadence, i, today)}</div>
+                      <div title={cadence === "daily" ? undefined : periodLabel(cadence, columnDate(effAnchor, cadence, i))}>{formatColLabel(cadence, i, effAnchor)}</div>
                       <div
                         className="mt-1 flex items-center gap-1.5 text-[11px] font-bold tabular"
-                        title={`${colStats[i].sent} sent · ${colStats[i].notSent} not sent · ${colStats[i].notEligible} not eligible`}
+                        title={`${colStats[i].sent} sent · ${colStats[i].notSent} not sent (missed, failed, unknown) · ${colStats[i].setup} not set up · ${colStats[i].silent} no activity · ${colStats[i].pending} not due or in flight · ${colStats[i].excluded} not expected`}
                       >
                         <span className="text-positive">✓{colStats[i].sent}</span>
                         <span className="text-negative">✕{colStats[i].notSent}</span>
-                        <span className="text-text-muted">–{colStats[i].notEligible}</span>
+                        <span className="text-text-muted">–{colStats[i].setup + colStats[i].silent + colStats[i].pending + colStats[i].excluded}</span>
                       </div>
                     </Th>
                   ))
@@ -963,8 +840,8 @@ export function EmailerTracker() {
                     return (
                       <Th key={t.key} minW={132}>
                         <div>{t.label}</div>
-                        <div className="mt-1 text-[11px] font-bold tabular text-positive">
-                          {countsReady ? tot : "…"} <span className="font-medium text-text-muted">sent</span>
+                        <div className="mt-1 text-[11px] font-bold tabular text-positive" title="Emails sent, all time (roi_event_emails)">
+                          {countsReady ? tot : "…"} <span className="font-medium text-text-muted">sent, all time</span>
                         </div>
                       </Th>
                     );
@@ -998,6 +875,13 @@ export function EmailerTracker() {
                                 onboarding/contracting per the ARR system — not a contradiction,
                                 just two different questions (see LifecycleBadge). */}
                             {r.lifecycleStatus && r.lifecycleStatus !== "live" ? <LifecycleBadge status={r.lifecycleStatus} sub={r.arrBucket} /> : null}
+                            {/* Live in the emailer with no roi_rooftop_config row (C12): no name,
+                                no settings, and every save would 404 until product creates it. */}
+                            {r.unconfigured ? (
+                              <span className="ml-1.5 inline-flex rounded-full bg-warning-soft px-1.5 py-0.5 align-middle text-[9px] font-semibold text-warning" title="This rooftop has no email configuration row yet. Its settings can't be saved until product creates it.">
+                                Unconfigured
+                              </span>
+                            ) : null}
                           </div>
                           <div className="text-[10px] text-text-muted">{r.group ?? "—"}</div>
                         </div>
@@ -1037,17 +921,19 @@ export function EmailerTracker() {
                       ))
                     : TRANSACTIONAL_TYPES.map((t) => {
                         const ec = eventCounts.get(`${r.team_id}::${r.department}`)?.[t.key];
-                        // When a single agent (IB/OB) is selected, show that direction's count; else the dept total.
-                        const total = prodDir ? (ec?.byDir?.[prodDir] ?? 0) : (ec?.total ?? 0);
+                        // Sent ÷ produced, both from the email ledger, all time (C6). The ClickHouse
+                        // event count is a different unit, so it is shown beside it, never divided.
+                        const total = ec?.total ?? 0;
+                        const events = prodDir ? (ec?.byDir?.[prodDir] ?? 0) : (ec?.chEvents ?? 0);
                         return (
                           <td key={t.key} className={`${divider} ${groupTop} px-2 py-2`} style={{ minWidth: 132 }}>
                             {!countsReady ? (
                               <div className="py-1 text-center text-[11px] text-text-muted">…</div>
-                            ) : total > 0 ? (
+                            ) : total > 0 || events > 0 ? (
                               <button
                                 type="button"
                                 onClick={() => setEventList({ rooftop: r, type: t.key, label: t.label, direction: prodDir })}
-                                title={`${ec?.sent ?? 0} sent · ${ec?.notSent ?? 0} held — click to see all ${total}`}
+                                title={`All time: ${ec?.sent ?? 0} sent of ${total} emails produced (${ec?.notSent ?? 0} held, failed or not sent). ${events} ${prodDir ? `${prodDir} ` : ""}events in ClickHouse, last 120 days. Click to see them.`}
                                 className="inline-flex w-full items-center justify-center gap-0.5 rounded-md bg-brand-primary/10 px-2 py-1 text-[12px] font-bold tabular text-brand-primary hover:bg-brand-primary/20"
                               >
                                 {ec?.sent ?? 0}<span className="font-medium text-text-muted">/{total}</span>
@@ -1056,7 +942,7 @@ export function EmailerTracker() {
                               <button
                                 type="button"
                                 onClick={() => setEventList({ rooftop: r, type: t.key, label: t.label, direction: prodDir })}
-                                title={`No ${t.label} yet · click to generate a preview, then send or ignore`}
+                                title={`No ${t.label} emails or events yet. Click to preview the latest design.`}
                                 className="group inline-flex w-full items-center justify-center rounded-md border border-dashed border-border-subtle bg-surface-subtle px-2 py-1 text-[11px] text-text-muted hover:border-brand-primary hover:bg-brand-primary/10 hover:text-brand-primary"
                               >
                                 <span className="group-hover:hidden">—</span>
@@ -1260,13 +1146,17 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     `First opened ${fmt(r.opened_at)}` +
     (r.open_count ? ` · ${r.open_count} view${r.open_count === 1 ? "" : "s"}` : "") +
     (openedRecips(r).length ? ` · ${openedRecips(r).join(", ")}` : "");
-  const openTab = (html: string) => { const w = window.open("", "_blank"); if (w) { w.document.open(); w.document.write(html); w.document.close(); } };
+  // Opening a stored email here must not count as an open (C13): the pixel is stripped first.
+  const openTab = (html: string) => { const w = window.open("", "_blank"); if (w) { w.document.open(); w.document.write(neutralizeTracking(html)); w.document.close(); } };
   const sendNow = async (r: EventEmailRow) => {
     if (!r.rendered_html) return;
     if (!(await confirmDialog({
-      title: `Send this ${entry.label} email now?`,
-      message: "It goes to its recipients as a real email, through the mail proxy.",
-      confirmLabel: "Send email",
+      title: r.status === "sent" ? `Send this ${entry.label} email again?` : `Send this ${entry.label} email now?`,
+      message: r.status === "sent"
+        ? "It already went out. Sending again emails the same recipients a second copy through mail.spyne.ai."
+        : "It goes to its eligible recipients as a real email through mail.spyne.ai.",
+      confirmLabel: r.status === "sent" ? "Send again" : "Send email",
+      tone: r.status === "sent" ? "danger" : undefined,
     }))) return;
     setSending(true); setSendMsg("");
     try {
@@ -1284,18 +1174,21 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
     }
     setSending(false);
   };
-  // Render the latest design live + send it to the rooftop's recipients (synthetic preview path).
+  // Render the latest design live + send it to the rooftop's recipients (an event with no email yet).
+  // The server refuses (and asks for a typed override) when the cron's own email for this event
+  // already went out (C7), or when the cron would not send this type for the rooftop (C11).
   const generateSend = async () => {
     if (!entry) return;
     if (!(await confirmDialog({
       title: `Send this ${entry.label} email to ${entry.rooftop.name}?`,
-      message: "It renders the latest design from live data and sends a real email to the rooftop's recipients, through the mail proxy.",
+      message: "It renders the latest design from live data and sends a real email to this department's eligible recipients through mail.spyne.ai.",
       confirmLabel: "Send email",
     }))) return;
     setGenState("sending"); setSendMsg("");
     const r = await generateSendEventNow({
       teamId: entry.rooftop.team_id, enterpriseId: entry.rooftop.enterprise_id, department: entry.rooftop.department,
-      emailType: entry.type, eventKey: preview?.event_key ?? "", rooftopName: entry.rooftop.name, tz: entry.rooftop.timezone,
+      emailType: entry.type, eventKey: preview?.source_event_key ?? preview?.event_key ?? "", cronEventKey: preview?.cron_event_key,
+      rooftopName: entry.rooftop.name, tz: entry.rooftop.timezone,
     });
     if (r.ok) { setGenState("sent"); setSendMsg(`✓ Sent to ${(r.to ?? []).join(", ") || "recipients"}`); }
     else { setGenState("error"); setSendMsg(`Send failed — ${r.error ?? ""}`); }
@@ -1320,7 +1213,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
             <div className="min-w-0">
               <div className="truncate text-[14px] font-semibold text-text-primary">{entry.rooftop.name} · {entry.label}</div>
               <div className="text-[11px] text-text-muted">
-                {preview ? (preview.id ? `${fmt(preview.created_at)} · ${recipientsOf(preview) || "—"}` : "Live preview · decide to send or ignore") : rows === null ? "Loading…" : `${rows.length}${hasMore ? "+" : ""} email${rows.length === 1 ? "" : "s"} · ${entry.rooftop.department}`}
+                {preview ? (preview.id ? `${fmt(preview.created_at)} · ${recipientsOf(preview) || "—"}` : "Live preview · decide to send or ignore") : rows === null ? "Loading…" : `${rows.length}${hasMore ? "+" : ""} event${rows.length === 1 ? "" : "s"} · ${rows.filter((x) => x.id).length} with an email · ${entry.rooftop.department}`}
               </div>
             </div>
           </div>
@@ -1404,7 +1297,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
             ) : mode === "live" && liveState === "error" ? (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-[13px] text-negative">Couldn’t render live preview — {liveErr}<button type="button" onClick={() => { setLiveHtml(null); setLiveState("idle"); }} className="rounded-md border border-border-subtle px-2 py-1 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle">Retry</button></div>
             ) : shownHtml ? (
-              <iframe title="email preview" sandbox="" srcDoc={shownHtml} className="h-full w-full flex-1 border-0 bg-white" />
+              <iframe title="email preview" sandbox="" referrerPolicy="no-referrer" srcDoc={neutralizeTracking(shownHtml)} className="h-full w-full flex-1 border-0 bg-white" />
             ) : (
               <div className="flex flex-1 items-center justify-center px-8 text-center text-[13px] text-text-muted">
                 {mode === "live" ? "No live data found for this customer to render." : `No stored copy for this email${preview.status === "suppressed" ? " (suppressed before send)." : "."}`}
@@ -1471,7 +1364,7 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
                           ) : r.status === "sent" ? (
                             <span title="Sent — no open detected yet" className="rounded-full bg-surface-subtle px-2 py-0.5 text-[10px] font-semibold text-text-muted">Not opened</span>
                           ) : null}
-                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone(r.status)}`}>{r.status}</span>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${tone(r.status)}`} title={r.id ? `Email ${r.status}${r.event_key ? ` · key ${r.event_key}` : ""}` : "No email was produced for this event"}>{r.status === "not_emailed" ? "No email" : r.status}</span>
                           <span className="text-[12px] text-text-muted">View →</span>
                         </div>
                       </button>
@@ -1495,8 +1388,9 @@ function EventListDrawer({ entry, onClose }: { entry: { rooftop: RooftopRow; typ
   );
 }
 
-/* Per-rooftop email configuration — toggle which of the 7 email types this rooftop receives.
- * Writes roi_rooftop_config directly (anon UPDATE granted; RLS off on this project). */
+/* Per-rooftop email configuration — which email types this rooftop receives, its recipients, and
+ * (read only) the other settings that change what the crons send. Writes go through the signed-in
+ * server routes (/api/rooftop-config, /api/recipients*), each audited. */
 function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | null; onClose: () => void; onSaved: () => void }) {
   const [cfg, setCfg] = useState<RooftopConfig | null>(null);
   const [busy, setBusy] = useState<EmailTypeKey | null>(null);
@@ -1700,7 +1594,7 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   const setSub = async (email: string, type: string, channel: "email" | "sms", enabled: boolean) => {
     const before = teamRecips.find((r) => r.email === email)?.subscriptions ?? null;
     setTeamRecips((p) => p.map((r) => (r.email === email
-      ? { ...r, subscriptions: { ...(r.subscriptions || {}), [type]: { ...((r.subscriptions || {})[type as keyof typeof r.subscriptions] || {}), [channel]: enabled } } }
+      ? { ...r, subscriptions: { ...(r.subscriptions || {}), [type]: { ...((r.subscriptions || {})[type as SubType] || {}), [channel]: enabled } } }
       : r)));
     setErr("");
     const res = await setRecipientSubscriptionNow({ teamId: rooftop?.team_id, email, type, channel, enabled });
@@ -1722,6 +1616,13 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
           <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary">✕</button>
         </div>
         <div className="px-5 py-4">
+          {rooftop.unconfigured ? (
+            <div className="mb-4 rounded-md border border-warning/40 bg-warning-soft px-3 py-2 text-[12px] leading-relaxed text-warning">
+              <div className="font-semibold">This rooftop has no email configuration yet</div>
+              <div className="mt-0.5 text-text-secondary">It is live in the emailer, but there is no settings row for it, so its email types, template and schedule can't be saved, and it can't go live. Ask product to set it up. You can still manage its recipients below.</div>
+            </div>
+          ) : null}
+          {!rooftop.unconfigured ? (<>
           <div className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Daily digest template</div>
           <div className="mb-1 inline-flex w-full rounded-lg border border-border-subtle p-0.5">
             {([
@@ -1829,10 +1730,12 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
               <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${smsMaster ? "left-[18px]" : "left-0.5"}`} />
             </button>
           </label>
-          {err ? <div className="mt-3 text-[12px] text-[#DC2626]">{err}</div> : null}
           <div className="mt-4 text-[11px] leading-relaxed text-text-muted">
             Changes save immediately and gate the cron (digests + transactional sends). Daily/weekly/monthly also need a send-hour; transactional types fire on the poll.
           </div>
+          {rooftop.readOnly ? <ReadOnlySendSettings ro={rooftop.readOnly} /> : null}
+          </>) : null}
+          {err ? <div className="mt-3 text-[12px] text-[#DC2626]">{err}</div> : null}
 
           {/* Sales AND Service recipient lists — different people can receive each. Each dept is its
              own bordered section with a bold, dept-coloured header so the two are clearly divided. */}
@@ -1957,10 +1860,11 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
             </div>
           ))}
           <div className="mt-3 text-[11px] leading-relaxed text-text-muted">
-            Sales and Service lists are independent — add different people to each. The On/Off toggle is the
-            per-person email master (pauses ALL of their emails). Expand <span className="font-semibold text-text-primary">Notifications</span> to pick
-            which of the 7 types each person gets on email and SMS. <span className="font-semibold text-text-primary">Role</span> drives
-            transactional routing: alerts go to the Salesperson, falling back to BDC then GM when none is set. New recipients are added paused.
+            Sales and Service lists are independent: add different people to each. Adding someone who is already
+            on the other list only adds them to this list; it doesn't change whether they receive email. The On/Off
+            toggle is the per-person email master (pauses all of their emails). Expand <span className="font-semibold text-text-primary">Notifications</span> to pick
+            which of the {SUBSCRIPTION_TYPES.length} types each person gets on email and SMS. <span className="font-semibold text-text-primary">Role</span> is
+            a label only: every verified recipient who is switched on gets the rooftop's enabled emails. New recipients are added paused and unverified.
           </div>
 
           <ConfigHistory teamId={rooftop.team_id} />
@@ -1971,9 +1875,50 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   );
 }
 
+/* Settings that change what the events cron sends but have no editor in the tracker (C27). Shown so
+ * a CSM can see why a rooftop gets the emails it gets (A1 F11): e.g. a lead-capture rooftop gets no
+ * appointment, action-item or overdue emails whatever the toggles above say. */
+function ReadOnlySendSettings({ ro }: { ro: NonNullable<RooftopRow["readOnly"]> }) {
+  const leadCapture = String(ro.postConversationTemplate || "") === "lead_capture";
+  const hours = (() => {
+    const w = ro.workingHours as { startTime?: string; endTime?: string; days?: unknown } | string | null | undefined;
+    if (!w) return "Not set (overdue emails use the default hours)";
+    if (typeof w === "string") return w;
+    if (w.startTime || w.endTime) return `${w.startTime ?? "?"} to ${w.endTime ?? "?"}`;
+    return "Set";
+  })();
+  const rows: [string, string][] = [
+    ["Website chat emails", ro.chatEnabled === false ? "Off" : "On"],
+    ["Post-conversation template", leadCapture ? "Lead capture" : ro.postConversationTemplate || "Standard"],
+    ["Post-conversation mode", ro.postConversationMode || "Default"],
+    ["Outbound conversations", ro.outboundRequiresReply === true ? "Emailed only when the customer replied" : ro.outboundRequiresReply === false ? "Every outbound conversation is emailed" : "Default"],
+    ["SMS post-conversation cadence", ro.smsPostConversationCadence || "Default"],
+    ["Working hours", hours],
+  ];
+  return (
+    <div className="mt-4 rounded-md border border-border-subtle bg-surface-background p-3">
+      <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-widest text-text-muted">Also decides what gets sent · read only</div>
+      {leadCapture ? (
+        <div className="mb-2 inline-flex rounded-full bg-warning-soft px-2 py-0.5 text-[10px] font-semibold text-warning">
+          Lead capture turns off appointment, action-item and overdue emails
+        </div>
+      ) : null}
+      <dl className="space-y-1">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex items-baseline justify-between gap-3 text-[11px]">
+            <dt className="text-text-muted">{k}</dt>
+            <dd className="text-right font-medium text-text-primary">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      <div className="mt-1.5 text-[10px] text-text-muted">These have no editor here. Ask product to change them.</div>
+    </div>
+  );
+}
+
 /* Config change log — collapsible "History" panel at the bottom of the ConfigDrawer. Every write
- * through /api/rooftop-config or /api/csm lands here (roi_config_audit_log), so a CSM can see who
- * changed what and when. */
+ * through /api/rooftop-config, /api/csm and every recipient change (/api/recipients*) lands here
+ * (roi_config_audit_log), so a CSM can see who changed what and when. */
 function ConfigHistory({ teamId }: { teamId?: string }) {
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<AuditEntry[]>([]);
@@ -2021,8 +1966,8 @@ function ConfigHistory({ teamId }: { teamId?: string }) {
   );
 }
 
-/* Per-recipient subscription matrix — collapsible "Notifications" grid: 7 types × Email/SMS.
- * Collapsed shows a summary (Email 7/7 · SMS 2/7). Effective value = explicit cell or default.
+/* Per-recipient subscription matrix — collapsible "Notifications" grid: every type × Email/SMS.
+ * Collapsed shows a summary (Email 8/8 · SMS 2/8). Effective value = explicit cell or default.
  * SMS column is shown only when the rooftop SMS master switch is on. */
 function RecipientSubscriptions({ recip, smsMaster, disabled, onSetSub }: {
   recip: TeamRecipient;
@@ -2313,19 +2258,19 @@ function Stat({
   );
 }
 
-/* Compact per-transactional-type KPI card — sent rate (sent ÷ eligible) stacked over
-   open rate (opened ÷ sent). Used in the KPI strip when the Transactional view is active.
-   The Sent and Opened halves are each buttons that open a per-day analytics modal. */
+/* Compact per-transactional-type KPI card: sent rate (sent ÷ attempted) over open rate (opened ÷
+   sent), every number an email in roi_event_emails in the strip's window (C6). Held (dry run) and
+   in-flight emails are shown, never counted in the rate. Sent / Opened open the per-day modal. */
 function TxTypeStat({ s, onSent, onOpened }: {
-  s: { label: string; eligible: number; sent: number; opened: number; sentRate: number; openRate: number };
+  s: { label: string; sent: number; notSent: number; held: number; inFlight: number; attempted: number; sentRatePct: number; opened: number; openRatePct: number };
   onSent?: () => void;
   onOpened?: () => void;
 }) {
-  const sentTone = s.eligible === 0 ? "text-text-muted" : s.sentRate >= 50 ? "text-positive" : "text-negative";
-  const openTone = s.sent === 0 ? "text-text-muted" : s.openRate >= 40 ? "text-positive" : s.opened > 0 ? "text-text-primary" : "text-text-muted";
+  const sentTone = s.attempted === 0 ? "text-text-muted" : s.sentRatePct >= 50 ? "text-positive" : "text-negative";
+  const openTone = s.sent === 0 ? "text-text-muted" : s.openRatePct >= 40 ? "text-positive" : s.opened > 0 ? "text-text-primary" : "text-text-muted";
   return (
     <div
-      title={`${s.label}: ${s.sent} of ${s.eligible} eligible sent · ${s.opened} of ${s.sent} sent opened`}
+      title={`${s.label}: ${s.sent} sent, ${s.notSent} not sent or failed, ${s.held} held in dry run, ${s.inFlight} in flight · ${s.opened} of ${s.sent} sent opened`}
       className="rounded-lg border border-border-subtle bg-surface-card px-3 py-1.5 min-w-[128px]"
     >
       <div className="text-[9px] font-semibold uppercase tracking-widest text-text-secondary">{s.label}</div>
@@ -2337,9 +2282,9 @@ function TxTypeStat({ s, onSent, onOpened }: {
       >
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Sent ›</span>
-          <span className={`text-[15px] font-extrabold tabular leading-none ${sentTone}`}>{s.sentRate}%</span>
+          <span className={`text-[15px] font-extrabold tabular leading-none ${sentTone}`}>{s.sentRatePct}%</span>
         </div>
-        <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.sent} of {s.eligible} eligible</div>
+        <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.sent} of {s.attempted} attempted{s.held ? ` · ${s.held} held` : ""}</div>
       </button>
       <button
         type="button"
@@ -2349,7 +2294,7 @@ function TxTypeStat({ s, onSent, onOpened }: {
       >
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Opened ›</span>
-          <span className={`text-[15px] font-extrabold tabular leading-none ${openTone}`}>{s.openRate}%</span>
+          <span className={`text-[15px] font-extrabold tabular leading-none ${openTone}`}>{s.openRatePct}%</span>
         </div>
         <div className="text-[9px] font-medium tabular text-text-muted text-right leading-tight">{s.opened} of {s.sent} sent</div>
       </button>
@@ -2424,44 +2369,45 @@ function MissingRooftopButton() {
 }
 
 function DryRunToggle({ rooftop, onChanged }: { rooftop: RooftopRow; onChanged?: () => void }) {
-  const [on, setOn] = useState<boolean>(rooftop.dryRun !== false); // on = dry-run held (Live | Paused | Not started)
+  const [on, setOn] = useState<boolean>(rooftop.dryRun === true); // on = dry-run held (Paused | Not started)
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [err, setErr] = useState("");
+  // Who the cron would actually email once live, from the server (verified, deliverable, switched on,
+  // subscribed to the daily digest). The modal used to list everyone switched on (A4 F16).
+  const [audience, setAudience] = useState<EligibleRecipients | null | undefined>(undefined);
+  useEffect(() => { setOn(rooftop.dryRun === true); }, [rooftop.dryRun]);
 
-  // "Has this rooftop ever sent a real digest?" — distinguishes Paused from Not started while held.
-  // A currently-live rooftop counts as having gone live; only an explicit "not_started" baseline is never-sent.
+  // "Has this rooftop ever sent a real digest?" (lifetime, from the server) — Paused vs Not started.
   const everSent = rooftop.liveStatus !== "not_started";
-  // Current status derives from the live `on` flag (held?) + that baseline, so the badge updates on toggle.
   const status: NonNullable<RooftopRow["liveStatus"]> = !on ? "live" : everSent ? "paused" : "not_started";
   const STATUS = {
-    live:        { label: "Live",        dot: "bg-positive", cls: "bg-positive/10 text-positive",  tip: "Live — the scheduled cron sends real emails. Click to hold." },
-    paused:      { label: "Paused",      dot: "bg-warning",  cls: "bg-warning-soft text-warning",   tip: "Paused — was live, emails are held. Click to resume sending." },
-    not_started: { label: "Not started", dot: "bg-text-muted", cls: "bg-surface-subtle text-text-muted", tip: "Not started — never sent a real digest. Click to go live." },
+    live:        { label: "Live",        dot: "bg-positive", cls: "bg-positive/10 text-positive",  tip: "Live: the scheduled cron emails this department. Click to hold it in dry run." },
+    paused:      { label: "Paused",      dot: "bg-warning",  cls: "bg-warning-soft text-warning",   tip: "Paused: this department has sent before and is now held in dry run. Click to resume sending." },
+    not_started: { label: "Not started", dot: "bg-text-muted", cls: "bg-surface-subtle text-text-muted", tip: "Not started: held in dry run and has never sent a real digest. Click to go live." },
   }[status];
 
   const persist = async (nextDry: boolean): Promise<boolean> => {
-    setBusy(true);
+    setBusy(true); setErr("");
     if (rooftop.team_id && rooftop.department) {
       const r = await updateRooftopDryRun(rooftop.team_id, rooftop.department, nextDry);
-      if (!r.ok) { setBusy(false); return false; }
+      if (!r.ok) { setBusy(false); setErr(r.error || "Save failed"); return false; }
     }
     setOn(nextDry); setBusy(false);
-    // Optimistic local update done — now reload the parent so liveCount / "Send live (N)" /
-    // each row's liveStatus reflect the new dry_run instead of going stale until manual Refresh.
     onChanged?.();
     return true;
   };
 
   const onClick = () => {
     if (busy || !rooftop.team_id || !rooftop.department) return;
-    if (on) setConfirm(true);     // Paused/Not started → LIVE: show disclaimer first
+    if (on) {
+      setConfirm(true); setErr(""); setAudience(undefined);
+      void loadEligibleRecipients(rooftop.team_id, rooftop.department, "daily").then(setAudience);
+    }
     else void persist(true);      // Live → hold (pause): safe, no prompt
   };
 
-  // who will start receiving once live = enabled recipients for this dept
-  const recipients = (rooftop.departments?.find((d) => d.kind === rooftop.department)?.recipients
-    ?? rooftop.departments?.[0]?.recipients ?? []).map((r) => r.email).filter(Boolean);
-  const pad = (n?: number) => String(n ?? (n === 0 ? 0 : 7)).padStart(2, "0");
+  const pad = (n?: number) => String(n ?? 7).padStart(2, "0");
   const sendTime = `${pad(rooftop.sendHour)}:${String(rooftop.sendMinute ?? 0).padStart(2, "0")}`;
   const tz = rooftop.timezone || "America/New_York";
 
@@ -2471,7 +2417,7 @@ function DryRunToggle({ rooftop, onChanged }: { rooftop: RooftopRow; onChanged?:
         type="button"
         onClick={onClick}
         disabled={busy}
-        title={STATUS.tip}
+        title={err || STATUS.tip}
         className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold ${STATUS.cls} ${busy ? "opacity-50" : ""}`}
       >
         <span className={`h-1.5 w-1.5 rounded-full ${STATUS.dot}`} />
@@ -2480,24 +2426,42 @@ function DryRunToggle({ rooftop, onChanged }: { rooftop: RooftopRow; onChanged?:
       {confirm ? (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" onClick={() => setConfirm(false)}>
           <div className="w-full max-w-md rounded-xl border border-border-subtle bg-surface-card p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-bold text-text-primary">Enable live emails for {rooftop.name}?</h3>
+            <h3 className="text-[15px] font-bold text-text-primary">Turn on live emails for {rooftop.name}?</h3>
             <p className="mt-1 text-[12px] text-text-secondary">
-              The <b>{rooftop.department}</b> digest will start sending on the next scheduled run at <b>{sendTime} {tz}</b>.
+              The <b>{rooftop.department}</b> digest goes to the dealer on the next scheduled run at <b>{sendTime} {tz}</b>.
             </p>
+            {rooftop.unconfigured ? (
+              <p className="mt-2 rounded-md border border-warning/40 bg-warning-soft px-3 py-2 text-[12px] text-warning">This rooftop has no email configuration yet, so it can't go live. Ask product to set it up first.</p>
+            ) : null}
             <div className="mt-3 rounded-md border border-border-subtle bg-surface-background p-3">
-              <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Will start receiving ({recipients.length})</div>
-              {recipients.length ? (
+              <div className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+                Will start receiving{audience ? ` (${audience.eligible.length})` : ""}
+              </div>
+              {audience === undefined ? (
+                <p className="mt-1 text-[12px] text-text-muted">Checking who is eligible…</p>
+              ) : audience === null ? (
+                <p className="mt-1 text-[12px] text-negative">Couldn't load the recipient list.</p>
+              ) : audience.eligible.length ? (
                 <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto">
-                  {recipients.map((e) => <li key={e} className="text-[12px] text-text-primary">{e}</li>)}
+                  {audience.eligible.map((e) => <li key={e.email} className="text-[12px] text-text-primary">{e.email}</li>)}
                 </ul>
               ) : (
-                <p className="mt-1 text-[12px] text-warning">No enabled recipients — nobody will receive until you enable some.</p>
+                <p className="mt-1 text-[12px] text-warning">Nobody is eligible yet, so nobody will receive it. Verify a recipient and switch them on first.</p>
               )}
+              {audience && audience.held.length ? (
+                <>
+                  <div className="mt-2 text-[10px] font-semibold uppercase tracking-widest text-text-muted">On the list but won't receive ({audience.held.length})</div>
+                  <ul className="mt-1 max-h-32 space-y-0.5 overflow-y-auto">
+                    {audience.held.map((h) => <li key={h.email} className="text-[11px] text-text-secondary">{h.email} <span className="text-text-muted">· {h.why}</span></li>)}
+                  </ul>
+                </>
+              ) : null}
             </div>
+            {err ? <p className="mt-2 text-[12px] text-negative">{err}</p> : null}
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" onClick={() => setConfirm(false)} className="rounded-md border border-border-subtle px-3 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-subtle">Cancel</button>
-              <button type="button" disabled={busy} onClick={async () => { const ok = await persist(false); if (ok) setConfirm(false); }} className="rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">
-                {busy ? "Saving…" : "Save · go live"}
+              <button type="button" disabled={busy || rooftop.unconfigured} onClick={async () => { const ok = await persist(false); if (ok) setConfirm(false); }} className="rounded-md bg-brand-primary px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-primary-hover disabled:opacity-60">
+                {busy ? "Saving…" : "Go live"}
               </button>
             </div>
           </div>
@@ -2526,81 +2490,26 @@ function SendStatusCell({
       </span>
     );
   }
-  switch (cell.status) {
-    case "sent":
-      return (
-        <button
-          type="button"
-          onClick={onOpen}
-          title="Click to view what was sent + recipients"
-          className="inline-flex w-full items-center justify-center rounded-md bg-positive/10 px-2 py-1 text-[11px] font-semibold text-positive hover:bg-positive/20"
-        >
-          Sent
-        </button>
-      );
-    case "suppressed":
-      return (
-        <button
-          type="button"
-          onClick={onOpen}
-          title={cell.reason ? `Suppressed · ${NOT_SENT_REASON_LABEL[cell.reason]} · click to view + send` : "Suppressed · click to view + send"}
-          className="inline-flex w-full items-center justify-center rounded-md bg-warning-soft px-2 py-1 text-[11px] font-semibold text-warning hover:bg-warning-soft/80"
-        >
-          Suppr.
-        </button>
-      );
-    case "not_sent": {
-      const reason = cell.reason ?? "scheduler_skipped";
-      const cta = NOT_SENT_REASON_CTA[reason];
-      const styles =
-        cta.tone === "warn"
-          ? "border-warning/40 bg-warning-soft text-warning hover:bg-warning-soft/80"
-          : "border-negative/40 bg-negative-soft text-negative hover:bg-negative-soft/80";
-      return (
-        <button
-          type="button"
-          onClick={onOpen}
-          className={`inline-flex w-full items-center justify-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold ${styles}`}
-          title={`Not sent · ${NOT_SENT_REASON_LABEL[reason]}`}
-        >
-          {cta.label}
-        </button>
-      );
-    }
-    case "not_subscribed":
-      // Empty cell — no digest generated. Clicking generates a live preview in the
-      // drawer, then offers Send-to-customer or Ignore.
-      return (
-        <button
-          type="button"
-          onClick={onOpen}
-          title={`No ${cell.cadence} digest yet · click to generate a preview, then send or ignore`}
-          className="group inline-flex w-full items-center justify-center rounded-md border border-dashed border-border-subtle bg-surface-subtle px-2 py-1 text-[11px] text-text-muted hover:border-brand-primary hover:bg-brand-primary/10 hover:text-brand-primary"
-        >
-          <span className="group-hover:hidden">—</span>
-          <span className="hidden group-hover:inline">✦ Generate</span>
-        </button>
-      );
-    case "scheduled":
-      return (
-        <span className="inline-flex w-full items-center justify-center rounded-md bg-info-soft px-2 py-1 text-[11px] font-semibold text-info">
-          Scheduled
-        </span>
-      );
-    case "error":
-      // Send genuinely FAILED (mail gateway / render / unexpected throw). Loud red so it's not mistaken
-      // for a deliberate not-sent hold; click opens the drawer with the failure reason + a retry.
-      return (
-        <button
-          type="button"
-          onClick={onOpen}
-          title={`Send failed${cell.reason ? ` · ${NOT_SENT_REASON_LABEL[cell.reason]}` : ""} · click to view + retry`}
-          className="inline-flex w-full items-center justify-center gap-1 rounded-md border border-negative/50 bg-negative text-white px-2 py-1 text-[11px] font-semibold hover:opacity-90"
-        >
-          ⚠ Failed
-        </button>
-      );
-  }
+  // Every state has its own label (C3); a grid CTA only where sending is the right next step.
+  const state = cell.state ?? "no_run";
+  const meta = STATE_META[state];
+  const tip = [meta.label, cell.detail, meta.help, meta.cta ? `Next step: ${meta.cta}` : "", "Click to open."].filter(Boolean).join(" · ");
+  const base = "inline-flex w-full items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold";
+  const toneCls: Record<string, string> = {
+    positive: "bg-positive/10 text-positive hover:bg-positive/20",
+    negative: state === "failed" || state === "missed" || state === "missed_send_day"
+      ? "border border-negative/50 bg-negative text-white hover:opacity-90"
+      : "border border-negative/40 bg-negative-soft text-negative hover:bg-negative-soft/80",
+    warn: "border border-warning/40 bg-warning-soft text-warning hover:bg-warning-soft/80",
+    info: "bg-info-soft text-info",
+    muted: "border border-dashed border-border-subtle bg-surface-subtle text-text-muted hover:border-brand-primary hover:text-brand-primary",
+  };
+  const text = state === "no_run" ? "—" : meta.label;
+  return (
+    <button type="button" onClick={onOpen} title={tip} className={`${base} ${toneCls[meta.tone]}`}>
+      <span className="truncate">{text}</span>
+    </button>
+  );
 }
 
 /* ============================================================
@@ -2793,10 +2702,10 @@ function AnalyticsModal({ metric, trend, cadence, teamIds, department, onClose }
   );
 }
 
-/** Per-day analytics modal for a transactional KPI (a type's Sent or Opened). Loads every
- * produced email of that type across the filtered rooftops, buckets them by day, and shows a
- * clickable trend — click any day to drill into that day's individual emails. Sourced from
- * roi_event_emails (the Sent/Opened KPI numerator), so counts reconcile with the KPI chips. */
+/** Per-day analytics modal for a transactional KPI (a type's Sent or Opened), across the filtered
+ * rooftops. Day counts are exact server counts for the last 30 days (America/New_York calendar
+ * days); clicking a day loads that day's emails. The old version read one capped page of 1,000
+ * rows, about two days of post-conversation history (A4 F15). */
 function TxAnalyticsModal({ type, label, metric, teamIds, department, direction, rooftopName, onClose }: {
   type: string;
   label: string;
@@ -2807,55 +2716,42 @@ function TxAnalyticsModal({ type, label, metric, teamIds, department, direction,
   rooftopName: (teamId: string, dept: string) => string;
   onClose: () => void;
 }) {
-  const [rows, setRows] = useState<EventEmailDayRow[] | null>(null);
-  const [selKey, setSelKey] = useState<string | null>(null); // selected day (local YYYY-MM-DD)
-  // Lifetime count for the current metric — all-time (head-only), independent of the loaded window.
+  const TZ = "America/New_York";
+  const [days, setDays] = useState<{ day: string; count: number }[] | null | undefined>(undefined);
+  const [selKey, setSelKey] = useState<string | null>(null);
+  const [dayRows, setDayRows] = useState<{ rows: EventEmailDayRow[]; total: number } | null | undefined>(undefined);
+  // Lifetime count for the current metric — all-time (head-only), independent of the window.
   const [lifetime, setLifetime] = useState<number | null>(null);
   useEffect(() => {
     let alive = true;
-    setRows(null); setSelKey(null); setLifetime(null);
-    void loadEventEmailsByType(teamIds, type, { department }).then((r) => { if (alive) setRows(r); });
+    setDays(undefined); setSelKey(null); setLifetime(null);
+    void loadEventDayCountsByType(teamIds, type, { department, metric, days: 30, tz: TZ }).then((d) => { if (alive) setDays(d); });
     void countEventByMetric(teamIds, type, metric, { department }).then((n) => { if (alive) setLifetime(n); });
     return () => { alive = false; };
   }, [teamIds, type, department, metric]);
+  useEffect(() => {
+    if (!days || selKey !== null) return;
+    const last = [...days].reverse().find((d) => d.count > 0) ?? days[days.length - 1];
+    if (last) setSelKey(last.day);
+  }, [days, selKey]);
+  useEffect(() => {
+    if (!selKey) return;
+    let alive = true;
+    setDayRows(undefined);
+    void loadEventEmailsForDay(teamIds, type, selKey, { department, metric, tz: TZ }).then((r) => { if (alive) setDayRows(r); });
+    return () => { alive = false; };
+  }, [selKey, teamIds, type, department, metric]);
 
   const metricLabel = metric === "opened" ? "Opened" : "Sent";
   const rowTime = (r: EventEmailDayRow) => r.sent_at || r.created_at;
-  const isSent = (r: EventEmailDayRow) => r.status === "sent" || !!r.sent_at;
   const isOpened = (r: EventEmailDayRow) => !!r.opened_at || (r.open_count ?? 0) > 0;
-  const dayKey = (iso: string) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
-  const dayShort = (key: string) => { const [y, m, d] = key.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
-  const dayLong = (key: string) => {
-    const [y, m, d] = key.split("-").map(Number);
-    const dt = new Date(y, m - 1, d);
-    const now = new Date();
-    const diff = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() - dt.getTime()) / 86400000);
-    if (diff === 0) return "Today";
-    if (diff === 1) return "Yesterday";
-    return dt.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: dt.getFullYear() === now.getFullYear() ? undefined : "numeric" });
-  };
-  const fmtTime = (iso: string) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); } catch { return iso; } };
+  const dayShort = (key: string) => new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  const dayLong = (key: string) => new Date(`${key}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+  const fmtTime = (iso: string) => { try { return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: TZ }); } catch { return iso; } };
   const recipientsOf = (r: EventEmailDayRow) => (r.recipients ?? []).map((x) => x.email).join(", ");
-
-  // Only rows that qualify for the chosen metric (Sent → produced+sent; Opened → opened).
-  const relevant = useMemo(() => (rows ?? []).filter((r) => (metric === "opened" ? isOpened(r) : isSent(r))), [rows, metric]);
-  // Bucket by local day, oldest → newest for the chart.
-  const days = useMemo(() => {
-    const m = new Map<string, EventEmailDayRow[]>();
-    for (const r of relevant) {
-      const k = dayKey(rowTime(r));
-      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
-    }
-    return Array.from(m.entries()).map(([key, rs]) => ({ key, rows: rs })).sort((a, b) => (a.key < b.key ? -1 : 1));
-  }, [relevant]);
-  useEffect(() => { if (days.length && selKey === null) setSelKey(days[days.length - 1].key); }, [days, selKey]);
-
-  const maxVal = Math.max(1, ...days.map((d) => d.rows.length));
-  const sel = days.find((d) => d.key === selKey) ?? null;
-  // Keep only the last ~30 buckets so the bar chart stays legible.
-  const shown = days.slice(-30);
-  const total = relevant.length;
-  const scopeNote = `${department ? (department === "sales" ? "Sales" : "Service") : "All depts"}${direction ? ` · ${direction === "inbound" ? "Inbound" : "Outbound"}` : ""} · ${teamIds.length} rooftop${teamIds.length === 1 ? "" : "s"}`;
+  const total = (days ?? []).reduce((n, d) => n + d.count, 0);
+  const maxVal = Math.max(1, ...(days ?? []).map((d) => d.count));
+  const scopeNote = `${department ? (department === "sales" ? "Sales" : "Service") : "All departments"}${direction ? " · the ledger has no inbound/outbound split, so both are shown" : ""} · ${teamIds.length} rooftop${teamIds.length === 1 ? "" : "s"}`;
 
   return createPortal(
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
@@ -2868,53 +2764,56 @@ function TxAnalyticsModal({ type, label, metric, teamIds, department, direction,
                 Lifetime {metricLabel.toLowerCase()} · {lifetime === null ? "…" : lifetime.toLocaleString()}
               </span>
             </div>
-            <div className="text-[11px] text-text-muted">Per day · {scopeNote} · {total} {metricLabel.toLowerCase()} in window</div>
+            <div className="text-[11px] text-text-muted">Per day, last 30 days (Eastern) · {scopeNote} · {total.toLocaleString()} {metricLabel.toLowerCase()}</div>
           </div>
           <button type="button" onClick={onClose} className="text-text-muted hover:text-text-primary">✕</button>
         </div>
         <div className="overflow-auto px-5 py-4">
-          {rows === null ? (
+          {days === undefined ? (
             <div className="flex items-center justify-center gap-2 py-16 text-[13px] text-text-muted">
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-border-subtle border-t-brand-primary" /> Loading {metricLabel.toLowerCase()} history…
             </div>
-          ) : days.length === 0 ? (
-            <div className="py-16 text-center text-[13px] text-text-muted">No {label.toLowerCase()} emails {metric === "opened" ? "opened" : "sent"} in this window.</div>
+          ) : days === null ? (
+            <div className="py-16 text-center text-[13px] text-negative">Couldn't load the history.</div>
+          ) : total === 0 ? (
+            <div className="py-16 text-center text-[13px] text-text-muted">No {label.toLowerCase()} emails {metric === "opened" ? "opened" : "sent"} in the last 30 days.</div>
           ) : (
             <>
-              {/* Trend bars — click a day to drill in */}
-              <div className="flex items-end gap-2" style={{ height: 160 }}>
-                {shown.map((d) => {
-                  const v = d.rows.length;
-                  const h = Math.round((v / maxVal) * 130);
-                  const active = d.key === selKey;
+              <div className="flex items-end gap-1" style={{ height: 160 }}>
+                {days.map((d) => {
+                  const h = Math.round((d.count / maxVal) * 130);
+                  const active = d.day === selKey;
                   return (
                     <button
                       type="button"
-                      key={d.key}
-                      onClick={() => setSelKey(d.key)}
+                      key={d.day}
+                      onClick={() => setSelKey(d.day)}
                       className="flex flex-1 flex-col items-center justify-end gap-1 rounded-md px-0.5 pb-0.5 hover:bg-surface-subtle"
-                      title={`${dayLong(d.key)}: ${v} ${metricLabel.toLowerCase()} · click to drill in`}
+                      title={`${dayLong(d.day)}: ${d.count} ${metricLabel.toLowerCase()} · click to see them`}
                     >
-                      <div className={`text-[10px] font-bold tabular ${active ? "text-brand-primary" : "text-text-secondary"}`}>{v}</div>
+                      <div className={`text-[9px] font-bold tabular ${active ? "text-brand-primary" : "text-text-secondary"}`}>{d.count || ""}</div>
                       <div className={`w-full rounded-t ${active ? "bg-brand-primary" : "bg-brand-primary/40"}`} style={{ height: Math.max(2, h) }} />
-                      <div className={`mt-0.5 w-full truncate text-center text-[9px] ${active ? "font-semibold text-brand-primary" : "text-text-muted"}`}>{dayShort(d.key)}</div>
+                      <div className={`mt-0.5 w-full truncate text-center text-[8px] ${active ? "font-semibold text-brand-primary" : "text-text-muted"}`}>{dayShort(d.day)}</div>
                     </button>
                   );
                 })}
               </div>
-              {/* Drill-down for the selected day */}
               <div className="mt-5 border-t border-border-subtle pt-3">
                 <div className="mb-2 flex items-baseline justify-between">
                   <div className="text-[11px] font-semibold uppercase tracking-widest text-text-muted">
-                    {sel ? `${metricLabel} · ${dayLong(sel.key)}` : metricLabel}
+                    {selKey ? `${metricLabel} · ${dayLong(selKey)}` : metricLabel}
                   </div>
-                  {sel ? <div className="text-[11px] font-semibold tabular text-text-secondary">{sel.rows.length} email{sel.rows.length === 1 ? "" : "s"}</div> : null}
+                  {dayRows ? <div className="text-[11px] font-semibold tabular text-text-secondary">{dayRows.total} email{dayRows.total === 1 ? "" : "s"}{dayRows.total > dayRows.rows.length ? ` · showing ${dayRows.rows.length}` : ""}</div> : null}
                 </div>
-                {!sel || sel.rows.length === 0 ? (
+                {dayRows === undefined ? (
+                  <div className="text-[12px] text-text-muted">Loading…</div>
+                ) : dayRows === null ? (
+                  <div className="text-[12px] text-negative">Couldn't load this day's emails.</div>
+                ) : dayRows.rows.length === 0 ? (
                   <div className="text-[12px] text-text-muted">None.</div>
                 ) : (
                   <ul className="max-h-[300px] space-y-0.5 overflow-auto">
-                    {sel.rows.map((r) => (
+                    {dayRows.rows.map((r) => (
                       <li key={r.id || r.event_key} className="flex items-center justify-between gap-3 rounded-md border-b border-border-subtle px-1 py-2">
                         <div className="min-w-0">
                           <div className="truncate text-[12px] font-medium text-text-primary">

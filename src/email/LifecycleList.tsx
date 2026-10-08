@@ -219,7 +219,11 @@ export function LifecycleList({ rooftops, onConfigure, onStopEmails, onChanged }
                 </td>
                 <td className="border-b border-border-subtle px-4 py-2.5 text-right">
                   <div className="flex items-center justify-end gap-1.5">
-                    {r.lifecycleStatus === "churn" && onStopEmails ? (
+                    {/* A removed rooftop stays listed here (C20): it used to vanish from every tab
+                        and from search once its departments were switched off. */}
+                    {r.removedFromEmailer ? (
+                      <span className="text-[11px] font-semibold text-text-muted" title="Every department is switched off in the emailer. Nothing is sent to this rooftop.">Removed from emailer</span>
+                    ) : r.lifecycleStatus === "churn" && onStopEmails ? (
                       <StopEmailerButton rooftop={r} onStopEmails={onStopEmails} />
                     ) : null}
                     <StageOverrideButton rooftop={r} onChanged={onChanged} />
