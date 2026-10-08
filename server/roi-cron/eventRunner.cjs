@@ -434,18 +434,27 @@ const ACTION_ITEMS_MAX_PAGES = 10;
 // scope=recent/open/overdue caller goes through) rather than at each call site, so a new caller
 // can't forget to apply it. Extend this set later without another design pass.
 // sales/service_left_voicemail: user request 2026-07-21 — "left voicemail (low)" alert lines are noise.
-const NON_ACTIONABLE_INTENTS = new Set(["sales_lost_lead", "sales_left_voicemail", "service_left_voicemail"]);
+// The set itself lives in leadCaptureCH so the tracker's eligible counts (eventPreviewCH) share it.
+const NON_ACTIONABLE_INTENTS = leadCaptureCH.NON_ACTIONABLE_INTENTS;
 const isActionable = (it) => !NON_ACTIONABLE_INTENTS.has(String(it && it.intent || "").trim().toLowerCase());
+// `excludeIntents` asks reporting-vini to drop these BEFORE its per-lead collapse (so a newer voicemail
+// item can no longer hide a lead's older actionable one, A3-09); ignored by an older feed, which is why
+// the client-side filter stays. `uncappedTotal`: the newer feed's `total` on open/overdue is the full
+// lead count, not the page length — recognised when it exceeds the rows actually returned.
+const EXCLUDE_INTENTS_QS = `&excludeIntents=${encodeURIComponent([...NON_ACTIONABLE_INTENTS].join(","))}`;
 async function fetchAllActionItems(qs) {
   let all = [];
+  let uncappedTotal = null;
   for (let page = 0; page < ACTION_ITEMS_MAX_PAGES; page++) {
-    const j = await apiJson(`/api/action-items?${qs}&limit=${ACTION_ITEMS_PAGE_LIMIT}&offset=${page * ACTION_ITEMS_PAGE_LIMIT}`);
-    const items = (j.actionItems || []).filter(isActionable);
+    const j = await apiJson(`/api/action-items?${qs}${EXCLUDE_INTENTS_QS}&limit=${ACTION_ITEMS_PAGE_LIMIT}&offset=${page * ACTION_ITEMS_PAGE_LIMIT}`);
+    const raw = j.actionItems || [];
+    if (page === 0 && Number(j.total) > raw.length) uncappedTotal = Number(j.total);
+    const items = raw.filter(isActionable);
     all = all.concat(items);
     if (j.degraded) return { actionItems: all, total: j.total, degraded: true };
-    if (!j.hasMore || (j.actionItems || []).length < ACTION_ITEMS_PAGE_LIMIT) return { actionItems: all, total: all.length };
+    if (!j.hasMore || raw.length < ACTION_ITEMS_PAGE_LIMIT) return { actionItems: all, total: all.length, uncappedTotal };
   }
-  return { actionItems: all, total: all.length, capped: true };
+  return { actionItems: all, total: all.length, uncappedTotal, capped: true };
 }
 
 // Fetch + shape the ROOFTOP-WIDE overdue digest payload (one email per team·dept·slot, not per
@@ -464,6 +473,8 @@ async function overdueDigestPayload(teamId, dept) {
     leadCaptureCH.countActionItemLeads(teamId, dept, NON_ACTIONABLE_INTENTS),
   ]);
   const open = counts ? { total: counts.open } : await fetchAllActionItems(`team_id=${teamId}&serviceType=${dept}&scope=open`);
+  // Without ClickHouse, reporting-vini's uncapped `total` (WS-D) is the next-best headline.
+  if (!counts && open.uncappedTotal != null) open.total = open.uncappedTotal;
   const overdue = ov.actionItems || [];
   // Oldest-due-first = most overdue, so the top-10 list always keeps the most urgent items visible.
   const topItems = overdue.slice().sort((a, b) => {
@@ -473,11 +484,11 @@ async function overdueDigestPayload(teamId, dept) {
   }).slice(0, 10);
   return {
     topItems,
-    totalOverdueCount: counts ? counts.overdue : overdue.length,
+    totalOverdueCount: counts ? counts.overdue : (ov.uncappedTotal != null ? ov.uncappedTotal : overdue.length),
     totalPendingAllLeads: open.total,
-    countSource: counts ? "clickhouse" : "feed",
-    // Only a short HEADLINE is worth flagging: with the ClickHouse count, a capped list is just a list.
-    capped: counts ? false : !!(ov.capped || open.capped),
+    countSource: counts ? "clickhouse" : ov.uncappedTotal != null ? "feed_total" : "feed",
+    // Only a short HEADLINE is worth flagging: with an uncapped count, a capped list is just a list.
+    capped: counts || (ov.uncappedTotal != null && (open.uncappedTotal != null || !open.capped)) ? false : !!(ov.capped || open.capped),
   };
 }
 
@@ -1094,7 +1105,9 @@ async function runPass(opts = {}) {
         // CALLS → instant. One email per call as soon as the poll sees it (channel=call, the default).
         const actionableOnly = (c.post_conversation_mode || "actionable") === "actionable";
         // Paged when the feed supports it; a full page from an older feed is counted as capped (A3-05).
-        const callFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&channel=call&minutes=${POLL_MINUTES}${actionableOnly ? "&actionableOnly=1" : ""}`, "conversations", 50);
+        // excludeSpam=1 (reporting-vini WS-D) drops spam calls BEFORE the page limit; the isSpamCall gate
+        // below stays for an older feed.
+        const callFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=${dept}&channel=call&minutes=${POLL_MINUTES}${actionableOnly ? "&actionableOnly=1" : ""}&excludeSpam=1`, "conversations", 50);
         if (callFeed.capped) out.feeds_capped.push(`${name} [${dept}] calls`);
         const j = { conversations: callFeed.rows };
         // Roll multiple same-day calls for ONE lead into a single email — a lead phoned three times
@@ -1232,9 +1245,12 @@ async function runPass(opts = {}) {
         if (runSmsNow) {
           smsDoneTeams.add(L.team_id);
           const sinceMin = Math.min(10_080, h * 60 + m + 1); // window back to local midnight
-          const smsFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=sms&minutes=${sinceMin}`, "conversations", 200);
-          if (smsFeed.capped) out.feeds_capped.push(`${name} sms`);
           const requiresReply = c.post_conversation_outbound_requires_reply !== false;
+          // repliedOnly=1 (reporting-vini WS-D): only threads with a real customer reply (not an opt-out
+          // keyword, not a staff text) count against the page — I 40 Autos' 410+ unreplied threads a day no
+          // longer push the replied ones off it. The client-side reply gate below stays for an older feed.
+          const smsFeed = await fetchFeedPages(`/api/conversations?team_id=${L.team_id}&serviceType=both&channel=sms&minutes=${sinceMin}${requiresReply ? "&repliedOnly=1" : ""}`, "conversations", 200);
+          if (smsFeed.capped) out.feeds_capped.push(`${name} sms`);
           const byLead = new Map(); // one lead's SMS threads for the day
           for (const cv of smsFeed.rows) {
             // No REAL customer reply → nothing to report (an all-AI outbound blast isn't a
