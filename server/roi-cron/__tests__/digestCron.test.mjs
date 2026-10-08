@@ -279,18 +279,19 @@ test("A18: a named period is built for THAT window, upserted on THAT row, and se
 });
 
 // ── A19 ───────────────────────────────────────────────────────────────────────────────────────────
-test("A19: one malformed timezone fails its own row; the pass carries on (daily and weekly)", async () => {
+// After integration with stab/events, resolveTz ignores a configured zone that isn't a valid US/Canada
+// zone (it warns and resolves from team settings), so a malformed value never reaches the runner at
+// all; the runner's own per-row guard stays as the second line. Either way the pass carries on.
+test("A19: one malformed timezone never stops the pass, and never fails the other rooftops (daily and weekly)", async () => {
   const { runner, db, log } = load({ teams: ["bad", "good"], cfgOf: { bad: { timezone: "America/New York" } }, cfg: { weekly_send_dow: TODAY_DOW } });
   installFetch(log);
   const out = await quiet(() => runner.runOnce());
-  assert.equal(out.errors, 1);
-  const bad = rowsOf(db, "daily").find((r) => r.team_id === "bad");
-  assert.equal(bad.status, "error");
-  assert.match(bad.reason_detail, /invalid timezone "America\/New York"/);
+  assert.equal(out.errors, 0);
+  assert.equal(rowsOf(db, "daily").find((r) => r.team_id === "bad").status, "suppressed", "the bad zone is ignored, not used");
   assert.equal(rowsOf(db, "daily").find((r) => r.team_id === "good").status, "suppressed");
   const wk = await quiet(() => runner.runCadence("weekly"));
-  assert.equal(wk.errors, 1);
-  assert.equal(wk.suppressed, 1);
+  assert.equal(wk.errors, 0);
+  assert.equal(wk.suppressed, 2);
 });
 
 // ── A20 ───────────────────────────────────────────────────────────────────────────────────────────
