@@ -3999,14 +3999,18 @@ app.get("/api/cron/roi-backfill", async (req, res) => {
 // ── Transactional email poll (Vercel Cron → this route, ~every 15 min) ──────
 // Sends the per-event emails (post-appointment / post-conversation / action-item / overdue)
 // for rooftops that enabled them in roi_rooftop_config. Dedup via roi_event_emails.
-app.get("/api/cron/roi-events", async (req, res) => {
+app.get(["/api/cron/roi-events", "/api/cron/roi-events/shard/:shard/:shards"], async (req, res) => {
   const secret = process.env.CRON_SECRET;
   if (secret && req.headers.authorization !== `Bearer ${secret}`) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
     const { runOnce } = require("./roi-cron/eventRunner.cjs");
-    const summary = await runOnce();
+    // vercel.json runs this as N shards (/api/cron/roi-events/shard/<i>/<N>), each with its own
+    // function timeout — one pass over every live rooftop no longer fits in 300s. In the PATH, not a
+    // query string, because Vercel documents path-segment cron routes and not query strings. The bare
+    // path still runs the whole fleet, as before.
+    const summary = await runOnce({ shard: req.params.shard ?? req.query.shard, shards: req.params.shards ?? req.query.shards });
     return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
   } catch (err) {
     console.error("GET /api/cron/roi-events error:", err?.message ?? err);

@@ -37,7 +37,7 @@ const { sendSms, SMS_DRY_RUN } = require("./sendSms.cjs");
 const { isSubscribed, pickTieredRecipients, isChurned } = require("./subscriptions.cjs");
 const { postBreakageAlert, postSystemicAlert } = require("./slackAlert.cjs");
 // Self-healing dealer-timezone lookup (live Spyne working-hours API) — see resolveTz.cjs for why.
-const { resolveTz, resolveWorkingHours } = require("./resolveTz.cjs");
+const { resolveTz, resolveWorkingHours, primeTeamDetails } = require("./resolveTz.cjs");
 // Lead-capture field enrichment (ClickHouse) for rooftops on post_conversation_template='lead_capture'.
 const leadCaptureCH = require("./leadCaptureCH.cjs");
 // Deliverability gate (shared with the digest runner) — an address that is malformed, mistyped or
@@ -72,6 +72,26 @@ function isUSActiveWindow(d = new Date()) {
 // margin, or events arriving in the gap are lost forever. The earlier `isUSBusinessHour() ? 4 : 20`
 // was a silent data-loss bug: a 4-min look-back under a 15-min cron dropped 11 min of events/cycle.
 const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 25);
+// ── Pass budget, sharding and resume (2026-10-08) ─────────────────────────────────────────────
+// The pass visits every live rooftop·department IN SEQUENCE inside one 300s Vercel function. At
+// ~400 targets it stopped finishing: every pass was killed at 300s around target ~300, so the same
+// tail (the most recently written roi_live_departments rows, i.e. the newest go-lives) got no
+// transactional email at all, and because the kill lands before the end-of-pass alerts, nothing
+// said so. Stillwell Ford went silent the moment it was taken live.
+//   • SHARDS: vercel.json runs the cron as N shards (/api/cron/roi-events/shard/<i>/<N>), each with its own 300s.
+//     A team's departments always land in the same shard, so the once-per-team SMS/chat polls hold.
+//   • BUDGET: stop starting new targets before the platform kills the function, and say so.
+//   • RESUME: the next pass on this instance starts where the last one stopped, so a pass that runs
+//     out of time delays the same rooftops once instead of starving them forever. Best-effort
+//     (instance memory) — the budget alert is the guarantee, this is the mitigation.
+const PASS_BUDGET_MS = Number(process.env.EVENT_PASS_BUDGET_MS || 230000);
+const _resumeAt = new Map(); // `${shard}/${shards}` → target key to start the next pass from
+const targetKey = (L) => `${L.team_id}:${L.department}`;
+function shardOf(teamId, shards) {
+  let h = 0;
+  for (const ch of String(teamId)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % shards;
+}
 // meetings.meta.source values that mean "this appointment row is not one Vini booked" — no
 // post_appointment email, on either channel. Kept as a set so a sibling value can be muted with a
 // one-word change; 'callback' is deliberately NOT in here (it hasn't been asked for or verified).
@@ -411,8 +431,12 @@ async function claimSms(base, eventKey) {
 }
 const finishSms = (id, patch) => sb.from("roi_event_sms").update(patch).eq("id", id);
 
-async function runOnce() {
-  console.log(`\n── ROI EVENT pass @ ${new Date().toISOString()} · DRY_RUN=${DRY_RUN} · window=${POLL_MINUTES}m ──`);
+async function runOnce(opts = {}) {
+  const passStart = Date.now();
+  const shards = Math.max(1, Math.floor(Number(opts.shards)) || 1);
+  const shard = Math.min(shards - 1, Math.max(0, Math.floor(Number(opts.shard)) || 0));
+  const shardLabel = shards > 1 ? ` · shard ${shard + 1}/${shards}` : "";
+  console.log(`\n── ROI EVENT pass @ ${new Date().toISOString()} · DRY_RUN=${DRY_RUN} · window=${POLL_MINUTES}m${shardLabel} ──`);
   _feedDegraded = false;
   _meetingsFeedDegraded = false;
   _meetingsFeedDegradedDetail = "";
@@ -441,9 +465,25 @@ async function runOnce() {
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const chatDoneTeams = new Set(); // website-chat poll also runs once per team (chat has no dept either)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  const targets = (liveRes.data ?? []).filter((L) => !ONLY.length || ONLY.includes(L.team_id));
+  // This shard only, rotated to resume where this shard's previous pass stopped. The order WITHIN is
+  // deliberately left as the select returns it: the once-per-team SMS summary (no department of its
+  // own, unlike chat) goes to whichever of a team's departments runs first, so re-sorting would
+  // silently move 75 teams' SMS summaries from their service team to their sales team. That routing
+  // should follow the lead's department, as chat does — a separate change, not a side effect of this.
+  const shardKey = `${shard}/${shards}`;
+  const ordered = (liveRes.data ?? [])
+    .filter((L) => !ONLY.length || ONLY.includes(L.team_id))
+    .filter((L) => shards === 1 || shardOf(L.team_id, shards) === shard);
+  const resumeIdx = Math.max(0, ordered.findIndex((L) => targetKey(L) === _resumeAt.get(shardKey)));
+  const targets = ordered.slice(resumeIdx).concat(ordered.slice(0, resumeIdx));
+  // Timezone + working hours for every rooftop missing them in config, in ONE read, before the loop.
+  await primeTeamDetails(targets.filter((L) => { const c = cfgOf.get(L.team_id) || {}; return !c.timezone || !c.working_hours; }).map((L) => L.team_id));
+  let unreached = [];
+  let visited = 0;
 
   for (const L of targets) {
+    if (Date.now() - passStart > PASS_BUDGET_MS) { unreached = targets.slice(visited); break; }
+    visited++;
     const c = cfgOf.get(L.team_id) || {};
     const name = c.rooftop_name || c.team_name || "";
     // dealer-local zone for windows + displayed times — configured value, else a live self-heal
@@ -522,7 +562,11 @@ async function runOnce() {
         // still trigger an email. scope=recent + minutes=25 means: fetch meeting records where createdAt
         // is within the last 25 minutes, regardless of when the meeting is scheduled.
         const j = await apiJson(`/api/meetings?scope=recent&team_id=${L.team_id}&enterprise_id=${encodeURIComponent(c.enterprise_id || "")}&serviceType=${dept}&minutes=${POLL_MINUTES}${SPYNE_TOKEN ? `&auth_key=${encodeURIComponent(SPYNE_TOKEN)}` : ""}`);
-        const mtd = await apptMTD(L.team_id, dept);
+        // The MTD count only appears INSIDE an appointment email, so it's fetched the first time one is
+        // actually built. It's /api/reports — never CDN-cached, 2.6-18s of server time — and it used
+        // to run for every rooftop on every pass whether or not anything was booked: ~195 calls a pass,
+        // the bulk of why the pass overran 300s (2026-10-08).
+        let mtd = null;
         const candidates = (j.meetings || []).slice(0, 50);
         // meta.source per meeting — the feed doesn't carry it, so it's resolved from ClickHouse.
         // See NON_VINI_META_SOURCES for what it's for. Best-effort: no creds / lookup failure →
@@ -556,6 +600,7 @@ async function runOnce() {
           }
           const byVini = m.source === "spyne";
           const svc = svcReasons.get(String(m.leadId || "")) || null;
+          if (mtd === null) mtd = await apptMTD(L.team_id, dept);
           const apptData = {
             customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
             type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
@@ -1193,6 +1238,22 @@ async function runOnce() {
         }
       }
     }
+  }
+  out.targets = targets.length;
+  out.unreached = unreached.length;
+  out.elapsed_s = Math.round((Date.now() - passStart) / 1000);
+  if (shards > 1) out.shard = shardKey;
+  // Resume from the first rooftop this pass didn't reach; a pass that finished starts over at the top.
+  if (unreached.length) _resumeAt.set(shardKey, targetKey(unreached[0])); else _resumeAt.delete(shardKey);
+  if (unreached.length) {
+    const names = unreached.map((L) => `${(cfgOf.get(L.team_id) || {}).rooftop_name || (cfgOf.get(L.team_id) || {}).team_name || L.team_id} [${L.department}]`);
+    console.error(`  ⚠️  events pass ran out of time${shardLabel}: ${unreached.length} of ${targets.length} rooftop-departments not reached — ${names.slice(0, 20).join(", ")}${names.length > 20 ? " …" : ""}`);
+    await postSystemicAlert({
+      source: "Transactional email",
+      title: `events pass INCOMPLETE — ${unreached.length} of ${targets.length} rooftop-departments not reached${shardLabel}`,
+      detail: `The pass hit its ${Math.round(PASS_BUDGET_MS / 1000)}s budget before reaching: ${names.slice(0, 30).join(", ")}${names.length > 30 ? ` and ${names.length - 30} more` : ""}. The next pass starts from these, but any event older than the ${POLL_MINUTES}m look-back when it gets there is lost. Add a shard in vercel.json (/api/cron/roi-events/shard/<i>/<N>) or find what slowed the pass.`,
+      windowLabel: `event email pass (~${POLL_MINUTES}m)`,
+    }).catch((e) => console.warn("[roi-event] incomplete-pass alert skipped:", String(e).slice(0, 140)));
   }
   if (_feedDegraded) {
     out.feed_degraded = true;
