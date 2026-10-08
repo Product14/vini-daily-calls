@@ -55,7 +55,7 @@ function cronAuthorized(req, { post } = {}) {
     if (Date.now() - _secretAlertAt > DEDUPE_MS) {
       _secretAlertAt = Date.now();
       const poster = post || require("./slackAlert.cjs").postSystemicAlert;
-      Promise.resolve().then(() => poster({ source: "Cron auth", title: "CRON_SECRET is not set: every cron is refused", detail: "All /api/cron/* routes fail closed without CRON_SECRET, so no digest, event email or SMS pass is running. Set CRON_SECRET in the Vercel project env.", windowLabel: "cron auth" })).catch(() => {});
+      Promise.resolve().then(() => poster({ source: "Cron auth", title: "CRON_SECRET is not set: every cron is refused", impact: "every cron is refused, so no digest, event email or alert goes out.", detail: "All /api/cron/* routes fail closed without CRON_SECRET, so no digest, event email or SMS pass is running. Set CRON_SECRET in the Vercel project env.", windowLabel: "cron auth" })).catch(() => {});
     }
     return false;
   }
@@ -230,6 +230,7 @@ async function alertProblems(result, { sb, post, source, now = Date.now(), env =
       title: `${fresh.length} configuration problem${fresh.length === 1 ? "" : "s"} before ${source || "a cron pass"}${fatal ? " (pass ABORTED)" : ""}`,
       detail: fresh.map((p) => `\n  • ${p.fatal ? "[FATAL] " : ""}${p.detail}`).join("") + (fatal ? "" : "\nThe pass continued."),
       windowLabel: `${source || "cron"} preflight`,
+      impact: fatal ? "this cron pass was aborted, so nothing was sent." : "the pass continued; the problems above can stop sends or alerts.",
     });
   } catch (e) { console.error("[preflight] alert post failed:", short(e?.message ?? e)); return { alerted: [], error: short(e?.message ?? e) }; }
   // Without a Slack token the poster only logs; leave the keys un-alerted so they post once it is set.

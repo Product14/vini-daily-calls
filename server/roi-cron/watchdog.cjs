@@ -381,7 +381,7 @@ async function runWatchdog(o = {}) {
   if (fresh.length) {
     const msg = formatAlert(fresh, ongoing);
     try {
-      await post({ source: "Email tracker watchdog", title: msg.title, detail: msg.detail, windowLabel: "30-min email-tracker watchdog" });
+      await post({ source: "Email tracker watchdog", title: msg.title, detail: msg.detail, windowLabel: "30-min email-tracker watchdog", impact: "dealer emails that should have gone out are missing or stuck; the list above says which." });
       // Without a Slack token the poster only logs. Keep those problems un-alerted so they post the
       // first run after SLACK_BOT_TOKEN is set, instead of being muted for 6h.
       delivered = Boolean(process.env.SLACK_BOT_TOKEN) || Boolean(o.post);

@@ -1186,7 +1186,8 @@ app.get("/api/vins/export", async (req, res) => {
 app.get("/api/scheduled-report", async (req, res) => {
   // ── Auth ───────────────────────────────────────────────────────────────────
   const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && req.headers.authorization !== `Bearer ${cronSecret}`) {
+  // Fail closed: an unset secret must not open the route (same rule as every /api/cron/* route).
+  if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
@@ -3012,7 +3013,19 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     // from the drill-down row), not the ClickHouse id the row is listed by. When the cron (or an
     // earlier manual send) already emailed it, sending again is a duplicate for the dealer, so it
     // takes a typed DANGER duplicateOverride (A4 F13).
-    const priorKeys = [...new Set([...(Array.isArray(cronEventKeys) ? cronEventKeys : []), cronEventKey, eventKey, `manual-${emailType}-${eventKey || "latest"}`].map((k) => String(k || "").trim()).filter(Boolean))].slice(0, 50);
+    // The keys are derived on the server too (from the same ClickHouse listing the drawer uses), so a stale
+    // or wrong value from the browser can never hide an earlier send; the client keys stay as a fallback
+    // for events older than the lookup window.
+    let serverKeys = [];
+    if (eventKey) {
+      try {
+        const { listEventsCH } = await import("./roi-cron/eventPreviewCH.js");
+        const rows = await listEventsCH({ teamId, department: dept, emailType, tz: tz || null, sinceDays: 14, limit: 500 });
+        const hit = (Array.isArray(rows) ? rows : []).find((r) => String(r.eventKey) === String(eventKey));
+        if (hit) serverKeys = [hit.cronEventKey, ...(Array.isArray(hit.cronEventKeys) ? hit.cronEventKeys : [])];
+      } catch (e) { console.warn("[roi-event-generate-send] server-side key lookup failed, using the client keys:", String(e?.message ?? e).slice(0, 160)); }
+    }
+    const priorKeys = [...new Set([...serverKeys, ...(Array.isArray(cronEventKeys) ? cronEventKeys : []), cronEventKey, eventKey, `manual-${emailType}-${eventKey || "latest"}`].map((k) => String(k || "").trim()).filter(Boolean))].slice(0, 50);
     const { data: prior, error: priorErr } = await sb.from("roi_event_emails")
       .select("id,status,sent_at,created_at,event_key,reason").eq("team_id", teamId).eq("email_type", emailType)
       .in("event_key", priorKeys).in("status", ["sent", "queued"]).order("created_at", { ascending: false }).limit(5);
