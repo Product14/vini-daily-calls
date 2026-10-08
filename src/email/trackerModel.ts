@@ -138,6 +138,7 @@ export const REASON_STATE: Record<string, CellState> = {
   recipients_missing: "recipients_missing", recipient_placeholder: "recipients_missing", bounced: "recipients_missing",
   no_data: "no_activity", not_actionable: "no_activity", guardrail_failed: "no_activity", silent_day: "no_activity", no_value: "no_activity",
   missed_send_day: "missed_send_day",
+  send_window_passed: "missed_send_day",
   not_eligible: "not_classified", tag_missing: "not_classified",
   spyne_preview: "held", v2_spyne_only: "held",
   error: "failed", mail_error: "failed", send_failed: "failed", smtp_timeout: "failed",

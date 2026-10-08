@@ -1352,6 +1352,16 @@ async function timezoneDrift(targets, cfgOf) {
 // Operator knobs (FORCE_RESEND, IGNORE_SEND_HOUR, IGNORE_SEND_DAY, ONLY_TEAMS, RUN_LOCAL_DATE) are read
 // ONLY when a CLI entry passes { cli: true }. The scheduled cron ignores them, so a stray value left in
 // the deployment can't cause hourly re-sends, midnight sends or a silently partial fleet.
+// Hours after the dealer's send time during which a digest may still go out (read per call so tests and
+// ops can change it). Past it, nothing is sent: see the SEND WINDOW note in runOnce.
+function sendWindowMinutes() {
+  const h = Number(process.env.DIGEST_SEND_WINDOW_HOURS);
+  return (Number.isFinite(h) && h > 0 ? h : 4) * 60;
+}
+function pastSendWindow(w, sendHour, sendMinute) {
+  const since = (w.localHour * 60 + (w.localMinute ?? 0)) - (sendHour * 60 + sendMinute);
+  return since > sendWindowMinutes();
+}
 const OPERATOR_KNOBS = ["FORCE_RESEND", "IGNORE_SEND_HOUR", "IGNORE_SEND_DAY", "ONLY_TEAMS", "RUN_LOCAL_DATE"];
 function operatorKnobs(opts) {
   const cli = !!(opts && opts.cli === true);
@@ -1524,6 +1534,18 @@ async function runDailyPass(opts) {
       const sendHour = c?.digest_send_hour ?? 7;
       const sendMinute = c?.digest_send_minute ?? 0;
       const beforeSendTime = w.localHour < sendHour || (w.localHour === sendHour && (w.localMinute ?? 0) < sendMinute);
+      // ── SEND WINDOW ──────────────────────────────────────────────────────────────────────────────
+      // A digest goes out only within DIGEST_SEND_WINDOW_HOURS (default 4) of the dealer's send time.
+      // Past it, the day is recorded as missed instead of landing hours late; otherwise the first pass
+      // after a fix (or any recovery) mails every department that missed the morning in one evening burst.
+      // A failed row keeps its error (already visible); only an unfinished/empty row is marked.
+      if (!IGNORE_HOUR && pastSendWindow(w, sendHour, sendMinute)) {
+        if (!prior || ((prior.status === "scheduled" || prior.status === "queued") && !prior.message_id)) {
+          await upsert({ status: "not_sent", reason: "send_window_passed", reason_detail: `not sent within ${sendWindowMinutes() / 60}h of the ${String(sendHour).padStart(2, "0")}:${String(sendMinute).padStart(2, "0")} send time; never sent late` });
+        }
+        out.window_passed = (out.window_passed || 0) + 1;
+        return;
+      }
       if (!IGNORE_HOUR && beforeSendTime && prior && !(prior.status === "not_sent" && REEVALUATE_REASONS.includes(prior.reason))) {
         out.before_hour++;
         console.log(`  · ${name} [${L.department}] ${prior.status} → evaluated earlier today, waiting for send ${String(sendHour).padStart(2, "0")}:${String(sendMinute).padStart(2, "0")}`);
@@ -2188,6 +2210,9 @@ async function runCadencePass(cadence, opts) {
       const sendHour = c?.digest_send_hour ?? 7;
       const sendMinute = c?.digest_send_minute ?? 0;
       const beforeSendTime = w.localHour < sendHour || (w.localHour === sendHour && (w.localMinute ?? 0) < sendMinute);
+      // Same send window as the daily pass: never send a weekly/monthly hours after the send time.
+      // Nothing is written, so a catch-up day (inside its window) can still send a period due after deploy.
+      if (!IGNORE_HOUR && pastSendWindow(w, sendHour, sendMinute)) { out.window_passed = (out.window_passed || 0) + 1; return; }
       if (!IGNORE_HOUR && beforeSendTime) {
         if (!prior || prior.status === "scheduled") await upsert({ status: "scheduled", reason: "before_send_hour", subject, recipients: emails.map((e) => ({ email: e, received: false })) });
         out.before_hour++; return;

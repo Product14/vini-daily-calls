@@ -133,7 +133,7 @@ function load({ teams = ["t1"], dept = "service", cfg = {}, runs = [], env = {} 
     ROI_SUPABASE_URL: "http://sb.test", ROI_SUPABASE_SERVICE_KEY: "fake", REPORTING_API_BASE: "http://rv.test",
     CLICKHOUSE_HOST: "", CLICKHOUSE_PASSWORD: "", SPYNE_API_BASE: "http://spyne.test", MAIL_PROXY_URL: "http://mail.test/send",
     DRY_RUN: "true", SMS_DRY_RUN: "true", SLACK_BOT_TOKEN: "", DIGEST_SPYNE_TOKEN: "", SPYNE_API_TOKEN: "",
-    CRON_POOL: "1", DIGEST_PASS_BUDGET_MS: "200000", MAIL_SEND_DELAY_MS: "0",
+    CRON_POOL: "1", DIGEST_PASS_BUDGET_MS: "200000", DIGEST_SEND_WINDOW_HOURS: "24", MAIL_SEND_DELAY_MS: "0",
   }, env);
   const db = {
     roi_live_departments: teams.map((t) => ({ team_id: t, department: dept, dry_run: true, is_live: true })),

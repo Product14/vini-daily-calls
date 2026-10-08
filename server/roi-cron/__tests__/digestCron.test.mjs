@@ -136,7 +136,7 @@ function load({ teams = ["t1"], dept = "service", cfg = {}, cfgOf = {}, live = {
     CLICKHOUSE_HOST: "", CLICKHOUSE_PASSWORD: "", SPYNE_API_BASE: "http://spyne.test", MAIL_PROXY_URL: "http://mail.test/send",
     DRY_RUN: "true", SMS_DRY_RUN: "true", SLACK_BOT_TOKEN: "", DIGEST_SPYNE_TOKEN: "", SPYNE_API_TOKEN: "",
     TWILIO_ACCOUNT_SID: "", TWILIO_AUTH_TOKEN: "", TWILIO_API_KEY_SECRET: "",
-    CRON_POOL: "1", DIGEST_PASS_BUDGET_MS: "200000", MAIL_SEND_DELAY_MS: "0",
+    CRON_POOL: "1", DIGEST_PASS_BUDGET_MS: "200000", DIGEST_SEND_WINDOW_HOURS: "24", MAIL_SEND_DELAY_MS: "0",
   }, env);
   const db = {
     roi_live_departments: teams.map((t) => ({ team_id: t, department: dept, dry_run: true, is_live: true, ...live })),
@@ -493,4 +493,29 @@ test("floor: a sent (or claimed, or deliberately held) late period is never touc
   await quiet(() => held.runner.runCadence("monthly"));
   assert.equal(held.db.roi_digest_runs[0].reason, "no_data");
   assert.equal(held.log.writes.length, 0);
+});
+
+// ── Send window (2026-10-09, before the first prod pass of the fix) ─────────────────────────────────
+// The first daily pass after deploy would otherwise have mailed ~50 departments their missed morning
+// digest at 6 pm local, in one burst. Past the window nothing is fetched or sent.
+test("send window: past it nothing is fetched or sent; an empty day is recorded, a failed row keeps its error", async () => {
+  const { runner, db, log } = load({ teams: ["a", "b"], cfg: AFTER_SEND, env: { DIGEST_SEND_WINDOW_HOURS: "0.01" },
+    runs: [{ team_id: "b", department: "service", cadence: "daily", local_date: YESTERDAY, status: "error", reason: "error", reason_detail: "reporting-api 504" }] });
+  installFetch(log);
+  const out = await quiet(() => runner.runOnce());
+  assert.equal(reportsCalls(log).length, 0, "no numbers fetched");
+  assert.equal(log.mail.length, 0, "nothing mailed");
+  assert.equal(out.window_passed, 2);
+  const a = rowsOf(db, "daily").find((r) => r.team_id === "a");
+  assert.deepEqual([a.status, a.reason], ["not_sent", "send_window_passed"]);
+  assert.equal(rowsOf(db, "daily").find((r) => r.team_id === "b").status, "error");
+});
+test("send window: a weekly due today but past the window is not sent and writes nothing", async () => {
+  const { runner, db, log } = load({ cfg: { ...AFTER_SEND, weekly_send_dow: TODAY_DOW }, env: { DIGEST_SEND_WINDOW_HOURS: "0.01" } });
+  installFetch(log);
+  const out = await quiet(() => runner.runCadence("weekly"));
+  assert.equal(reportsCalls(log).length, 0);
+  assert.equal(log.mail.length, 0);
+  assert.equal(out.window_passed, 1);
+  assert.equal(rowsOf(db, "weekly").length, 0);
 });
