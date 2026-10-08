@@ -3887,6 +3887,16 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
     // Paused vs Not started needs LIFETIME send history, not the loaded window: a department held in
     // dry run that last sent 40 days ago read "Not started" (A4 F19). Only held departments ask.
     const heldTeams = [...new Set((liveRes.data ?? []).filter((l) => l.is_live && l.dry_run === true).map((l) => l.team_id))];
+    // When each department went live (latest dry run → false) and when each digest type was switched
+    // on (latest *_enabled → true). The grid only calls an empty past cell "Missed" if the department
+    // was already expected to send then; judged by today's settings alone, every month before a
+    // go-live read "Missed". The audit log starts 2026-07-13; older history falls back to first runs.
+    const sinceP = liveTeamIds.length
+      ? emailHealth.selectTablePaged(sb, "roi_config_audit_log", "id,team_id,field,new_value,created_at", {
+        filter: (q) => q.in("team_id", liveTeamIds).in("field", ["dry_run (sales)", "dry_run (service)", "daily_enabled", "weekly_enabled", "monthly_enabled"]),
+        order: ["id"],
+      })
+      : Promise.resolve({ data: [], error: null });
     const everSentP = heldTeams.length
       ? emailHealth.selectTablePaged(sb, "roi_digest_runs", "id,team_id,department", {
         filter: (q) => q.eq("status", "sent").in("team_id", heldTeams), order: ["id"],
@@ -3911,7 +3921,17 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
       console.error("GET /api/tracker/rooftops-data runs read error:", e?.message ?? e);
       return res.status(500).json({ error: e?.message ?? "runs read failed" });
     }
-    const [cfgRes, recRes, everRes] = await Promise.all([cfgP, recP, everSentP]);
+    const [cfgRes, recRes, everRes, sinceRes] = await Promise.all([cfgP, recP, everSentP, sinceP]);
+    if (sinceRes.error) console.warn("[tracker] audit-log read failed (missed cells use first runs only):", sinceRes.error.message);
+    const since = {};
+    for (const a of sinceRes.error ? [] : (sinceRes.data ?? [])) {
+      const v = String(a.new_value ?? "").trim().toLowerCase();
+      const t = (since[a.team_id] ??= { live: {}, enabled: {} });
+      const m = /^dry_run \((sales|service)\)$/.exec(a.field || "");
+      if (m && v === "false") t.live[m[1]] = a.created_at > (t.live[m[1]] || "") ? a.created_at : t.live[m[1]];
+      const c = /^(daily|weekly|monthly)_enabled$/.exec(a.field || "");
+      if (c && v === "true") t.enabled[c[1]] = a.created_at > (t.enabled[c[1]] || "") ? a.created_at : t.enabled[c[1]];
+    }
     // CRITICAL: config/live define the rows themselves. recipients only enrich → degrade to [].
     if (cfgRes.error) return res.status(500).json({ error: cfgRes.error.message });
     if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
@@ -3937,6 +3957,7 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
       lives: liveRes.data ?? [],
       eligibility,
       everSent,
+      since,
       serverDryRun: sendGates.serverDryRun(),
     });
   } catch (err) {

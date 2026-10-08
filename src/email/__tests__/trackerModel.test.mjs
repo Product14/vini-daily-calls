@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import {
   latestDueKey, liveAnchor, buildCells, summarizeDue, columnStats, rooftopCounts, actionBoard, rowMatchesBoard,
   txKpi, neutralizeTracking, STATE_META, REASON_STATE, classifyCell, dueCellIndex, rowDueKeys,
-  eventReasonLabel, isAliasRow,
+  eventReasonLabel, isAliasRow, expectedFromFor, sendDateOf,
 } from "../trackerModel.ts";
 import { periodKeyForColumn } from "../periodBuckets.ts";
 
@@ -255,4 +255,41 @@ test("transactional reasons read as words; alias rows are bookkeeping", () => {
   assert.equal(eventReasonLabel(null), "");
   assert.equal(isAliasRow({ reason: "alias_of:call:lead:x:2026-10-07:t1" }), true);
   assert.equal(isAliasRow({ reason: "dry_run" }), false);
+});
+
+// ── Missed only after the department was expected to send (integration fix, 2026-10-09) ─────────
+// Judged by today's settings alone, every month before a go-live read "Missed": Sport Durst Hyundai
+// service showed Aug, Jul, Jun and May monthly as missed although it only went live in late September.
+test("an empty past cell before the department went live is not missed; after it, it is", () => {
+  const now = at("2026-10-09T14:00:00Z");
+  const due = latestDueKey("monthly", ET, now);
+  const cells = buildCells([], "monthly", "2026-10-08", facts({ expectedFrom: { monthly: "2026-09-25" } }), ET, now, due);
+  // column 1 = September (sent Oct 1, after go-live) → missed; column 2 = August (sent Sep 1) → not expected
+  assert.equal(cells[1].state, "missed");
+  assert.equal(cells[2].state, "no_run");
+  assert.equal(cells[3].state, "no_run");
+});
+test("expectedFrom 'never' (no go-live record and no run of that type) means no missed cells at all", () => {
+  const now = at("2026-10-09T14:00:00Z");
+  const cells = buildCells([], "weekly", "2026-10-08", facts({ expectedFrom: { weekly: "never" } }), ET, now, latestDueKey("weekly", ET, now));
+  assert.ok(cells.every((c) => c.state !== "missed"), cells.map((c) => c.state).join(","));
+});
+test("daily: a go-live on Oct 7 makes the Oct 7 report (sent Oct 8) expected; the go-live day's own send is not", () => {
+  const now = at("2026-10-09T14:00:00Z");
+  const cells = buildCells([], "daily", "2026-10-08", facts({ expectedFrom: { daily: "2026-10-07" } }), ET, now, latestDueKey("daily", ET, now));
+  const byDate = Object.fromEntries(cells.map((c) => [c.periodKey, c.state]));
+  assert.equal(byDate["2026-10-07"], "missed");   // sent Oct 8, after go-live
+  assert.equal(byDate["2026-10-06"], "no_run");   // sent Oct 7: the go-live day itself (it may have gone live after the send hour)
+  assert.equal(byDate["2026-10-05"], "no_run");   // sent Oct 6, before go-live
+});
+test("expectedFromFor: go-live and switch-on from the audit log; first-run fallback for weekly/monthly; never without evidence", () => {
+  const runs = [{ cadence: "monthly", local_date: "2026-09-01" }];
+  // Sport Durst-like: service went live 09-25, monthly switched on 09-20 → the later date wins
+  assert.deepEqual(expectedFromFor({ live: { service: "2026-09-25T14:00:00Z" }, enabled: { monthly: "2026-09-20T10:00:00Z" } }, "service", runs),
+    { daily: "2026-09-25", weekly: "2026-09-25", monthly: "2026-09-25" });
+  // no audit evidence: daily has no floor, monthly starts at its first run (Sep report, sent Oct 1), weekly never ran
+  assert.deepEqual(expectedFromFor(undefined, "sales", runs), { daily: undefined, weekly: "never", monthly: "2026-09-30" });
+  assert.equal(sendDateOf("monthly", "2026-09-01", 1), "2026-10-01");
+  assert.equal(sendDateOf("monthly", "2026-12-01", 15), "2027-01-15");
+  assert.equal(sendDateOf("weekly", "2026-10-04"), "2026-10-05");
 });

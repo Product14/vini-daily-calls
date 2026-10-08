@@ -169,7 +169,40 @@ export type RowFacts = {
   configured: boolean;
   /** Recipients the cron would email per cadence (server-computed). Unknown → assume someone. */
   eligible?: Partial<Record<Cadence, number>>;
+  /** Per cadence, the date the department became expected to send it (go-live or switch-on, from
+   * the audit log; else its first run of that type). A period whose send date is not after it was
+   * never owed, so an empty cell there is "No run", not "Missed". "never" = no evidence at all.
+   * Absent = no floor (the department predates the audit log and the loaded window). */
+  expectedFrom?: Partial<Record<Cadence, string | "never" | null>>;
 };
+
+export type SinceFacts = { live?: Partial<Record<"sales" | "service", string>>; enabled?: Partial<Record<Cadence, string>> } | undefined;
+
+/** RowFacts.expectedFrom from the audit log (go-live = latest dry run → false for the department,
+ * switch-on = latest `<cadence>_enabled` → true) and the department's own runs. Daily with no audit
+ * evidence has no floor: the 30-day daily window starts after the audit log does, so any go-live in
+ * it is recorded. Weekly/monthly windows reach further back, so without audit evidence they fall back
+ * to the first run of that type, and with no run at all nothing was ever owed ("never"). */
+export function expectedFromFor(since: SinceFacts, dept: "sales" | "service", runs: { cadence: string; local_date: string }[], monthlySendDay = 1): Partial<Record<Cadence, string | "never" | undefined>> {
+  const out: Partial<Record<Cadence, string | "never" | undefined>> = {};
+  for (const c of ["daily", "weekly", "monthly"] as Cadence[]) {
+    const dates = [since?.live?.[dept], since?.enabled?.[c]].filter((x): x is string => !!x).map((x) => x.slice(0, 10));
+    if (dates.length) { out[c] = dates.sort().slice(-1)[0]; continue; }
+    if (c === "daily") { out[c] = undefined; continue; }
+    const first = runs.filter((r) => r.cadence === c).map((r) => r.local_date).sort()[0];
+    out[c] = first ? shiftIso(sendDateOf(c, first, monthlySendDay), -1) : "never";
+  }
+  return out;
+}
+
+/** The date a period's digest is sent: the day after the report day for daily and weekly (the cron
+ * stamps the day before it sends), the monthly send day of the following month for monthly. */
+export function sendDateOf(cadence: Cadence, periodKey: string, monthlySendDay = 1): string {
+  if (cadence !== "monthly") return shiftIso(periodKey, 1);
+  const [y, m] = periodKey.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m, Math.min(Math.max(1, monthlySendDay || 1), 28)));
+  return d.toISOString().slice(0, 10);
+}
 
 export type CellContext = RowFacts & { cadence: Cadence; due: boolean; periodKey: string; todayIso: string; monthlySendDay?: number | null };
 
@@ -206,6 +239,11 @@ export function emptyState(ctx: CellContext): Classified {
   if (!ctx.due) return { state: ctx.toggleOn[ctx.cadence] && !ctx.churnedOn(ctx.periodKey) ? "not_due" : "no_run" };
   if (ctx.churnedOn(ctx.periodKey)) return { state: "churned" };
   if (!ctx.toggleOn[ctx.cadence] || (ctx.cadence !== "daily" && !ctx.configured)) return { state: "no_run", detail: "This email type is off for the rooftop." };
+  const from = ctx.expectedFrom?.[ctx.cadence];
+  if (from === "never") return { state: "no_run", detail: "No record that this department was set up to send this email for this period." };
+  if (from && sendDateOf(ctx.cadence, ctx.periodKey, ctx.monthlySendDay ?? 1) <= from.slice(0, 10)) {
+    return { state: "no_run", detail: "Before this department went live or this email was switched on, so nothing was owed." };
+  }
   if (ctx.dryRun) return { state: "not_set_up", detail: "The department is in dry run." };
   if (eligible === 0) return { state: "not_set_up", detail: "Nobody on the list is eligible (verified, switched on and subscribed)." };
   return { state: "missed" };

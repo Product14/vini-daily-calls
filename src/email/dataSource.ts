@@ -14,7 +14,7 @@
 // service-role key) instead of the browser's publishable/anon key — the tables are RLS-protected,
 // so the anon key can no longer read them. isSupabaseConfigured still gates the "connected" state.
 import { isSupabaseConfigured } from "./supabaseClient";
-import { buildCells, rowDueKeys, type RowFacts, type RunLite, type TxStatusCounts } from "./trackerModel.ts";
+import { buildCells, rowDueKeys, expectedFromFor, type RowFacts, type RunLite, type SinceFacts, type TxStatusCounts } from "./trackerModel.ts";
 import { promptDialog } from "../ui/dialogs";
 import {
   type AgentType,
@@ -156,6 +156,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
   let runs: RunRow[]; let configs: ConfigRow[]; let recipients: RecipientRow[]; let lives: LiveRow[];
   let eligibility: Array<{ team_id: string; department: string; daily: number; weekly: number; monthly: number }> | null = null;
   let everSentKeys: Set<string> | null = null;
+  let sinceByTeam: Record<string, SinceFacts> = {};
   let serverDryRun: boolean | undefined;
   try {
     const init: RequestInit = { cache: "no-store", headers: trackerAuthHeaders() };
@@ -171,6 +172,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
     lives = (j.lives ?? []) as LiveRow[];
     eligibility = Array.isArray(j.eligibility) ? j.eligibility : null;
     everSentKeys = Array.isArray(j.everSent) ? new Set<string>(j.everSent) : null;
+    sinceByTeam = j.since && typeof j.since === "object" ? j.since : {};
     serverDryRun = typeof j.serverDryRun === "boolean" ? j.serverDryRun : undefined;
   } catch (e) {
     console.warn("[tracker] rooftops-data read error:", e);
@@ -226,6 +228,7 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
       toggleOn: { daily: cfg?.daily_enabled !== false, weekly: cfg?.weekly_enabled === true, monthly: cfg?.monthly_enabled === true },
       configured: !!cfg,
       eligible: elig ? { daily: elig.daily, weekly: elig.weekly, monthly: elig.monthly } : undefined,
+      expectedFrom: expectedFromFor(sinceByTeam[teamId], dept, deptRuns, cfg?.monthly_send_day ?? 1),
     };
 
     return {
