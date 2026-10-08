@@ -184,3 +184,43 @@ test("B12/B17: one key builder; the call key uses the CALL's own dealer-local da
   const row = rowsOf(tables, "roi_event_emails", (r) => r.email_type === "post_conversation")[0];
   assert.equal(row.event_key, eventKeys.call("lead_k", eventKeys.localDay(at, TZ), 1));
 });
+
+test("WS-D contract: excludeIntents / excludeSpam / repliedOnly are sent, and the feed's uncapped total backs up ClickHouse", async () => {
+  const tables = tablesFor({ overdue: true, conv: true, working_hours: openTodayAtThisHour() });
+  const { runner, log } = load(tables, { EVENT_SMS_EOD_HOUR: "0" });
+  installFetch(log, {
+    actionItems: (t, d, scope) => (scope === "overdue" ? { actionItems: overdueItems, total: 4138, hasMore: false } : { actionItems: [], total: 5012, hasMore: false }),
+    chCount: null, // ClickHouse down → the feed's uncapped total is the headline
+  });
+  await quiet(() => runner.runOnce());
+  const paths = log.api.map((a) => a.path);
+  assert.ok(paths.filter((p) => p.startsWith("/api/action-items")).every((p) => p.includes("excludeIntents=sales_lost_lead%2Csales_left_voicemail%2Cservice_left_voicemail")));
+  assert.ok(paths.some((p) => p.includes("channel=call") && p.includes("excludeSpam=1")));
+  assert.ok(paths.some((p) => p.includes("channel=sms") && p.includes("repliedOnly=1")));
+  assert.equal(log.mail[0].subject, `Overdue follow-ups: 4138 leads pending · Rooftop ${TEAM}`);
+});
+
+test("B19: the Spyne token travels in X-Spyne-Token, never the URL; one logged fallback if reporting-vini ignores the header", async () => {
+  const tables = tablesFor({ appt: true });
+  const env = { REPORTING_CRON_SECRET: "svc-secret", DIGEST_SPYNE_TOKEN: "spyne-tok" };
+  let h = load(tables, env);
+  installFetch(h.log, { meetings: () => [] });
+  await quiet(() => h.runner.runOnce());
+  const m = h.log.api.find((a) => a.path.startsWith("/api/meetings"));
+  assert.ok(!m.path.includes("auth_key"), m.path);
+  assert.equal(m.headers["X-Spyne-Token"], "spyne-tok");
+  assert.equal(m.headers.Authorization, "Bearer svc-secret");
+  // an older reporting-vini: degraded without ?auth_key, healthy with it → retried once, then kept
+  h = load(tablesFor({ appt: true }), env);
+  installFetch(h.log, { meetings: (t, d, p) => (p.get("auth_key") ? [] : { meetings: [], meetingsFeedDegraded: true, meetingsFeedError: "spyne 401" }) });
+  const out = await quiet(() => h.runner.runOnce());
+  assert.equal(out.meetings_feed_degraded, undefined, "the fallback recovered the feed");
+  assert.deepEqual(h.log.api.filter((a) => a.path.startsWith("/api/meetings")).map((a) => a.path.includes("auth_key")), [false, true]);
+  // no service secret → the token is the bearer itself (reporting-vini already reads it there)
+  h = load(tablesFor({ appt: true }), { DIGEST_SPYNE_TOKEN: "spyne-tok" });
+  installFetch(h.log, { meetings: () => [] });
+  await quiet(() => h.runner.runOnce());
+  const m3 = h.log.api.find((a) => a.path.startsWith("/api/meetings"));
+  assert.equal(m3.headers.Authorization, "Bearer spyne-tok");
+  assert.ok(!m3.path.includes("auth_key"));
+});
