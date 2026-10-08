@@ -126,6 +126,12 @@ function detail(label, value) {
 function renderPostAppointment(opts) {
   opts = opts || {};
   var a = opts.appointment || {};
+  // The APPOINTMENT says which department it belongs to; the caller's `dept` is only a fallback. The
+  // header + footer ("Vini · Sales" / "Sent by Vini · Sales") came from `opts.dept` while the card came
+  // from `a.type`, so a service booking rendered for the Sales tracker row reached Stillwell Ford's
+  // sales team reading "Sales" on top of an oil change (2026-10-07). One source for every label now.
+  var ownDept = String(a.type || "").trim().toLowerCase();
+  if (ownDept === "service" || ownDept === "sales") opts = Object.assign({}, opts, { dept: ownDept });
   var L = opts.links || {};
   var apptUrl = L.appointment || L.console || "https://console.spyne.ai/converse-ai";
   var whenBig = a.relDay ? (a.relDay + (a.time ? " · " + a.time : "")) : (a.when || "");

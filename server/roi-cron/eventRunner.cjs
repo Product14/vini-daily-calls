@@ -598,6 +598,16 @@ async function runOnce(opts = {}) {
             console.log(`  · ${name} [${dept}] appointment ${m.id} skipped — meta.source=${meta} (not booked by Vini)`);
             continue;
           }
+          // The feed is asked for this department only, so a booking from the other one should never
+          // arrive — but if it did, it would go to THIS pass's recipients under THIS pass's label. Leave
+          // it to its own department's pass instead (Stillwell Ford, 2026-10-07: service bookings in a
+          // sales inbox). Counted, not silent.
+          const ownDept = String(m.serviceType || "").trim().toLowerCase();
+          if ((ownDept === "sales" || ownDept === "service") && ownDept !== dept) {
+            out.appt_skipped_other_dept = (out.appt_skipped_other_dept || 0) + 1;
+            console.warn(`  ⚠ ${name} [${dept}] appointment ${m.id} is ${ownDept} — left for the ${ownDept} pass`);
+            continue;
+          }
           const byVini = m.source === "spyne";
           const svc = svcReasons.get(String(m.leadId || "")) || null;
           if (mtd === null) mtd = await apptMTD(L.team_id, dept);
@@ -1332,7 +1342,8 @@ async function previewEvent(opts) {
       : null;
     return T.renderPostAppointment({ rooftopName: name, dept, tz, mtdCount: mtd, links: L_, appointment: {
       customer: m.customer, phone: m.phone, when: fmtSched(m.when, m.tz || tz), time: m.time, relDay: m.relDay,
-      type: m.type || (dept === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
+      // the booking's own department wins (the template labels the whole email from this)
+      type: m.type || ((m.serviceType || dept) === "service" ? "Service" : "Sales"), intent: m.intent, vehicle: m.vehicle,
       transportation: m.transportation || m.transportationOption, status: m.status, byVini: m.source === "spyne", recordingUrl: m.recordingUrl,
       services: svc ? svc.services : null, serviceIntent: svc ? svc.intent : "", serviceVehicle: svc ? svc.vehicleName : "",
     } });

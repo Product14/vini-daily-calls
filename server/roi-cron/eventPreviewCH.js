@@ -359,7 +359,10 @@ export async function previewEventCH({ teamId, department, emailType, eventKey, 
     const svc = isService
       ? (await fetchServiceReasonsByLead(teamId, [row.leadId]).catch(() => new Map())).get(String(row.leadId || "")) || null
       : null;
-    return T.renderPostAppointment({ rooftopName: name, dept, tz: row.mtz || tz, mtdCount: 0, links, sms: sms.messages, smsFailed: sms.failed, appointment: {
+    // Labelled with the APPOINTMENT's department, not the tracker row it was opened from: this is the
+    // render behind the tracker's manual Send, and the Stillwell email (2026-10-07) said "Vini · Sales"
+    // over a service booking because `dept` here was the row's.
+    return T.renderPostAppointment({ rooftopName: name, dept: isService ? "service" : "sales", tz: row.mtz || tz, mtdCount: 0, links, sms: sms.messages, smsFailed: sms.failed, appointment: {
       customer: cleanName(row.customer, row.phone) || "Customer", phone: row.phone, when: w.when, relDay: w.relDay, time: w.time,
       type: isService ? "Service" : "Sales", intent: row.intent,
       transportation: row.transportation, status: row.status, byVini: true,

@@ -178,3 +178,13 @@ test("out of time → stops cleanly, alerts with the unreached rooftops, and the
   await quiet(() => runner.runOnce());
   assert.equal(visited(log)[0], firstUnreached, "resumes at the first rooftop the last pass missed");
 });
+
+test("a booking from the other department is left for its own pass — never emailed under this one", async () => {
+  const { runner, log } = load();
+  installFetch(log, { meetingsFor: (t, d) => (t === "team02" && d === "sales"
+    ? [{ id: "meeting_svc", leadId: "lead_svc", customer: "Karen C", phone: "+15175550100", source: "spyne", serviceType: "service", when: "2026-10-13T19:30:00Z" }] : []) });
+  const out = await quiet(() => runner.runOnce());
+  assert.equal(out.appt_skipped_other_dept, 1);
+  assert.equal(log.sb.filter((q) => q.table === "roi_event_emails" && q.op === "insert").length, 0, "no email row claimed for it");
+  assert.equal(reportsCalls(log), 0, "nothing was rendered");
+});
