@@ -597,6 +597,177 @@ async function fetchMeetingMetaSource(teamId, meetingIds) {
   return out;
 }
 
+/* ── APPOINTMENT TRUTH (2026-10-09) ────────────────────────────────────────────────────────────────
+ * The post_appointment poll used to trust the reporting-vini feed for "did Vini book this": the feed's
+ * snapshot path carries the dealer's own CRM/BDC bookings and has no `source` field, and the gate
+ * (`m.source && m.source !== 'spyne'`) FAILED OPEN on a missing field. 10 "New appointment" emails in
+ * three days announced a BDC booking (Honda of Reseda, Pointe Buick GMC, Honda DTLA, …). The same
+ * meeting also arrived under two ids (snapshot = meeting_id, live = Mongo _id), so 11 dealers got the
+ * same appointment twice.
+ *
+ * This resolves every feed id against ClickHouse `dealer_leads.meetings FINAL`, which carries BOTH ids,
+ * the owner (`source`), how the row came to exist (`meta.source`) and the status. Rows for the same
+ * leads are fetched too, so the caller can tell a duplicate slot from a reschedule across passes.
+ *
+ * Returns { ok, byId: Map<anyId, row>, rows }. ok=false (no creds / query failed) lets the caller FAIL
+ * CLOSED and say so, instead of guessing. TEAM-SCOPED: an id that isn't this rooftop's returns nothing. */
+async function fetchMeetingsTruth(teamId, meetingIds, leadIds) {
+  const ids = [...new Set((meetingIds || []).filter(Boolean).map(String))];
+  const leads = [...new Set((leadIds || []).filter(Boolean).map(String))];
+  if (!teamId || !ids.length) return { ok: true, byId: new Map(), rows: [] };
+  if (!hasCreds()) return { ok: false, byId: new Map(), rows: [], error: "clickhouse not configured" };
+  const inList = (xs) => "(" + xs.map(lit).join(",") + ")";
+  const sql =
+    "SELECT toString(m._id) rowId, ifNull(m.meeting_id,'') meetingId, ifNull(m.lead_id,'') leadId," +
+    " lower(ifNull(m.source,'')) source, lower(JSONExtractString(ifNull(m.meta,''),'source')) metaSource," +
+    " lower(ifNull(m.status,'')) status, lower(ifNull(m.service_type,'')) serviceType," +
+    " ifNull(formatDateTime(m.meeting_start_time,'%Y-%m-%dT%H:%i:%SZ'),'') startTime," +
+    " ifNull(formatDateTime(m.created_at,'%Y-%m-%dT%H:%i:%SZ'),'') createdAt," +
+    " m.is_active isActive, m.__deleted deleted" +
+    " FROM dealer_leads.meetings AS m FINAL" +
+    " WHERE m.team_id=" + lit(teamId) +
+    " AND (m.meeting_id IN " + inList(ids) + " OR m._id IN " + inList(ids) +
+    (leads.length ? " OR (m.lead_id IN " + inList(leads) + " AND m.source='spyne' AND m.created_at >= now() - INTERVAL 30 DAY)" : "") +
+    ")";
+  let rows;
+  try { rows = await chQuery(sql); }
+  catch (e) { console.warn("[appt-truth] ClickHouse meeting lookup failed:", String(e).slice(0, 160)); return { ok: false, byId: new Map(), rows: [], error: String(e).slice(0, 160) }; }
+  const byId = new Map();
+  for (const r of rows) {
+    if (r.meetingId) byId.set(String(r.meetingId), r);
+    if (r.rowId) byId.set(String(r.rowId), r);
+  }
+  return { ok: true, byId, rows };
+}
+
+/* The lead's OWN department ('sales' | 'service') from dealer_leads.leads.service_type — the same column
+ * reporting-vini's chat feed uses (route.ts deptOf: prefix match, so 'sales spanish' is sales). A lead
+ * with a blank service_type is absent from the Map; the caller decides the fallback. Never throws. */
+async function fetchLeadDepts(teamId, leadIds) {
+  const ids = [...new Set((leadIds || []).filter(Boolean).map(String))];
+  if (!hasCreds() || !teamId || !ids.length) return new Map();
+  const sql =
+    "SELECT lead_id leadId, anyIf(lower(service_type), notEmpty(ifNull(service_type,''))) svc FROM dealer_leads.leads" +
+    " WHERE team_id=" + lit(teamId) + " AND lead_id IN (" + ids.map(lit).join(",") + ") GROUP BY lead_id";
+  let rows;
+  try { rows = await chQuery(sql); }
+  catch (e) { console.warn("[lead-dept] ClickHouse lead lookup failed:", String(e).slice(0, 160)); return new Map(); }
+  const out = new Map();
+  for (const r of rows) {
+    const v = String(r.svc || "").trim().toLowerCase();
+    const d = v.startsWith("service") ? "service" : v.startsWith("sales") ? "sales" : null;
+    if (d) out.set(String(r.leadId), d);
+  }
+  return out;
+}
+
+/* ONE uncapped count for the overdue digest headline, at LEAD grain (a lead counts once however many
+ * overdue items it carries — the same grain the console's action-item scoreboard uses). The headline
+ * used to be the length of up to 10 pages × 200 feed rows, filtered AFTER the feed's per-lead collapse,
+ * so I 40 Autos read "1,037 pending" while 4,138 leads were overdue (2026-10-08).
+ *
+ * Every predicate is applied per item, after the per-_id dedupe and BEFORE the lead roll-up:
+ *   is_active, not deleted (typed tombstone AND the raw PeerDB delete set, which the typed mirror never
+ *   receives), intent present and not 'custom', intent not in `nonActionable` (the cron's
+ *   NON_ACTIONABLE_INTENTS), not completed, department prefix match.
+ * Returns { overdue, open } lead counts, or null when ClickHouse is unavailable (caller falls back). */
+async function countActionItemLeads(teamId, dept, nonActionable) {
+  if (!hasCreds() || !teamId) return null;
+  const muted = [...(nonActionable || [])].map((s) => String(s).toLowerCase());
+  const d = dept === "service" ? "service" : "sales";
+  const sql =
+    "SELECT uniqExactIf(lead_id, due_date > toDateTime('1971-01-01') AND due_date < now()) overdue, uniqExact(lead_id) open FROM (" +
+    "SELECT _id, argMax(lead_id,_version) lead_id, argMax(ifNull(intent,''),_version) intent," +
+    " argMax(ifNull(is_completed,0),_version) is_completed, argMax(lower(ifNull(service_type,'')),_version) service_type," +
+    " argMax(due_date,_version) due_date, argMax(ifNull(is_active,1),_version) is_active, argMax(__deleted,_version) deleted" +
+    " FROM dealer_leads.actionItems WHERE team_id=" + lit(teamId) +
+    " AND _id NOT IN (SELECT _id FROM dealer_leads_raw.actionItems WHERE _peerdb_is_deleted=1)" +
+    " GROUP BY _id)" +
+    " WHERE is_active=1 AND deleted=0 AND intent!='' AND lower(intent)!='custom'" +
+    (muted.length ? " AND lower(intent) NOT IN (" + muted.map(lit).join(",") + ")" : "") +
+    " AND is_completed=0 AND service_type LIKE " + lit(d + "%") + " AND notEmpty(ifNull(lead_id,''))";
+  try {
+    const rows = await chQuery(sql);
+    const r = rows[0] || {};
+    return { overdue: Number(r.overdue) || 0, open: Number(r.open) || 0 };
+  } catch (e) {
+    console.warn("[overdue-count] ClickHouse count failed:", String(e).slice(0, 160));
+    return null;
+  }
+}
+
+/* ── CRON EVENT KEYS — ONE definition for the cron and the tracker (2026-10-09) ────────────────────
+ * The tracker's drill-down built its own keys (a call's UUID, `sms:<conversationId>`, `lead:<id>`), and
+ * the cron keys its ledger rows differently (`call:lead:<lead>:<day>:t1`, `sms:<lead>:<day>`,
+ * `lead:<lead>:<itemId>`). They could never match, so every row read "eligible" under a day header that
+ * said "1 sent", and "Send to customer" emailed the same event a second time (A4 F13). Both sides now
+ * build keys through these pure functions; eventRunner uses them for the ledger and eventPreviewCH stamps
+ * `cronEventKey` on every drill-down row. Pure: no I/O, no clock except `localDay`'s default. */
+// Zone-less timestamps ("2026-08-14 17:43:06", the ClickHouse/Mongo shape) are UTC.
+function asUtcDate(iso) {
+  if (!iso) return null;
+  if (iso instanceof Date) return isNaN(iso.getTime()) ? null : iso;
+  const s = String(iso).trim();
+  const norm = /([zZ]|[+-]\d{2}:?\d{2})$/.test(s) ? s.replace(" ", "T") : `${s.replace(" ", "T")}Z`;
+  const d = new Date(norm);
+  return isNaN(d.getTime()) ? null : d;
+}
+// Dealer-local calendar day (YYYY-MM-DD) of an instant; `iso` omitted = now.
+function localDay(iso, tz) {
+  const d = iso == null ? new Date() : asUtcDate(iso);
+  if (!d) return "";
+  try {
+    const p = new Intl.DateTimeFormat("en-CA", { timeZone: tz || "UTC", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(d);
+    const g = (t) => (p.find((x) => x.type === t) || {}).value;
+    return `${g("year")}-${g("month")}-${g("day")}`;
+  } catch { return d.toISOString().slice(0, 10); }
+}
+// A customer-originated SMS/chat bubble.
+const isInboundBubble = (mm) => !!mm && (mm.direction === "in" || mm.direction === "inbound" || mm.authorType === "human");
+// Split a thread into sessions on lulls of > gapMin minutes. [{ startAt, _lastT, msgs, hasReply }].
+function smsSessions(msgs, gapMin) {
+  const sorted = (msgs || []).filter((x) => x && x.at).slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const out = [];
+  for (const mm of sorted) {
+    const t = new Date(mm.at).getTime();
+    if (isNaN(t)) continue;
+    const cur = out[out.length - 1];
+    if (!cur || (t - cur._lastT) > gapMin * 60000) out.push({ startAt: mm.at, _lastT: t, msgs: [mm], hasReply: isInboundBubble(mm) });
+    else { cur._lastT = t; cur.msgs.push(mm); cur.hasReply = cur.hasReply || isInboundBubble(mm); }
+  }
+  return out;
+}
+const eventKeys = {
+  localDay,
+  smsSessions,
+  // post_appointment — the meeting's canonical meeting_id (Mongo _id only when no meeting_id exists).
+  appointment: (meetingId) => String(meetingId || ""),
+  // action_item — one email per lead per newest-arrived item. ObjectIds sort by creation time.
+  newestItemId: (ids) => (ids || []).filter(Boolean).map(String).sort().slice(-1)[0] || "",
+  actionItem: (leadKey, newestItemId) => `lead:${leadKey}:${newestItemId || leadKey}`,
+  // action_item_overdue — one rooftop digest per department per dealer-local day per slot (am | eod).
+  overdue: (teamId, dept, day, slot) => `rooftop:${teamId}:${dept}:overdue:${day}:${slot}`,
+  // post_conversation · call — per lead per the CALL's own dealer-local day, tiered by outcome so a
+  // later call that books re-fires once. `leadOrId` is the leadId, else the endcallreports row id.
+  callRank: (cv) => (cv && cv.appointmentScheduled ? 2 : cv && cv.hasActionItem ? 1 : 0),
+  call: (leadOrId, day, rank) => `call:lead:${leadOrId}:${day}:t${Number(rank) || 0}`,
+  // post_conversation · SMS — per lead (else conversation) per dealer-local day, by the rooftop's cadence.
+  sms: (leadOrConv, day, cadence, sessionStartAt) => {
+    if (cadence === "session") return `sms:${leadOrConv}:${day}:s${sessionStartAt}`;
+    if (cadence === "first") return `sms:${leadOrConv}:${day}:first`;
+    if (cadence === "digest") return `sms:${leadOrConv}:${day}:digest`;
+    return `sms:${leadOrConv}:${day}`;
+  },
+  // post_conversation · website chat — per conversation per day per settled session.
+  chat: (conversationId, day, sessionStartAt) => `chat:${conversationId}:${day}:s${sessionStartAt}`,
+};
+
+/* SMS replies that are only an opt-out keyword are the customer LEAVING, not engaging (canonical rule;
+ * the same literal list as reporting-vini agentBaseFact.sql `n_human_inbound_real`). 99 SMS summary
+ * emails in three days were about a lone "STOP" (A3-11). */
+const OPT_OUT_KEYWORDS = new Set(["STOP", "STOPALL", "STOP ALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "OPTOUT", "OPT OUT", "REMOVE", "NO"]);
+const isOptOutBody = (body) => OPT_OUT_KEYWORDS.has(String(body == null ? "" : body).trim().toUpperCase());
+
 const SMS_FAILED = new Set(["failed", "undelivered", "error"]);
 const isInboundSms = (m) => m && (m.direction === "in" || m.direction === "inbound");
 
@@ -640,7 +811,8 @@ function buildSmsLead(callLead, seed, msgs) {
 
 module.exports = {
   fetchLeadFields, fetchLeadFieldsByLead, fetchApptAsksByLead, fetchApptAsksByCall, fetchMeetingMetaSource,
-  fetchServiceReasonsByLead,
+  fetchServiceReasonsByLead, fetchMeetingsTruth, fetchLeadDepts, countActionItemLeads,
+  eventKeys, asUtcDate, OPT_OUT_KEYWORDS, isOptOutBody,
   leadFromRow, buildSmsLead, LEAD_FIELD_COLS, hasCreds,
   extractZip, pickApptWhen, pickApptRequest, pickLocation, pickLocationInfo, _chQuery: chQuery,
 };
