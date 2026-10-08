@@ -78,7 +78,7 @@ const POLL_MINUTES = Number(process.env.EVENT_POLL_MINUTES || 25);
 // tail (the most recently written roi_live_departments rows, i.e. the newest go-lives) got no
 // transactional email at all, and because the kill lands before the end-of-pass alerts, nothing
 // said so. Stillwell Ford went silent the moment it was taken live.
-//   • SHARDS: vercel.json runs the cron as N shards (?shard=i&shards=N), each with its own 300s.
+//   • SHARDS: vercel.json runs the cron as N shards (/api/cron/roi-events/shard/<i>/<N>), each with its own 300s.
 //     A team's departments always land in the same shard, so the once-per-team SMS/chat polls hold.
 //   • BUDGET: stop starting new targets before the platform kills the function, and say so.
 //   • RESUME: the next pass on this instance starts where the last one stopped, so a pass that runs
@@ -465,14 +465,15 @@ async function runOnce(opts = {}) {
   const smsDoneTeams = new Set(); // EOD SMS batch runs once per team (it's not dept-split)
   const chatDoneTeams = new Set(); // website-chat poll also runs once per team (chat has no dept either)
   const ONLY = (process.env.ONLY_TEAMS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  // Stable order (the unordered select returns rows in physical order, which moves every time a row is
-  // updated — that is how a rooftop taken live jumped to the unreached tail), this shard only, then
-  // rotated to resume where this shard's previous pass stopped.
+  // This shard only, rotated to resume where this shard's previous pass stopped. The order WITHIN is
+  // deliberately left as the select returns it: the once-per-team SMS summary (no department of its
+  // own, unlike chat) goes to whichever of a team's departments runs first, so re-sorting would
+  // silently move 75 teams' SMS summaries from their service team to their sales team. That routing
+  // should follow the lead's department, as chat does — a separate change, not a side effect of this.
   const shardKey = `${shard}/${shards}`;
   const ordered = (liveRes.data ?? [])
     .filter((L) => !ONLY.length || ONLY.includes(L.team_id))
-    .filter((L) => shards === 1 || shardOf(L.team_id, shards) === shard)
-    .sort((a, b) => targetKey(a).localeCompare(targetKey(b)));
+    .filter((L) => shards === 1 || shardOf(L.team_id, shards) === shard);
   const resumeIdx = Math.max(0, ordered.findIndex((L) => targetKey(L) === _resumeAt.get(shardKey)));
   const targets = ordered.slice(resumeIdx).concat(ordered.slice(0, resumeIdx));
   // Timezone + working hours for every rooftop missing them in config, in ONE read, before the loop.

@@ -148,6 +148,13 @@ test("a non-North-American team timezone is ignored, not saved over the default"
   assert.ok(tzWrites.every((q) => q.patch.timezone === "America/Los_Angeles"));
 });
 
+test("a team's departments keep the select's order (the SMS summary follows whichever runs first)", async () => {
+  const { runner, log } = load();
+  installFetch(log);
+  await quiet(() => runner.runOnce());
+  assert.deepEqual(visited(log), live.map((L) => `${L.team_id}:${L.department}`), "no re-sorting: service-first teams stay service-first");
+});
+
 test("shards partition the fleet: every target exactly once, a team's departments together", async () => {
   const { runner, log } = load();
   installFetch(log);
@@ -166,7 +173,7 @@ test("out of time → stops cleanly, alerts with the unreached rooftops, and the
   assert.ok(out.unreached > 0 && out.unreached < 20, `unreached=${out.unreached}`);
   assert.equal(visited(log).length, 20 - out.unreached);
   assert.equal(log.slack.length >= 1 && log.slack.some((b) => b.includes("INCOMPLETE")), true, "Slack alert names the incomplete pass");
-  const firstUnreached = (() => { const sorted = live.map((L) => `${L.team_id}:${L.department}`).sort(); return sorted[20 - out.unreached]; })();
+  const firstUnreached = live.map((L) => `${L.team_id}:${L.department}`)[20 - out.unreached]; // the select's own order
   log.api.length = 0;
   await quiet(() => runner.runOnce());
   assert.equal(visited(log)[0], firstUnreached, "resumes at the first rooftop the last pass missed");
