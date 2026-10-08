@@ -1231,11 +1231,12 @@ function prioritize(targets, index, localDateOf) {
     .sort((a, b) => a.t - b.t || a.live - b.live || a.i - b.i).map((x) => x.L);
 }
 // Run `work` over `targets` on `pool` workers, launching nothing new once the pass budget has passed
-// since `startedAt`. Returns the targets never launched.
+// since `startedAt`. The first target is always launched, so a pass whose setup ate the budget still
+// moves the fleet forward by its most-due rooftop. Returns the targets never launched.
 async function runBudgetedPool(targets, pool, startedAt, work) {
   let i = 0;
   await Promise.all(Array.from({ length: Math.max(1, Math.min(pool, targets.length || 1)) }, async () => {
-    while (i < targets.length && Date.now() - startedAt <= DIGEST_PASS_BUDGET_MS) await work(targets[i++]);
+    while (i < targets.length && (i === 0 || Date.now() - startedAt <= DIGEST_PASS_BUDGET_MS)) await work(targets[i++]);
   }));
   return targets.slice(i);
 }
@@ -1443,13 +1444,18 @@ async function runDailyPass(opts) {
   if (ONLY.length) console.log(`  scope: ONLY_TEAMS → ${scoped.length} dept-rows across ${ONLY.length} team(s)`);
   // Orphans first, against a FLEET-wide cutoff (never a scoped subset's): the earliest dealer-local
   // "yesterday" anywhere, with Hawaii always counted so an unresolved zone can't move it later.
+  // The reaper only touches rows of report days that are over, so it runs alongside the reads that order
+  // today's work. Team timezones for every rooftop without one in config come in ONE ClickHouse read, so
+  // resolveTz below reads memory instead of calling out once per rooftop.
   const cutoff = [...new Set(["Pacific/Honolulu", ...live.map((L) => cfgOf.get(L.team_id)?.timezone).filter(isValidTz)])].map(safeLocalDate).sort()[0];
-  out.reaped = await reapOrphans(cutoff);
-  // Team timezones for every rooftop without one in config, in ONE ClickHouse read, so resolveTz
-  // below reads memory instead of calling out once per rooftop.
-  await primeTeamDetails(scoped.filter((L) => !cfgOf.get(L.team_id)?.timezone).map((L) => L.team_id));
-  out.tzMismatches = await timezoneDrift(scoped, cfgOf);
-  const index = await readRunIndex("daily", isoDaysAgo(3));
+  const [reaped, , tzMismatches, index] = await Promise.all([
+    reapOrphans(cutoff),
+    primeTeamDetails(scoped.filter((L) => !cfgOf.get(L.team_id)?.timezone).map((L) => L.team_id)),
+    timezoneDrift(scoped, cfgOf),
+    readRunIndex("daily", isoDaysAgo(3)),
+  ]);
+  out.reaped = reaped;
+  out.tzMismatches = tzMismatches;
   const targets = prioritize(scoped, index, (L) => RUN_LOCAL_DATE || safeLocalDate(cfgOf.get(L.team_id)?.timezone));
   out.targets = targets.length;
 
