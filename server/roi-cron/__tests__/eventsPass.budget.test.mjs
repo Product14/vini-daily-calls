@@ -69,6 +69,14 @@ function installFetch(log, { meetingsFor = () => [], delayMs = 0, chKnows = (t) 
         const rows = ids.map((t) => JSON.stringify({ team_id: t, timezone: chTz(t), working_days: JSON.stringify({ monday: { is_working: true, start_time: "09:00", end_time: "17:00" } }) }));
         return new Response(rows.join("\n"), { status: 200 });
       }
+      // The appointment gate confirms every booking in ClickHouse (fail closed since 2026-10-09). This
+      // suite is about the pass budget, so every id it asks about exists as a Vini booking.
+      if (sql.includes("dealer_leads.meetings AS m FINAL")) {
+        const list = (sql.match(/m\.meeting_id IN \(([^)]*)\)/) || [])[1] || "";
+        const ids = [...list.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+        const rows = ids.map((id) => JSON.stringify({ rowId: `oid_${id}`, meetingId: id, leadId: "", source: "spyne", metaSource: "", status: "scheduled", serviceType: "", startTime: "", createdAt: "", isActive: 1, deleted: 0 }));
+        return new Response(rows.join("\n"), { status: 200 });
+      }
       return new Response("", { status: 200 });
     }
     if (u.startsWith("http://spyne.test")) { log.spyne.push(u); return json({ message: "unauthorized" }, 401); }
