@@ -18,6 +18,8 @@
   },
   "crons": [
     { "path": "/api/cron/roi-email",   "schedule": "0 * * * *"   },
+    { "path": "/api/cron/roi-digest/weekly",  "schedule": "20 * * * *" },
+    { "path": "/api/cron/roi-digest/monthly", "schedule": "40 * * * *" },
     { "path": "/api/cron/roi-events/shard/0/4", "schedule": "*/4 0-2,12-23 * * *" },
     { "path": "/api/cron/roi-events/shard/1/4", "schedule": "*/4 0-2,12-23 * * *" },
     { "path": "/api/cron/roi-events/shard/2/4", "schedule": "*/4 0-2,12-23 * * *" },

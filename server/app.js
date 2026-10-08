@@ -3932,19 +3932,44 @@ app.get("/api/cron/roi-email", async (req, res) => {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
-    const { runOnce, runCadence } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const { runOnce } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    // Daily only. Weekly/monthly used to run here AFTER runOnce, in the same 300s function, so on
+    // every hour runOnce overran they never ran at all (2026-10-01 monthly: 41 rows stuck
+    // "scheduled", 0 sent; 2026-10-05 weekly: nothing written). They have their own route below.
     const summary = await runOnce();
-    // Weekly/monthly digests run in the same hourly pass; each is internally gated to
-    // its send-day (Mon / 1st) + send-hour, so off-day passes are cheap no-ops.
-    const weekly = await runCadence("weekly").catch((e) => ({ error: String(e).slice(0, 120) }));
-    const monthly = await runCadence("monthly").catch((e) => ({ error: String(e).slice(0, 120) }));
-    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary, weekly, monthly });
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
   } catch (err) {
     console.error("GET /api/cron/roi-email error:", err?.message ?? err);
     // A total crash of the digest cron writes no rows and would otherwise be invisible → alert loudly.
     try {
       const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
       await postSystemicAlert({ source: "Daily digest", title: "digest cron CRASHED", detail: `runOnce threw before completing: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: "hourly digest cron" });
+    } catch { /* best-effort */ }
+    return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
+  }
+});
+
+// ── Hourly weekly / monthly digest cron — one Vercel invocation per cadence ──────────────────
+// Each cadence gets its own function and its own 300s, so neither can be starved by the daily pass
+// or by the other. Off its send day a pass is a cheap no-op (gated on weekly_send_dow /
+// monthly_send_day + the send hour before any metrics are fetched).
+app.get("/api/cron/roi-digest/:cadence", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const cadence = req.params.cadence;
+  if (cadence !== "weekly" && cadence !== "monthly") return res.status(404).json({ error: "cadence must be weekly or monthly" });
+  const Cad = cadence === "weekly" ? "Weekly" : "Monthly";
+  try {
+    const { runCadence } = require("./roi-cron/runner.cjs");
+    const summary = await runCadence(cadence);
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), cadence, summary });
+  } catch (err) {
+    console.error(`GET /api/cron/roi-digest/${cadence} error:`, err?.message ?? err);
+    try {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      await postSystemicAlert({ source: `${Cad} digest`, title: `${cadence} digest cron CRASHED`, detail: `runCadence threw before completing: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: `hourly ${cadence} digest cron` });
     } catch { /* best-effort */ }
     return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
   }
