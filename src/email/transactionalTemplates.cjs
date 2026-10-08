@@ -1280,10 +1280,12 @@ function renderOverdueActionItemsDigest(opts) {
   var shown = items.slice(0, 10);
   var hidden = Math.max(0, total - shown.length);
 
-  // Red banner: total count + "resolve now"
+  // Red banner: total count + "resolve now". The counts are LEADS, not items (2026-10-09): the headline
+  // comes from one uncapped lead-grain count (eventRunner overdueDigestPayload), and one row below is
+  // one lead, so "N action items" both over- and under-stated what the dealer had to work.
   var banner = '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:16px;"><tr><td style="padding:12px 16px;font-size:13px;font-weight:800;color:' + NEG + ';">' +
-    "&#9888; " + fmtInt(total) + " action item" + (total === 1 ? "" : "s") + " past SLA — resolve now." +
-    (totalPending > 0 ? '<div style="font-size:11.5px;font-weight:600;color:' + BODY + ';margin-top:4px;">' + fmtInt(totalPending) + " total pending action item" + (totalPending === 1 ? "" : "s") + " rooftop-wide</div>" : "") +
+    "&#9888; " + fmtInt(total) + " lead" + (total === 1 ? "" : "s") + " with follow-ups past SLA. Resolve now." +
+    (totalPending > 0 ? '<div style="font-size:11.5px;font-weight:600;color:' + BODY + ';margin-top:4px;">' + fmtInt(totalPending) + " lead" + (totalPending === 1 ? "" : "s") + " with open action items rooftop-wide</div>" : "") +
     "</td></tr></table>";
 
   // Item list: customer + top detail + age
@@ -1302,10 +1304,10 @@ function renderOverdueActionItemsDigest(opts) {
   var itemTable = items.length > 0 ? '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;overflow:hidden;">' +
     itemCards + '</table>' : '';
 
-  var moreNote = hidden > 0 ? '<div style="margin-top:12px;padding:12px 16px;font-size:12px;color:' + MUTE + ';border:1px dashed ' + LINE + ';border-radius:12px;text-align:center;">+' + fmtInt(hidden) + " more item" + (hidden === 1 ? "" : "s") + " — view all in the console</div>" : '';
+  var moreNote = hidden > 0 ? '<div style="margin-top:12px;padding:12px 16px;font-size:12px;color:' + MUTE + ';border:1px dashed ' + LINE + ';border-radius:12px;text-align:center;">+' + fmtInt(hidden) + " more lead" + (hidden === 1 ? "" : "s") + ". View all in the console</div>" : '';
 
   var body = banner + itemTable + moreNote + '<div style="margin-top:14px;">' + btnPrimary("Resolve now", url) + "</div>";
-  var title = fmtInt(total) + " overdue action item" + (total === 1 ? "" : "s");
+  var title = fmtInt(total) + " lead" + (total === 1 ? "" : "s") + " overdue";
   return stampValue(shell(opts, "Overdue · digest", title, body), total > 0);
 }
 
@@ -1323,7 +1325,7 @@ function renderOverdueActionItemsDigestSms(opts) {
 
   var lines = [
     "OVERDUE" + (opts.rooftopName ? " · " + opts.rooftopName : ""),
-    total + " action item" + (total === 1 ? "" : "s") + " past SLA:",
+    total + " lead" + (total === 1 ? "" : "s") + " past SLA:",
   ];
   shown.forEach(function (it) {
     var age = it.dueAt ? overdueAge(it.dueAt) : "";
