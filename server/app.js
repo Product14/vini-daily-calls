@@ -2778,9 +2778,24 @@ app.post("/api/email/roi-event-send-now", requireTrackerAuth, async (req, res) =
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
 
     const { data: row, error: rowErr } = await sb.from("roi_event_emails")
-      .select("id,team_id,department,email_type,subject,rendered_html,recipients").eq("id", id).maybeSingle();
+      .select("id,team_id,department,email_type,event_key,subject,rendered_html,recipients").eq("id", id).maybeSingle();
     if (rowErr || !row) return res.status(404).json({ error: "event email not found" });
     if (!row.rendered_html) return res.status(400).json({ error: "no rendered copy to send" });
+    // Same rule as roi-event-generate-send: an appointment goes to its OWN department. Recipients below
+    // follow row.department, and the five Stillwell rows sent from the Sales row (2026-10-07) are stored
+    // under sales — a resend of one would reach the sales team again.
+    if (row.email_type === "post_appointment") {
+      const { hasClickhouseCreds } = await import("./agentMetrics.js");
+      const key = String(row.event_key || "").replace(/^manual-post_appointment-/, "");
+      if (key && key !== "latest" && hasClickhouseCreds()) {
+        const { meetingDeptCH } = await import("./roi-cron/eventPreviewCH.js");
+        const own = await meetingDeptCH(row.team_id, key);
+        if (own && own !== row.department) {
+          const Own = own === "service" ? "Service" : "Sales";
+          return res.status(409).json({ error: `This is a ${Own} appointment filed under ${row.department === "service" ? "Service" : "Sales"}. Send it from the ${Own} row so it reaches the ${own} team.` });
+        }
+      }
+    }
 
     // recipients: explicit override → the row's stored recipients → the rooftop's enabled recipients.
     // GATE (verified_at): whichever source supplies the addresses, a rooftop only ever emails
