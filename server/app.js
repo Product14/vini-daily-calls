@@ -2857,7 +2857,18 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     // 1) render the email from live ClickHouse data (same path as the preview)
     const { hasClickhouseCreds } = await import("./agentMetrics.js");
     if (!hasClickhouseCreds()) return res.status(500).json({ error: "ClickHouse not configured on this server" });
-    const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
+    const { previewEventCH, meetingDeptCH } = await import("./roi-cron/eventPreviewCH.js");
+    // An appointment goes to ITS OWN department's recipients. `dept` is the tracker row the click came
+    // from, and recipients below are picked by it — so a service booking sent from the Sales row went
+    // to the sales team (Stillwell Ford, 2026-10-07, 5 emails). Refuse rather than re-route: a send
+    // should never land somewhere other than the row the CSM is looking at.
+    if (emailType === "post_appointment" && eventKey) {
+      const own = await meetingDeptCH(teamId, eventKey);
+      if (own && own !== dept) {
+        const Own = own === "service" ? "Service" : "Sales";
+        return res.status(409).json({ error: `This is a ${Own} appointment. Send it from the ${Own} row so it reaches the ${own} team.` });
+      }
+    }
     // strict:true — on the SEND path, if eventKey doesn't resolve to that exact item, refuse rather than
     // substitute the rooftop's most-recent customer (which would email a dealer another customer's PII).
     const cfgTemplate = await roiConfigTemplate(teamId); // NB: `template` below is the mail-proxy template

@@ -110,6 +110,11 @@ const AI_DEPT = "if(service_type='service','service','sales')"; // mirror meetin
 // will never go out, and previews render an appointment nobody booked. Appended to every meetings
 // WHERE in this file (alias `m`).
 const APPT_NOT_WARM_TRANSFER = " AND lower(JSONExtractString(ifNull(m.meta,''),'source'))!='warm_transfer'";
+// An appointment's department is its OWN service_type — never the tracker row it is viewed from.
+// The cron gets this for free (the meetings API filters by serviceType); every tracker read has to
+// apply it itself. Stillwell Ford, 2026-10-07: the Sales row's drill-down listed all 27 service
+// appointments as eligible, five were sent from it, and the service bookings went to the sales team.
+const APPT_DEPT = "if(m.service_type='service','service','sales')";
 // "2021 Honda Odyssey EX-L" from meta.vehicle_details (year/make/model); '' when the task has none.
 const aiVehicle = (col) =>
   "trimBoth(concat(JSONExtractString(" + col + ",'vehicle_details','year'),' '," +
@@ -437,6 +442,18 @@ const SMS_HAS_REPLY =
 const APPT_DIR_JOIN =
   " LEFT JOIN (SELECT callId, any(report_inOutType) dir FROM dealer_leads.endcallreports WHERE __deleted=0 GROUP BY callId) ecr ON ecr.callId=m.call_id";
 
+// The department an appointment belongs to ('sales' | 'service'), or null when the key doesn't
+// resolve. The manual send path checks it against the tracker row the send came from (see
+// /api/email/roi-event-generate-send): recipients are picked per department, so a mismatch puts one
+// department's booking in the other department's inbox.
+export async function meetingDeptCH(teamId, eventKey) {
+  if (!teamId || !eventKey) return null;
+  const row = await one("SELECT " + APPT_DEPT + " dept FROM dealer_leads.meetings m" +
+    " WHERE m.team_id=" + lit(teamId) + " AND (m.meeting_id=" + lit(eventKey) + " OR m._id=" + lit(eventKey) + ")" +
+    " ORDER BY m._version DESC LIMIT 1");
+  return row ? row.dept : null;
+}
+
 export async function listEventsCH({ teamId, department, emailType, direction, sinceDays = 120, limit = 200, offset = 0 }) {
   if (!hasClickhouseCreds()) throw new Error("ClickHouse not configured on this server");
   if (!teamId) throw new Error("teamId required");
@@ -456,7 +473,8 @@ export async function listEventsCH({ teamId, department, emailType, direction, s
       " FROM dealer_leads.meetings m" + APPT_DIR_JOIN +
       " LEFT JOIN (SELECT lead_id, any(customer_id) cid FROM dealer_leads.leads" + teamPred(teamId) + " GROUP BY lead_id) l ON m.lead_id=l.lead_id" +
       " LEFT JOIN (SELECT customer_id, any(name) name, any(mobile_number) mobile_number FROM dealer_leads.customer" + teamPred(teamId) + " GROUP BY customer_id) c ON l.cid=c.customer_id" +
-      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER + " AND m.created_at >= " + since + dfilt(dx) +
+      " WHERE m.team_id=" + lit(teamId) + " AND m.is_active=1 AND m.source='spyne'" + APPT_NOT_WARM_TRANSFER +
+      " AND " + APPT_DEPT + "=" + lit(dept) + " AND m.created_at >= " + since + dfilt(dx) +
       " ORDER BY m.created_at DESC LIMIT 1 BY m.meeting_id LIMIT " + lim + " OFFSET " + off;
     return (await runClickhouse(sql)).map((r) => {
       const who = displayName(r);
