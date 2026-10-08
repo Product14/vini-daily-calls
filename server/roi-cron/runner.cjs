@@ -276,19 +276,24 @@ const resetApiCache = () => _apiCache.clear();
 // env token's enterprise, and the dealer-leads action-item stats came back all zero for every rooftop
 // from 2026-10-01 (audit F1/F18). Older reporting-vini deploys ignore the param.
 const entQS = (entId) => (entId ? `&enterprise_id=${encodeURIComponent(String(entId))}` : "");
+// The digest never shows lead sources (m.leadsBySource is stored, not rendered), so /api/reports may skip
+// that canonical upstream call. hotLeads is NOT omitted: for Sales, j.warmLeads ("Leads to call now") IS
+// the canonical hot-lead list. Older reporting-vini deploys ignore the param.
+const REPORTS_OMIT = "&omit=leadSources";
 // Resolves { j, byName }: the whole /api/reports response (the digest's appointment list, rooftop rungs and
 // prior basis are read from the SAME response the KPI numbers come from) plus the agents keyed by name.
 async function apiReport(teamId, start, end, entId) {
   const k = `${teamId}|${start}|${end}|${entId || ""}`;
   if (_apiCache.has(k)) return _apiCache.get(k);
   const p = (async () => {
-    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}${entQS(entId)}`, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
+    const res = await fetch(`${REPORTING_API_BASE}/api/reports?team_id=${encodeURIComponent(teamId)}&start=${start}&end=${end}${entQS(entId)}${REPORTS_OMIT}`, { headers: REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {}, signal: AbortSignal.timeout(REPORTING_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`reporting-api ${res.status} (${teamId} ${start}..${end}): ${(await res.text()).slice(0, 120)}`);
     const j = await res.json();
-    // The reporting API returns a zeroed report with `degraded:true` on a backend read failure.
-    // Treat that as a hard error so the digest holds (guardrail → no_data) instead of emailing
-    // "0 calls, 0 appointments" — sending zeros during an outage is itself a churn risk.
-    if (j && j.degraded) throw new Error(`reporting-api degraded (${teamId} ${start}..${end}) — holding digest`);
+    // The reporting API returns a zeroed report with `degraded:true` on a backend read failure, and
+    // (stab/reporting-parity) degraded:true + degradedReason:"canonical-timeout" when the canonical
+    // overview missed its deadline, i.e. partial Sales numbers. Either way: a hard error, so the digest
+    // holds instead of emailing zeros or a half-built report — sending those is itself a churn risk.
+    if (j && j.degraded) throw new Error(`reporting-api degraded${j.degradedReason ? ` (${j.degradedReason})` : ""} (${teamId} ${start}..${end}) — holding digest`);
     const byName = {};
     for (const a of j.agents || []) byName[a.name] = a;
     return { j, byName };

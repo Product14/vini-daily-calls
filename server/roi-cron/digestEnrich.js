@@ -39,14 +39,17 @@ function fmtSched(iso, tz) {
   }
 }
 
-// reporting-vini's read API requires a credential (it returns PII). The meetings call already forwards
-// the Spyne token as ?auth_key=; this header is a fallback to the trusted service secret so the call
-// still authorizes when no per-rooftop token was passed.
+// reporting-vini's read API requires a credential (it returns PII): the trusted service secret as Bearer,
+// so every call authorizes whether or not a per-rooftop Spyne token is passed.
 // canonical: reporting-vini authorizes on ITS service secret — prefer a dedicated REPORTING_CRON_SECRET
 // (= reporting-vini's secret), NOT necessarily this app's CRON_SECRET. Falls back to the old chain.
 const REPORTING_AUTH = process.env.REPORTING_CRON_SECRET || process.env.CRON_SECRET || process.env.DIGEST_SPYNE_TOKEN || process.env.SPYNE_API_TOKEN || "";
-async function fetchJson(url) {
+// A per-rooftop Spyne token rides in the X-Spyne-Token header (reporting-vini stab/reporting-parity),
+// never in the URL (?auth_key= ends up in request logs). The Bearer service secret above still
+// authorizes the call on any deploy; the rooftop's enterprise travels as enterprise_id.
+async function fetchJson(url, spyneToken) {
   const headers = REPORTING_AUTH ? { Authorization: `Bearer ${REPORTING_AUTH}` } : {};
+  if (spyneToken) headers["X-Spyne-Token"] = String(spyneToken);
   const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`reporting-api ${res.status}: ${(await res.text()).slice(0, 120)}`);
   return res.json();
@@ -59,7 +62,7 @@ async function fetchJson(url) {
  *   dept        — "sales" | "service" → serviceType filter (omit/both => rooftop-wide)
  *   enterpriseId— scopes every call to the rooftop's own enterprise (REQUIRED for cross-enterprise runs)
  *   apiBase     — Reporting service base URL (defaults to REPORTING_API_BASE)
- *   token       — Spyne API token forwarded as auth_key; else the service uses its own SPYNE_API_TOKEN
+ *   token       — Spyne API token, sent as the X-Spyne-Token header (never in the URL)
  *   start,end   — the REPORT window (yyyy-mm-dd, end exclusive).
  *   report      — the /api/reports response for exactly that window, already fetched by the runner for
  *                 the KPI numbers. When given, the appointment lists and warm leads are read from IT, so
@@ -75,8 +78,8 @@ export async function enrichRooftop(teamId, opts = {}) {
   const params = new URLSearchParams({ team_id: String(teamId) });
   if (opts.enterpriseId) params.set("enterprise_id", String(opts.enterpriseId));
   if (dept) params.set("serviceType", dept);
-  if (opts.token) params.set("auth_key", String(opts.token));
   const qs = params.toString();
+  const tok = opts.token ? String(opts.token) : undefined;
   const windowed = !!(opts.start && opts.end);
   // "Top vehicles" is a trailing N-day ranking from now (the meetings route takes `days`, not a period),
   // so the email labels it with N rather than presenting it as the report's own period.
@@ -86,14 +89,15 @@ export async function enrichRooftop(teamId, opts = {}) {
   // for the numbers; only a caller without one fetches it here.
   const reportUrl = `${base}/api/reports?team_id=${encodeURIComponent(String(teamId))}`
     + (opts.enterpriseId ? `&enterprise_id=${encodeURIComponent(String(opts.enterpriseId))}` : "")
-    + (windowed ? `&start=${encodeURIComponent(opts.start)}&end=${encodeURIComponent(opts.end)}` : "");
+    + (windowed ? `&start=${encodeURIComponent(opts.start)}&end=${encodeURIComponent(opts.end)}` : "")
+    + "&omit=leadSources"; // never shown in the digest; hotLeads is kept (it IS the Sales warm-lead list)
 
   // Fetch in parallel; a failure in one must not drop the others.
   const [reportRes, vehRes, upcomingRes] = await Promise.allSettled([
-    opts.report && typeof opts.report === "object" ? Promise.resolve(opts.report) : fetchJson(reportUrl),
-    fetchJson(`${base}/api/meetings?scope=top-vehicles&days=${tvDays}&${qs}`),
+    opts.report && typeof opts.report === "object" ? Promise.resolve(opts.report) : fetchJson(reportUrl, tok),
+    fetchJson(`${base}/api/meetings?scope=top-vehicles&days=${tvDays}&${qs}`, tok),
     // No report window → the old now-relative "upcoming" list (no caller does this today).
-    windowed ? Promise.resolve(null) : fetchJson(`${base}/api/meetings?scope=upcoming&${qs}`),
+    windowed ? Promise.resolve(null) : fetchJson(`${base}/api/meetings?scope=upcoming&${qs}`, tok),
   ]);
 
   const toRow = (svcReasons) => (m) => {

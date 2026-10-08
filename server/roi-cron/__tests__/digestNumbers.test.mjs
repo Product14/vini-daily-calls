@@ -161,6 +161,19 @@ test("A1: every reporting-vini call the digest makes carries the rooftop's own e
   const calls = log.api.filter((p) => !p.startsWith("/api/sync-health"));
   assert.ok(calls.some((p) => p.startsWith("/api/reports")) && calls.some((p) => p.startsWith("/api/action-items")) && calls.some((p) => p.startsWith("/api/meetings")), calls.join("\n"));
   for (const p of calls) assert.equal(new URL("http://x" + p).searchParams.get("enterprise_id"), "ent-t1", p);
+  // the digest never shows lead sources, so that upstream is skipped; hotLeads (the Sales call list) is not
+  for (const p of calls.filter((x) => x.startsWith("/api/reports"))) assert.equal(new URL("http://x" + p).searchParams.get("omit"), "leadSources", p);
+  assert.ok(!calls.some((p) => p.includes("auth_key=")), "no Spyne token in any URL");
+});
+
+test("A1: a canonical-timeout degraded report holds the digest (error row), never emails partial numbers", async () => {
+  const { runner, db, log } = load();
+  installFetch(log, { report: { agents: quietAgents(), degraded: true, degradedReason: "canonical-timeout" } });
+  await quiet(() => runner.runOnce());
+  const row = dailyRow(db);
+  assert.equal(row.status, "error");
+  assert.match(row.reason_detail, /degraded \(canonical-timeout\)/);
+  assert.equal(log.mail.length, 0);
 });
 
 test("A4: the appointment list is read from the SAME /api/reports response (no second day-window fetch)", async () => {
