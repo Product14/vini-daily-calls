@@ -17,7 +17,11 @@ const API_KEY_SID = process.env.TWILIO_API_KEY_SID || ACCOUNT_SID;
 const API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET || process.env.TWILIO_AUTH_TOKEN || "";
 const FROM = process.env.TWILIO_FROM || "";
 const MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID || "";
-const SMS_DRY_RUN = process.env.SMS_DRY_RUN !== "false"; // default TRUE — never send unless explicitly disabled
+// Default TRUE — never send unless explicitly disabled. "false" and "0" both disable, the SAME rule as the
+// email DRY_RUN in runner.cjs/eventRunner.cjs. This used to accept only the literal "false", so the
+// documented `=0` form kept SMS dry while the identical setting made email live (A5-13).
+function envFlagTrue(v) { return !["false", "0"].includes(String(v ?? "").trim().toLowerCase()); }
+const SMS_DRY_RUN = envFlagTrue(process.env.SMS_DRY_RUN);
 
 // Best-effort E.164 normalization. Accepts "(775) 261-1534", "775-261-1534", "+17752611534".
 // Bare 10-digit US numbers get a +1; 11-digit starting with 1 gets a +. Already-E.164 passes through.
@@ -68,10 +72,33 @@ async function sendSms(to, body, opts) {
     if (res.ok) { var j = await res.json().catch(function () { return {}; }); return j.sid || null; }
     var text = await res.text().catch(function () { return ""; });
     // 4xx (except 429 rate-limit) is a permanent error — don't retry.
-    if (res.status < 500 && res.status !== 429) throw new Error("twilio " + res.status + ": " + text.slice(0, 300));
+    if (res.status < 500 && res.status !== 429) {
+      var err = new Error("twilio " + res.status + ": " + text.slice(0, 300));
+      err.status = res.status;
+      err.twilioCode = twilioCode(text);
+      // An AUTH failure is about OUR account, not this message or recipient: every send fails the same
+      // way until the credential is fixed (Twilio 401 / code 20003 for six days, 2026-10-02 → 10-08).
+      // Tagged so the caller holds the event instead of burning its dedupe key (see isAuthError).
+      if (isAuthStatus(res.status, err.twilioCode)) err.code = "TWILIO_AUTH";
+      throw err;
+    }
     await new Promise(function (r) { setTimeout(r, attempt * 1500); });
   }
   throw new Error("sendSms: failed after retries");
 }
 
-module.exports = { sendSms: sendSms, toE164: toE164, SMS_DRY_RUN: SMS_DRY_RUN };
+function twilioCode(text) {
+  try { var j = JSON.parse(text); return j && j.code != null ? Number(j.code) : null; } catch (e) { return null; }
+}
+// 401, or Twilio's own auth codes (20003 authenticate, 20005 account not active) whatever the HTTP status.
+function isAuthStatus(status, code) { return status === 401 || code === 20003 || code === 20005; }
+// True for an error (or a recorded error string) that means "the Twilio credential is bad" — the whole
+// channel is down, so the event must stay re-claimable rather than be recorded as a failed send.
+function isAuthError(e) {
+  if (!e) return false;
+  if (e.code === "TWILIO_AUTH") return true;
+  var msg = String(e.message || e);
+  return /twilio 401\b/.test(msg) || /"code"\s*:\s*2000[35]\b/.test(msg) || /\b2000[35]\b.*authenticat/i.test(msg);
+}
+
+module.exports = { sendSms: sendSms, toE164: toE164, SMS_DRY_RUN: SMS_DRY_RUN, envFlagTrue: envFlagTrue, isAuthError: isAuthError };

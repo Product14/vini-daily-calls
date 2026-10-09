@@ -12,6 +12,8 @@
  *   A daily email is "sent" for a rooftop on a date when at least one
  *   recipient in EITHER the sales OR service department received it.
  */
+import type { CellState, RowFacts, RunLite } from "./trackerModel.ts";
+
 export type SendStatus =
   | "sent"
   | "not_sent"
@@ -65,6 +67,9 @@ export type CellRun = {
   department: DeptKind;
   status: SendStatus;
   reason?: string; // raw backend reason (e.g. 'dry_run', 'no_data')
+  /** The run's own roi_digest_runs.local_date. Equals the cell date for daily; a weekly/monthly cell
+   * spans a period, so its run can carry any date inside it (e.g. the 1st for the cron's monthly). */
+  localDate?: string;
   /** Stored digest payload. The grid load no longer carries it (see loadDigestRun); the cell drawer
    * fetches it by runId. Set only where a caller already has it. */
   metrics?: DigestMetrics;
@@ -88,6 +93,16 @@ export type SendCell = {
   reason?: NotSentReason;
   /** Per-department runs behind this cell (real data from roi_digest_runs). */
   runs?: CellRun[];
+  /** What the cell means (trackerModel.ts): drives its label, colour, CTA and how it counts. */
+  state?: CellState;
+  /** The period's send time (+ grace) has passed for this rooftop. */
+  due?: boolean;
+  /** The cron's key for this cell's period (its run's local_date, else periodKeyForColumn). */
+  periodKey?: string;
+  /** roi_digest_runs.reason of the run behind the state, as written. */
+  rawReason?: string | null;
+  /** Extra detail for the tooltip / drawer (the run's reason_detail, or why a cell isn't expected). */
+  detail?: string;
 };
 
 /** Account-level BUSINESS lifecycle stage (roi_rooftop_config.lifecycle_status) — orthogonal to
@@ -160,9 +175,31 @@ export type RooftopRow = {
   config?: RooftopConfig;
   /** roi_rooftop_config.sms_enabled — rooftop-level master switch for the SMS channel. */
   smsEnabled?: boolean;
+  /** This department's roi_digest_runs in the loaded window. Cells are built from these per anchor
+   * (trackerModel.buildCells), so the anchor can follow the tab on screen. */
+  digestRuns?: RunLite[];
+  /** What decides whether a cell was expected (dry run, toggles, churn, eligible recipients). */
+  facts?: RowFacts;
+  /** Latest due period key per cadence (trackerModel.latestDueKey), set when cells are built. */
+  dueKeys?: Record<Cadence, string>;
+  /** Live in the emailer but no roi_rooftop_config row: nothing about it can be saved yet. */
+  unconfigured?: boolean;
+  /** Recipients the cron would email, per cadence (server-computed, the cron's own predicate). */
+  eligible?: Partial<Record<Cadence, number>>;
+  /** All departments flipped to is_live=false ("Remove from emailer"). */
+  removedFromEmailer?: boolean;
+  /** Config the tracker can't edit but must show, because it changes what gets sent. */
+  readOnly?: {
+    chatEnabled?: boolean | null;
+    postConversationTemplate?: string | null;
+    postConversationMode?: string | null;
+    outboundRequiresReply?: boolean | null;
+    smsPostConversationCadence?: string | null;
+    workingHours?: unknown;
+  };
 };
 
-/** The 7 configurable email types, in display order. */
+/** The configurable email types (roi_rooftop_config.*_enabled), in display order. */
 export const EMAIL_TYPES = [
   { key: "daily_enabled", label: "Daily digest" },
   { key: "weekly_enabled", label: "Weekly digest" },
@@ -597,6 +634,7 @@ export function countStatus(
     not_sent: 0,
     not_subscribed: 0,
     scheduled: 0,
+    error: 0,
   };
   for (const r of rooftops) {
     const cells = cadence === "daily" ? r.daily : cadence === "weekly" ? r.weekly : r.monthly;

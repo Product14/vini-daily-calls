@@ -14,6 +14,8 @@ export type SendDigestOpts = {
   rooftopName: string;
   timezone?: string;
   localDate: string; // the cell's date (roi_digest_runs.local_date)
+  /** The period's cadence. The server records the send on THAT row (it used to always write daily). */
+  cadence?: Cadence;
   metrics?: DigestMetrics | null;
   recipients: string[];
 };
@@ -32,7 +34,7 @@ export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; 
     const res = await fetch("/api/recipients", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled, phone: opts.phone, smsEnabled: opts.smsEnabled, role: opts.role }),
+      body: JSON.stringify({ teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", email, name: opts.name, emailEnabled: opts.emailEnabled, phone: opts.phone, smsEnabled: opts.smsEnabled, role: opts.role, actor: await getActorName() }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) return { ok: false, error: (body as { error?: string }).error || `Add failed (HTTP ${res.status})` };
@@ -42,42 +44,64 @@ export async function addRecipientNow(opts: { teamId?: string; dept?: DeptKind; 
   }
 }
 
-async function postJson(path: string, body: unknown): Promise<{ ok: boolean; error?: string }> {
+// Every recipient change carries who made it: the server writes it to roi_config_audit_log.
+async function postJson(path: string, body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...trackerAuthHeaders() }, body: JSON.stringify(body) });
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", ...trackerAuthHeaders() }, body: JSON.stringify({ actor: await getActorName(), ...body }) });
     const j = await res.json().catch(() => ({}));
     if (!res.ok || !(j as { ok?: boolean }).ok) return { ok: false, error: (j as { error?: string }).error || `Request failed (HTTP ${res.status})` };
     return { ok: true };
   } catch (e) { return { ok: false, error: String(e) }; }
 }
 
-// Anti-churn override prompt: every customer-facing send goes through this. `doPost`
-// performs the request with an optional override password in its body. If the server
-// replies { blocked: true } (the email shows no value → churn risk), we prompt the
-// operator for the password and retry once with it; the server only sends if it
-// matches (DANGER). Returns the parsed body plus an `ok`/`blocked` summary.
-type SendResult = { ok: boolean; error?: string; blocked?: boolean; body?: Record<string, unknown> };
-async function sendWithOverridePrompt(doPost: (override?: string) => Promise<Response>): Promise<SendResult> {
-  const run = async (override?: string): Promise<{ status: number; b: Record<string, unknown> }> => {
-    const res = await doPost(override);
+// Every customer-facing send goes through this. `doPost` performs the request with whatever
+// overrides have been typed so far. The server can refuse in three ways, each answered by its own
+// typed DANGER confirmation, once:
+//   · { blocked: true }            — the email shows no value (churn risk)        → `override`
+//   · { gated: true, reason }      — the cron would not send this (churned, dry
+//                                    run, type switched off, lead capture)        → `gateOverride`
+//   · { gated: true, reason: "already_sent" } — the dealer already got it         → `duplicateOverride`
+// A gate the server marks not overridable (server dry run, removed from the emailer) is final.
+type SendResult = { ok: boolean; error?: string; blocked?: boolean; gated?: boolean; body?: Record<string, unknown> };
+type Overrides = { override?: string; gateOverride?: string; duplicateOverride?: string };
+async function sendWithOverridePrompt(doPost: (o: Overrides) => Promise<Response>): Promise<SendResult> {
+  const o: Overrides = {};
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await doPost(o);
     const b = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return { status: res.status, b };
-  };
-  let { status, b } = await run();
-  if (b && b.blocked === true && b.ok !== true) {
-    const pw = await promptDialog({
-      title: "This email shows no value to the customer",
-      message: "Sending it now is a churn risk. Type the override password to send it anyway.",
-      label: "Override password",
-      secret: true,
-      tone: "danger",
-      confirmLabel: "Send anyway",
-    });
-    if (!pw || !pw.trim()) return { ok: false, blocked: true, error: "Send cancelled — the email shows no value.", body: b };
-    ({ status, b } = await run(pw.trim()));
+    if (b && b.ok === true) return { ok: true, body: b };
+    const err = (b?.error as string) || `Request failed (HTTP ${res.status})`;
+    if (b?.blocked === true && !o.override) {
+      const pw = await promptDialog({
+        title: "This email shows no value to the customer",
+        message: "Sending it now is a churn risk. Type DANGER to send it anyway.",
+        label: "Type DANGER",
+        secret: true,
+        tone: "danger",
+        confirmLabel: "Send anyway",
+      });
+      if (!pw || !pw.trim()) return { ok: false, blocked: true, error: "Not sent. The email shows no value.", body: b };
+      o.override = pw.trim();
+      continue;
+    }
+    if (b?.gated === true) {
+      if (b.overridable !== true) return { ok: false, gated: true, error: err, body: b };
+      const field: keyof Overrides = b.reason === "already_sent" ? "duplicateOverride" : "gateOverride";
+      if (o[field]) return { ok: false, gated: true, error: err, body: b };
+      const pw = await promptDialog({
+        title: b.reason === "already_sent" ? "This email already went out" : "The scheduled emails would not send this",
+        message: `${err}\n\nType DANGER to send it anyway. The override is recorded with the send.`,
+        label: "Type DANGER",
+        tone: "danger",
+        confirmLabel: "Send anyway",
+      });
+      if (!pw || !pw.trim()) return { ok: false, gated: true, error: `Not sent. ${err}`, body: b };
+      o[field] = pw.trim();
+      continue;
+    }
+    return { ok: false, blocked: b?.blocked === true, error: err, body: b };
   }
-  if (b && b.ok === true) return { ok: true, body: b };
-  return { ok: false, blocked: b?.blocked === true, error: (b?.error as string) || `Request failed (HTTP ${status})`, body: b };
+  return { ok: false, error: "Not sent." };
 }
 
 /** Speed to Lead EMAIL channel state for a rooftop — read live from conversational-ai (the same
@@ -139,18 +163,18 @@ export const setRecipientSubscriptionNow = (opts: { teamId?: string; email: stri
   postJson("/api/recipients/subscription", { teamId: opts.teamId, email: opts.email, type: opts.type, channel: opts.channel, enabled: opts.enabled });
 
 /** Update a rooftop's send hour / minute / timezone / weekly-monthly send-day, or the SMS master switch (sms_enabled). */
-export const updateRooftopConfigNow = async (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean; weekly_send_dow?: number; monthly_send_day?: number }) =>
-  postJson("/api/rooftop-config", { ...opts, actor: await getActorName() });
+export const updateRooftopConfigNow = (opts: { teamId?: string; sendHour?: number; sendMinute?: number; timezone?: string; sms_enabled?: boolean; weekly_send_dow?: number; monthly_send_day?: number }) =>
+  postJson("/api/rooftop-config", { ...opts });
 
 /** Assign a CSM (name + email both required) → enables both departments. */
 export const addCsmNow = async (opts: { teamId?: string; name: string; email: string }) => {
   if (!opts.name?.trim() || !/\S+@\S+\.\S+/.test(opts.email || "")) return { ok: false, error: "CSM name and a valid email are required." };
-  return postJson("/api/csm", { teamId: opts.teamId, name: opts.name.trim(), email: opts.email.trim(), actor: await getActorName() });
+  return postJson("/api/csm", { teamId: opts.teamId, name: opts.name.trim(), email: opts.email.trim() });
 };
 
 /** Report a missing rooftop → emails product@spyne.ai + subhav.malhotra@spyne.ai. */
 export const reportMissingRooftopNow = (opts: { teamId?: string; teamName?: string; departments?: string[]; csm?: string; csmEmail?: string; note?: string }) =>
-  postJson("/api/missing-rooftop", opts);
+  postJson("/api/missing-rooftop", { ...opts });
 
 export type GenerateSendSummary = {
   cadence: Cadence;
@@ -160,14 +184,21 @@ export type GenerateSendSummary = {
   no_recipients: number;
   no_data: number;
   errors: number;
+  /** Set by a runner that skips a period it already sent (WS-A). */
+  already_sent?: number;
+  /** Held without sending (dry run) — WS-A's name for it; older runners report `suppressed`. */
+  held?: number;
+  /** The period key the runner actually built. */
+  localDate?: string;
+  paused?: number;
+  churned?: number;
 };
 
 /**
- * On-demand "Generate & send {cadence}": the server fetches fresh metrics for the
- * rolling window (weekly = last 7 days, monthly = last 30), renders the digest, and
- * sends to the rooftop's real recipients — bypassing the cron's send-day/send-hour
- * gates. Scope to one rooftop with teamId+dept, or omit both to run all live rooftops.
- * Pass dryRun:true to render + store a suppressed preview without emailing.
+ * On-demand "Generate & send {cadence}" for ONE rooftop department and ONE period (localDate, the
+ * cron's key): the server checks the cron's gates, fetches fresh metrics for that period, renders
+ * the digest and sends it to the department's eligible recipients, skipping only the send-day /
+ * send-hour timing. Pass dryRun:true to render + store a held preview without emailing.
  */
 export type DigestPreview = {
   ok: boolean;
@@ -210,12 +241,12 @@ export async function renderStoredPreview(opts: { teamId: string; dept: DeptKind
   }
 }
 
-export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind }): Promise<{ ok: boolean; error?: string; preview?: DigestPreview }> {
+export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind; localDate?: string }): Promise<{ ok: boolean; error?: string; preview?: DigestPreview }> {
   try {
     const res = await fetch("/api/email/roi-generate-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-      body: JSON.stringify({ cadence: opts.cadence, teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales" }),
+      body: JSON.stringify({ cadence: opts.cadence, teamId: opts.teamId, department: opts.dept === "service" ? "service" : "sales", localDate: opts.localDate }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !(body as { ok?: boolean }).ok) {
@@ -227,18 +258,25 @@ export async function generatePreviewNow(opts: { cadence: Cadence; teamId?: stri
   }
 }
 
-export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind; dryRun?: boolean }): Promise<{ ok: boolean; error?: string; summary?: GenerateSendSummary }> {
+/** Build and send ONE department's digest for a period. `localDate` is the period key in cron
+ * convention (daily: report date; weekly: last day of the window; monthly: the 1st), so the clicked
+ * cell's period is what gets built and recorded. */
+export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: string; dept?: DeptKind; localDate?: string; dryRun?: boolean }): Promise<{ ok: boolean; error?: string; summary?: GenerateSendSummary }> {
+  if (!opts.teamId) return { ok: false, error: "teamId required" };
   try {
-    const r = await sendWithOverridePrompt((override) =>
+    const actor = await getActorName();
+    const r = await sendWithOverridePrompt((o) =>
       fetch("/api/email/roi-generate-send", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           cadence: opts.cadence,
           teamId: opts.teamId,
-          department: opts.teamId ? (opts.dept === "service" ? "service" : "sales") : undefined,
+          department: opts.dept === "service" ? "service" : "sales",
+          localDate: opts.localDate,
           dryRun: opts.dryRun === true,
-          override,
+          actor,
+          ...o,
         }),
       }));
     if (!r.ok) return { ok: false, error: r.error };
@@ -252,16 +290,18 @@ export async function generateAndSendNow(opts: { cadence: Cadence; teamId?: stri
  * Render a transactional email live (from ClickHouse) and send it to the rooftop's
  * recipients — the per-cell "Send to customer" for a type with no stored event yet.
  */
-export async function generateSendEventNow(opts: { teamId?: string; enterpriseId?: string; department?: DeptKind; emailType: string; eventKey?: string; rooftopName?: string; tz?: string }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
+export async function generateSendEventNow(opts: { teamId?: string; enterpriseId?: string; department?: DeptKind; emailType: string; eventKey?: string; cronEventKey?: string; cronEventKeys?: string[]; rooftopName?: string; tz?: string }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
   try {
-    const r = await sendWithOverridePrompt((override) =>
+    const actor = await getActorName();
+    const r = await sendWithOverridePrompt((o) =>
       fetch("/api/email/roi-event-generate-send", {
         method: "POST", headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           teamId: opts.teamId, enterpriseId: opts.enterpriseId,
           department: opts.department === "service" ? "service" : "sales",
-          emailType: opts.emailType, eventKey: opts.eventKey, rooftopName: opts.rooftopName, tz: opts.tz,
-          override,
+          emailType: opts.emailType, eventKey: opts.eventKey, cronEventKey: opts.cronEventKey, cronEventKeys: opts.cronEventKeys, rooftopName: opts.rooftopName, tz: opts.tz,
+          actor,
+          ...o,
         }),
       }));
     if (!r.ok) return { ok: false, error: r.error };
@@ -280,18 +320,20 @@ export async function sendDigestNow(opts: SendDigestOpts): Promise<{ ok: boolean
     rooftopName: opts.rooftopName, dept, teamId: opts.teamId,
     enterpriseId: opts.enterpriseId, reportDate, timezone: opts.timezone,
   });
-  const subject = `${dept === "service" ? "Service" : "Sales"} Daily Digest — ${opts.rooftopName}`;
+  const subject = `${dept === "service" ? "Service" : "Sales"} Daily Digest — ${opts.rooftopName}`; // the daily template is the only one rendered here
 
   try {
-    const r = await sendWithOverridePrompt((override) =>
+    const actor = await getActorName();
+    const r = await sendWithOverridePrompt((o) =>
       fetch("/api/email/roi-send-now", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-        body: JSON.stringify({ teamId: opts.teamId, department: dept, localDate: opts.localDate, to: recipients, subject, html, override }),
+        body: JSON.stringify({ teamId: opts.teamId, enterpriseId: opts.enterpriseId, department: dept, cadence: opts.cadence ?? "daily", localDate: opts.localDate, to: recipients, subject, html, actor, ...o }),
       }));
     if (!r.ok) return { ok: false, error: r.error };
     if ((r.body as { dbUpdated?: boolean })?.dbUpdated === false) {
-      return { ok: true, error: "Email sent, but the run wasn't marked in Supabase (set ROI_SUPABASE_SERVICE_KEY on the server)." };
+      const why = (r.body as { dbError?: string | null })?.dbError;
+      return { ok: true, error: `Email sent, but the tracker could not record it${why ? ` (${why})` : ""}. Tell product before sending it again.` };
     }
     return { ok: true };
   } catch (e) {
@@ -302,11 +344,12 @@ export async function sendDigestNow(opts: SendDigestOpts): Promise<{ ok: boolean
 /** Resend a STORED transactional event email by row id (anti-churn gated). */
 export async function sendStoredEventNow(opts: { id: string; to?: string[] }): Promise<{ ok: boolean; error?: string; to?: string[] }> {
   try {
-    const r = await sendWithOverridePrompt((override) =>
+    const actor = await getActorName();
+    const r = await sendWithOverridePrompt((o) =>
       fetch("/api/email/roi-event-send-now", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
-        body: JSON.stringify({ id: opts.id, to: opts.to, override }),
+        body: JSON.stringify({ id: opts.id, to: opts.to, actor, ...o }),
       }));
     if (!r.ok) return { ok: false, error: r.error };
     return { ok: true, to: (r.body as { to?: string[] })?.to };

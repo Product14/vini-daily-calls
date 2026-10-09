@@ -20,6 +20,9 @@ import { readAgentCache, writeAgentCache, hasCacheDb } from "./agentCache.js";
 // the digest + transactional crons so a bad address is blocked identically on every send path.
 // Bounces are scored against the sending DOMAIN, so one dead address costs every rooftop.
 const emailHealth = require("./roi-cron/emailHealth.cjs");
+// The rules every MANUAL send applies before it emails anyone (churn, dry run, type toggles, the
+// cron's recipient predicate). Same answers the crons give; see sendGates.cjs.
+const sendGates = require("./roi-cron/sendGates.cjs");
 
 // Best-effort run log, mirrors what server/roi-cron/runner.cjs writes for
 // sync-live/sync-lifecycle — gives every refresh tier a "last synced" trail
@@ -1183,7 +1186,8 @@ app.get("/api/vins/export", async (req, res) => {
 app.get("/api/scheduled-report", async (req, res) => {
   // ── Auth ───────────────────────────────────────────────────────────────────
   const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && req.headers.authorization !== `Bearer ${cronSecret}`) {
+  // Fail closed: an unset secret must not open the route (same rule as every /api/cron/* route).
+  if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
@@ -2336,11 +2340,24 @@ app.get("/api/vini/rooftops", async (_req, res) => {
 // Email Report tab) and POSTs it here. Server fetches active recipients from
 // Supabase, renders an inline-styled HTML email, and sends via the Spyne
 // mail proxy.
-app.post("/api/programs/send-report", async (req, res) => {
+// Signed-in only, internal recipients only, our own links only: this route sends Spyne-branded mail
+// from mail.spyne.ai, and it used to let anyone on the internet pick the recipients, the subject and
+// the CTA link (A5-10). The Programs page must send the tracker token (trackerAuthHeaders()).
+app.post("/api/programs/send-report", requireTrackerAuth, async (req, res) => {
   try {
-    const { payload, subject, dashboardUrl, recipientsOverride } = req.body ?? {};
+    const { payload, recipientsOverride } = req.body ?? {};
+    let { subject, dashboardUrl } = req.body ?? {};
     if (!payload || !Array.isArray(payload.perAgent) || !Array.isArray(payload.section2)) {
       return res.status(400).json({ error: "payload missing or malformed" });
+    }
+    subject = typeof subject === "string" ? subject.replace(/[\r\n]+/g, " ").trim().slice(0, 200) : undefined;
+    // A preview renders and returns HTML to the caller, it sends nothing: an unknown link is just
+    // dropped. A send refuses it, along with any non-@spyne.ai recipient.
+    if (req.query?.preview === "1") {
+      if (dashboardUrl != null && !sendGates.dashboardHostOk(dashboardUrl)) dashboardUrl = null;
+    } else {
+      const problem = sendGates.programsReportProblem({ recipientsOverride, dashboardUrl });
+      if (problem) return res.status(400).json({ error: problem });
     }
 
     // Debug: payload structure summary. If tables come up blank in the
@@ -2425,58 +2442,90 @@ const digestPixel = (team, dept, cadence, dt) =>
   pixelTag(`t=${encodeURIComponent(team)}&d=${encodeURIComponent(dept)}&c=${encodeURIComponent(cadence || "daily")}&dt=${encodeURIComponent(dt)}`);
 const eventPixel = (id) => pixelTag(`id=${encodeURIComponent(id)}`);
 
+// ─── Shared context for the tracker's manual send paths ─────────────────────
+// Everything a gate needs about one (team, department): the rooftop config row and the department's
+// roi_live_departments row. Read with the service key. Never throws on a missing row: a missing
+// config is a real state the gates answer (daily sends on defaults, weekly/monthly/events don't).
+const _GATE_CFG_COLS = "team_id,enterprise_id,rooftop_name,team_name,timezone,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,post_conversation_template,lifecycle_status,churn_date";
+async function _gateContext(sb, teamId, department) {
+  const [cfgRes, liveRes] = await Promise.all([
+    sb.from("roi_rooftop_config").select(_GATE_CFG_COLS).eq("team_id", teamId).maybeSingle(),
+    sb.from("roi_live_departments").select("team_id,department,is_live,dry_run").eq("team_id", teamId).eq("department", department),
+  ]);
+  if (cfgRes.error) throw new Error(`config read failed: ${cfgRes.error.message}`);
+  if (liveRes.error) throw new Error(`live departments read failed: ${liveRes.error.message}`);
+  const lives = liveRes.data ?? [];
+  return { cfg: cfgRes.data ?? null, live: lives.find((l) => l.is_live) ?? lives[0] ?? null };
+}
+/** The dealer's own calendar date (YYYY-MM-DD). An unusable zone falls back to New York instead of
+ * throwing, so one bad config value can't fail a request. */
+function _dealerToday(tz) {
+  const fmt = (z) => new Intl.DateTimeFormat("en-CA", { timeZone: z, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  try { return fmt(tz || "America/New_York"); } catch { return fmt("America/New_York"); }
+}
+/** Who clicked: the tracker sends the browser's stored name with every write (getActorName()). */
+function _actorOf(req) {
+  const a = String((req.body ?? {}).actor ?? req.headers["x-tracker-actor"] ?? "").trim().slice(0, 120);
+  return a || "unknown (tracker)";
+}
+const _ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 // ─── ROI Email Tracker · real "send now" ────────────────────────────────────
-// Forwards the rendered digest HTML to the mail proxy AND marks the run sent in
-// the ROI Supabase (status=sent, recipients received, rendered_html stored) so
-// the tracker shows it as sent and the exact HTML is viewable.
-// Body: { teamId, department, localDate, to:[emails], subject, html }
+// Forwards the rendered digest HTML to the mail proxy AND records the send on the period's
+// roi_digest_runs row, so the tracker shows it as sent and the exact HTML is viewable.
+// Body: { teamId, department, cadence?, localDate, to:[emails], subject, html, override?, gateOverride?, actor? }
+//
+// Gates (sendGates.canSendDigest): server DRY_RUN, department not live, churned, department dry run,
+// cadence toggle off. The last three yield to a typed DANGER gateOverride, which is written on the
+// row. Recipients must pass the cron's own predicate for this cadence (verified, deliverable, on the
+// department's list, email on, subscribed).
+//
+// The row: created when none exists (trigger='manual'); a held / failed / missed row becomes
+// sent (trigger='manual'); an already-SENT row keeps the HTML and recipients the cron stored, and
+// the resend is appended to metrics.manual_sends. `.select()` makes dbUpdated true only when a
+// row was really written.
 app.post("/api/email/roi-send-now", requireTrackerAuth, async (req, res) => {
   try {
-    const { teamId, department, localDate, to, subject, html, override } = req.body ?? {};
+    const { teamId, department, localDate, to, subject, html, override, gateOverride, cadence } = req.body ?? {};
     const requested = (Array.isArray(to) ? to : [to]).map((s) => String(s || "").trim()).filter(Boolean);
     if (!teamId || !department || !localDate) return res.status(400).json({ error: "teamId, department, localDate required" });
+    if (!_ISO_DAY.test(String(localDate))) return res.status(400).json({ error: "localDate must be YYYY-MM-DD" });
     if (!requested.length) return res.status(400).json({ error: "no recipients" });
     if (!html) return res.status(400).json({ error: "no html" });
+    const dept = department === "service" ? "service" : "sales";
+    const cad = sendGates.CADENCES.includes(cadence) ? cadence : "daily";
+    const actor = _actorOf(req);
 
-    // GATE (verified_at): every other send path (the cron, roi-event-send-now, roi-event-generate-send)
-    // only emails a rooftop's human-verified recipients — this route took `to` straight from the request
-    // body with no check at all, the one remaining hole for a cross-rooftop leak via the manual "Send Now"
-    // button / FixDataForm free-text fallback. Enforce the same rule here.
-    const sbUrlV = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKeyV = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrlV || !sbKeyV) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
-    const sbV = createSbClient(sbUrlV, sbKeyV, { auth: { persistSession: false } });
-    const { data: verifiedRecs } = await emailHealth.selectRecipients(
-      sbV, "email,receives_sales,receives_service,email_enabled,verified_at", (q) => q.eq("team_id", teamId));
-    // GATE 2 (deliverability): a manual send is still a send on our domain. An address that is
-    // malformed, mistyped or already suppressed for bouncing is dropped here too — the tracker's
-    // "Send now" button must not be the way a known-bad address keeps getting mail.
-    const blocked = [];
-    const verifiedEmails = new Set(
-      (verifiedRecs ?? [])
-        .filter((r) => r.verified_at && (department === "service" ? r.receives_service : r.receives_sales) && r.email_enabled)
-        .filter((r) => { const b = emailHealth.emailBlock(r); if (b) blocked.push(`${r.email} (${b.label})`); return !b; })
-        .map((r) => String(r.email || "").trim().toLowerCase())
-    );
-    const recipients = requested.filter((e) => verifiedEmails.has(e.toLowerCase()));
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
+
+    // GATE 1: would the cron send this period at all?
+    const { cfg, live } = await _gateContext(sb, teamId, dept);
+    const gate = sendGates.canSendDigest({ cfg, live, cadence: cad, localDate });
+    const verdict = sendGates.decide(gate, gateOverride);
+    if (!verdict.send) return res.status(409).json(sendGates.refusalBody(gate));
+
+    // GATE 2: recipients. Only addresses the cron itself would email for this cadence
+    // (verified_at ∧ deliverable ∧ department list ∧ email_enabled ∧ subscribed). The old check here
+    // skipped the subscription matrix, so an opted-out person could still be sent a digest by hand.
+    const { data: recs, error: recErr } = await emailHealth.selectRecipients(
+      sb, "team_id,email,name,receives_sales,receives_service,email_enabled,verified_at,subscriptions", (q) => q.eq("team_id", teamId));
+    if (recErr) return res.status(500).json({ error: `recipients read failed: ${recErr.message}` });
+    const eligible = new Set(sendGates.eligibleRecipients(recs, dept, cad).map((r) => emailHealth.normalizeEmail(r.email)));
+    const recipients = requested.filter((e) => eligible.has(emailHealth.normalizeEmail(e)));
     if (!recipients.length) {
-      return res.status(400).json({ error: blocked.length
-        ? `No deliverable recipient for this rooftop/department. Held: ${blocked.join("; ")}. Fix the address in the recipient list, which clears the hold.`
-        : "None of the requested recipients are verified for this rooftop/department — add + verify them first." });
+      const why = requested.map((e) => {
+        const r = (recs ?? []).find((x) => emailHealth.normalizeEmail(x.email) === emailHealth.normalizeEmail(e));
+        return `${e}: ${r ? sendGates.recipientHold(r, dept, cad) : "not a recipient of this rooftop"}`;
+      });
+      return res.status(400).json({ error: `No eligible recipient for this rooftop and department. ${why.slice(0, 5).join("; ")}` });
     }
 
     // Anti-churn gate: a no-value digest is blocked unless the DANGER override is typed.
     const force = require("./roi-cron/emailValue.cjs").overrideOk(override);
+    const trackedHtml = injectPixel(html, digestPixel(teamId, dept, cad, localDate));
 
-    // Inject the open-tracking pixel (keyed by team/dept/daily/date) so a manual
-    // send is tracked exactly like the cron. No-op if the html already carries it.
-    const trackedHtml = injectPixel(html, digestPixel(teamId, department === "service" ? "service" : "sales", "daily", localDate));
-
-    // 1) send via the EXACT SAME mail path as the daily cron. The cron (runOnce) and
-    // Send Now both go through runner.sendMail — one mail URL, one token, one template
-    // (MAIL_TEMPLATE || default), one retry policy. Previously this route had its own
-    // divergent fetch with an extra EMAIL_PROXY_TEMPLATE fallback; a stale/bad value in
-    // that env made Send Now fail with "invalid template" while the cron kept working.
+    // Same mail path as the cron (runner.sendMail): one mail URL, one token, one retry policy.
     const { sendMail } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
     let messageId;
     try {
@@ -2488,23 +2537,55 @@ app.post("/api/email/roi-send-now", requireTrackerAuth, async (req, res) => {
       return res.status(502).json({ error: mailErr?.message ?? "mail send failed" });
     }
 
-    // 2) mark the run sent in ROI Supabase (service key — bypasses RLS)
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    // Record it.
+    const now = new Date().toISOString();
+    const note = [`manual send by ${actor}`, verdict.overridden ? `override: ${verdict.overridden}` : "", force ? "no-value override" : ""].filter(Boolean).join("; ");
+    const entry = { at: now, by: actor, to: recipients, message_id: messageId ?? null, override: verdict.overridden, no_value_override: force };
     let dbUpdated = false;
-    if (sbUrl && sbKey) {
-      const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
-      const { error } = await sb.from("roi_digest_runs").update({
-        status: "sent", reason: null, sent_at: new Date().toISOString(), send_path: "raw_html",
-        rendered_html: trackedHtml, message_id: messageId,
-        recipients: recipients.map((email) => ({ email, received: true })),
-      }).eq("team_id", teamId).eq("department", department).eq("cadence", "daily").eq("local_date", localDate);
-      dbUpdated = !error;
-      if (error) console.error("[roi-send-now] supabase update failed:", error.message);
-    } else {
-      console.warn("[roi-send-now] ROI_SUPABASE_SERVICE_KEY not set — email sent but run not marked");
+    let dbError = null;
+    const { data: existing, error: exErr } = await sb.from("roi_digest_runs")
+      .select("id,status,reason,trigger,recipients,rendered_html,metrics")
+      .eq("team_id", teamId).eq("department", dept).eq("cadence", cad).eq("local_date", localDate).maybeSingle();
+    if (exErr) dbError = exErr.message;
+    else {
+      const metrics = (existing?.metrics && typeof existing.metrics === "object") ? existing.metrics : {};
+      const history = Array.isArray(metrics.manual_sends) ? metrics.manual_sends : [];
+      let write;
+      if (existing && existing.status === "sent") {
+        // A resend of a delivered digest: the cron's stored email and recipient list stay as the
+        // record of the original send. The resend is history.
+        if (existing.rendered_html !== trackedHtml) entry.html = trackedHtml;
+        write = sb.from("roi_digest_runs").update({
+          metrics: { ...metrics, manual_sends: [...history, entry] },
+          reason_detail: note,
+        }).eq("id", existing.id).select("id");
+      } else if (existing) {
+        // Held / failed / missed → now sent by hand. Keep what the cron had stored in the history.
+        if (existing.rendered_html) entry.replaced_html = existing.rendered_html;
+        entry.replaced = { status: existing.status, reason: existing.reason ?? null, recipients: existing.recipients ?? null };
+        write = sb.from("roi_digest_runs").update({
+          status: "sent", reason: null, reason_detail: note, trigger: "manual", send_path: "raw_html",
+          sent_at: now, message_id: messageId ?? null, subject: subject || null, rendered_html: trackedHtml,
+          recipients: recipients.map((email) => ({ email, received: true })),
+          metrics: { ...metrics, manual_sends: [...history, entry] },
+        }).eq("id", existing.id).select("id");
+      } else {
+        write = sb.from("roi_digest_runs").upsert({
+          enterprise_id: cfg?.enterprise_id || String((req.body ?? {}).enterpriseId || ""),
+          team_id: teamId, department: dept, cadence: cad, local_date: localDate,
+          dealer_timezone: cfg?.timezone || null,
+          status: "sent", reason: null, reason_detail: note, trigger: "manual", send_path: "raw_html",
+          sent_at: now, message_id: messageId ?? null, subject: subject || null, rendered_html: trackedHtml,
+          recipients: recipients.map((email) => ({ email, received: true })),
+          metrics: { manual_sends: [entry] },
+        }, { onConflict: "team_id,department,cadence,local_date" }).select("id");
+      }
+      const { data: written, error } = await write;
+      if (error) dbError = error.message;
+      dbUpdated = !error && Array.isArray(written) && written.length > 0;
     }
-    return res.json({ ok: true, messageId, dbUpdated, to: recipients });
+    if (dbError) console.error("[roi-send-now] run record failed:", dbError);
+    return res.json({ ok: true, messageId, dbUpdated, dbError, to: recipients, overridden: verdict.overridden });
   } catch (err) {
     console.error("POST /api/email/roi-send-now error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "send failed" });
@@ -2512,25 +2593,35 @@ app.post("/api/email/roi-send-now", requireTrackerAuth, async (req, res) => {
 });
 
 // ─── ROI Email Tracker · on-demand "Generate & send {cadence}" ──────────────
-// Builds a digest in real time for the selected cadence (daily / weekly = last 7
-// days / monthly = last 30 days), renders via the SAME pipeline as the cron, and
-// sends to the rooftop's real recipients — bypassing the cron's send-day/send-hour
-// gates. Scope to ONE rooftop with { teamId, department }, or omit both to run all
-// live rooftops. Honours dry-run (server DRY_RUN + each rooftop's dry_run); pass
-// { dryRun: true } to force a suppressed preview (renders + stores, no email).
-// Body: { cadence, teamId?, department?, dryRun? }
+// Builds ONE rooftop department's digest for a period and sends it through the same pipeline as
+// the cron. Body: { cadence, teamId, department, localDate?, dryRun?, override? }
+//   localDate = the period key in cron convention (daily: the report date; weekly: the last day of
+//   the 7-day window; monthly: the 1st of the reported month). The tracker sends the clicked cell's
+//   period, so a missed September monthly is generated AS September (runner.generateAndSendNow).
+// The rooftop must pass sendGates.canSendDigest first. There is no override here: the runner holds
+// churned, dry-run and switched-off departments itself, so an override could not make it send.
+// teamId is required: the old no-teamId bulk mode would have emailed every live rooftop at once.
 app.post("/api/email/roi-generate-send", requireTrackerAuth, async (req, res) => {
   try {
-    const { cadence, teamId, department, dryRun, override } = req.body ?? {};
+    const { cadence, teamId, department, dryRun, override, localDate } = req.body ?? {};
     const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
     const dept = department === "service" ? "service" : department === "sales" ? "sales" : undefined;
-    if (teamId && !dept) return res.status(400).json({ error: "department (sales|service) is required when teamId is set" });
+    if (!teamId) return res.status(400).json({ error: "teamId is required" });
+    if (!dept) return res.status(400).json({ error: "department (sales|service) is required" });
+    if (localDate != null && localDate !== "" && !_ISO_DAY.test(String(localDate))) return res.status(400).json({ error: "localDate must be YYYY-MM-DD" });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
+    if (dryRun !== true) {
+      const { cfg, live } = await _gateContext(sb, teamId, dept);
+      const gate = sendGates.canSendDigest({ cfg, live, cadence: cad, localDate: localDate || _dealerToday(cfg?.timezone) });
+      if (!gate.ok) return res.status(409).json({ ...sendGates.refusalBody(gate), overridable: false });
+    }
     const force = require("./roi-cron/emailValue.cjs").overrideOk(override);
     const { generateAndSendNow } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
-    const summary = await generateAndSendNow({ cadence: cad, teamId: teamId || undefined, department: dept, dryRun: dryRun === true, force });
-    // Single-rooftop run that sent nothing because the digest had no value → tell the
-    // UI it's blocked so it can offer the DANGER override (skip when already forced).
-    if (teamId && !force && summary && summary.sent === 0 && (summary.no_data || 0) > 0) {
+    const summary = await generateAndSendNow({ cadence: cad, teamId, department: dept, localDate: localDate || undefined, dryRun: dryRun === true, force });
+    // Sent nothing because the digest had no value → tell the UI it's blocked so it can offer the
+    // DANGER override (skip when already forced).
+    if (!force && summary && summary.sent === 0 && (summary.no_data || 0) > 0) {
       return res.json({ ok: false, blocked: true, reason: "no_value", error: "This digest shows no value — blocked to avoid churn.", ...summary });
     }
     return res.json({ ok: true, ...summary });
@@ -2546,12 +2637,15 @@ app.post("/api/email/roi-generate-send", requireTrackerAuth, async (req, res) =>
 // digest before the user manually triggers the send. Body: { cadence, teamId, department }
 app.post("/api/email/roi-generate-preview", requireTrackerAuth, async (req, res) => {
   try {
-    const { cadence, teamId, department } = req.body ?? {};
+    const { cadence, teamId, department, localDate } = req.body ?? {};
     const cad = cadence === "weekly" || cadence === "monthly" ? cadence : "daily";
     const dept = department === "service" ? "service" : "sales";
     if (!teamId) return res.status(400).json({ error: "teamId is required" });
+    if (localDate != null && localDate !== "" && !_ISO_DAY.test(String(localDate))) return res.status(400).json({ error: "localDate must be YYYY-MM-DD" });
     const { previewDigestNow } = require("./roi-cron/runner.cjs"); // lazy: env present at request time
-    const out = await previewDigestNow({ cadence: cad, teamId, department: dept });
+    // localDate = the clicked period's key (cron convention), so the preview shows the period the
+    // send would build. A runner without period support ignores it and previews the rolling window.
+    const out = await previewDigestNow({ cadence: cad, teamId, department: dept, localDate: localDate || undefined });
     return res.json(out);
   } catch (err) {
     console.error("POST /api/email/roi-generate-preview error:", err?.message ?? err);
@@ -2632,11 +2726,40 @@ app.post("/api/email/roi-event-preview", requireTrackerAuth, async (req, res) =>
 // Query: ?teamId&department&emailType&sinceDays?&limit?
 app.get("/api/email/roi-event-list", requireTrackerAuth, async (req, res) => {
   try {
-    const { teamId, department, emailType, direction, sinceDays, limit, offset } = req.query;
+    const { teamId, department, emailType, direction, sinceDays, limit, offset, tz } = req.query;
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
     if (!hasClickhouseCreds()) return res.json({ ok: true, events: [], note: "ClickHouse not configured" });
     const { listEventsCH } = await import("./roi-cron/eventPreviewCH.js");
-    const events = await listEventsCH({ teamId, department, emailType, direction, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200, offset: Number(offset) || 0 });
+    // The dealer's zone: the cron's keys for SMS / overdue / chat are dealer-local days. Only a
+    // US/Canadian zone is passed on; otherwise listEventsCH resolves the rooftop's own.
+    const zone = sendGates.timezoneProblem(tz) ? undefined : String(tz);
+    const events = await listEventsCH({ teamId, department, emailType, direction, tz: zone, sinceDays: Number(sinceDays) || 120, limit: Number(limit) || 200, offset: Number(offset) || 0 });
+    // Overlay what the pipeline actually produced for each event. The list's own key (a ClickHouse
+    // uuid / sms:<id> / lead:<id>) is never the key the cron files its email under, so matching on it
+    // showed 50 of 50 rows "eligible" under a day header that said "1 sent", and invited a duplicate
+    // send (A4 F13). Each row now carries `cronEventKey` (eventPreviewCH.js); a row without one falls
+    // back to its own key. Manual sends of the same event (manual-<type>-<key>) count too.
+    const sb = _trackerRoiSb();
+    if (sb && events.length) {
+      // One event can map to several cron keys (cronEventKeys); fall back to the row's own key.
+      const keysOf = (ev) => [...new Set([...(Array.isArray(ev.cronEventKeys) ? ev.cronEventKeys : []), ev.cronEventKey, ev.eventKey].map((k) => String(k || "")).filter(Boolean))];
+      const keys = [...new Set(events.flatMap((ev) => [...keysOf(ev), `manual-${emailType}-${ev.eventKey}`]))];
+      const byKey = new Map();
+      for (let i = 0; i < keys.length; i += 100) {
+        const { data, error } = await sb.from("roi_event_emails")
+          .select("id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
+          .eq("team_id", teamId).eq("email_type", emailType).in("event_key", keys.slice(i, i + 100));
+        if (error) { console.warn("[roi-event-list] overlay read failed:", error.message); break; }
+        // alias_of:<key> rows are bookkeeping duplicates of another row, never an email of their own.
+        for (const r of data ?? []) if (!String(r.reason || "").startsWith("alias_of:")) byKey.set(r.event_key, r);
+      }
+      for (const ev of events) {
+        // The cron's own row wins over a manual one: it is the email the dealer got first. Among the
+        // cron's keys, a sent row wins over a held or failed one.
+        const cands = keysOf(ev).map((k) => byKey.get(k)).filter(Boolean);
+        ev.stored = cands.find((r) => r.status === "sent") || cands[0] || byKey.get(`manual-${emailType}-${ev.eventKey}`) || null;
+      }
+    }
     return res.json({ ok: true, events });
   } catch (err) {
     console.error("GET /api/email/roi-event-list error:", err?.message ?? err);
@@ -2665,12 +2788,15 @@ app.get("/api/email/roi-event-daycounts", requireTrackerAuth, async (req, res) =
     if (sbUrl && sbKey) {
       const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
       const sinceIso = new Date(Date.now() - (Number(sinceDays) || 120) * 86400000).toISOString();
-      let q = sb.from("roi_event_emails")
-        .select("sent_at")
-        .eq("team_id", teamId).eq("email_type", emailType).eq("status", "sent")
-        .not("sent_at", "is", null).gte("sent_at", sinceIso);
-      if (department) q = q.eq("department", department);
-      const { data: sentRows, error } = await q;
+      // Paged: an unpaged read stops at 1,000 rows, which is a few days of overdue emails.
+      const { data: sentRows, error } = await emailHealth.selectTablePaged(sb, "roi_event_emails", "id,sent_at", {
+        filter: (q) => {
+          q = q.eq("team_id", teamId).eq("email_type", emailType).eq("status", "sent")
+            .not("sent_at", "is", null).gte("sent_at", sinceIso);
+          return department ? q.eq("department", department) : q;
+        },
+        order: ["id"],
+      });
       if (!error) {
         const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" });
         for (const r of sentRows || []) {
@@ -2768,8 +2894,9 @@ async function postMailWithRetry(mailUrl, payload) {
 // then marks the row sent. Used by the tracker's per-email "Send now" button.
 app.post("/api/email/roi-event-send-now", requireTrackerAuth, async (req, res) => {
   try {
-    const { id, to, override } = req.body ?? {};
+    const { id, to, override, gateOverride } = req.body ?? {};
     if (!id) return res.status(400).json({ error: "id required" });
+    const actor = _actorOf(req);
     const EV = require("./roi-cron/emailValue.cjs");
     const force = EV.overrideOk(override);
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
@@ -2778,22 +2905,39 @@ app.post("/api/email/roi-event-send-now", requireTrackerAuth, async (req, res) =
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
 
     const { data: row, error: rowErr } = await sb.from("roi_event_emails")
-      .select("id,team_id,department,email_type,subject,rendered_html,recipients").eq("id", id).maybeSingle();
+      .select("id,team_id,department,email_type,event_key,subject,rendered_html,recipients").eq("id", id).maybeSingle();
     if (rowErr || !row) return res.status(404).json({ error: "event email not found" });
     if (!row.rendered_html) return res.status(400).json({ error: "no rendered copy to send" });
+    // Same rule as roi-event-generate-send: an appointment goes to its OWN department. Recipients below
+    // follow row.department, and the five Stillwell rows sent from the Sales row (2026-10-07) are stored
+    // under sales — a resend of one would reach the sales team again.
+    if (row.email_type === "post_appointment") {
+      const { hasClickhouseCreds } = await import("./agentMetrics.js");
+      const key = String(row.event_key || "").replace(/^manual-post_appointment-/, "");
+      if (key && key !== "latest" && hasClickhouseCreds()) {
+        const { meetingDeptCH } = await import("./roi-cron/eventPreviewCH.js");
+        const own = await meetingDeptCH(row.team_id, key);
+        if (own && own !== row.department) {
+          const Own = own === "service" ? "Service" : "Sales";
+          return res.status(409).json({ error: `This is a ${Own} appointment filed under ${row.department === "service" ? "Service" : "Sales"}. Send it from the ${Own} row so it reaches the ${own} team.` });
+        }
+      }
+    }
 
-    // recipients: explicit override → the row's stored recipients → the rooftop's enabled recipients.
-    // GATE (verified_at): whichever source supplies the addresses, a rooftop only ever emails
-    // addresses a human verified for it. Previously an explicit `to` (or the stored row.recipients)
-    // was used with NO verification — the one hole that let a manual resend deliver a stored email's
-    // dealer/customer PII to an arbitrary address. Now every source is intersected with the verified set.
+    // GATE 0 (sendGates.canSendEvent): would the events cron send this type for this rooftop now?
+    // Churned, dry-run, type-off and lead-capture refusals yield to a typed DANGER gateOverride.
+    const { cfg, live } = await _gateContext(sb, row.team_id, row.department);
+    const gate = sendGates.canSendEvent({ cfg, live, emailType: row.email_type, localDate: _dealerToday(cfg?.timezone) });
+    const verdict = sendGates.decide(gate, gateOverride);
+    if (!verdict.send) return res.status(409).json(sendGates.refusalBody(gate));
+
+    // recipients: explicit override → the row's stored recipients → the rooftop's eligible recipients.
+    // GATE (the cron's predicate): whichever source supplies the addresses, a rooftop only ever emails
+    // addresses that are verified for it, deliverable, on the department's list, switched on and
+    // subscribed to this type. An explicit `to` or the stored row.recipients is intersected with that.
     const { data: recs } = await emailHealth.selectRecipients(
-      sb, "email,receives_sales,receives_service,email_enabled,verified_at", (q) => q.eq("team_id", row.team_id));
-    // GATE 2 (deliverability): drop anything malformed, mistyped or already suppressed for
-    // bouncing — a manual resend to a dead address costs the sending domain exactly as much.
-    const verifiedRecs = (recs ?? [])
-      .filter((r) => r.verified_at && (row.department === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled)
-      .filter((r) => emailHealth.canEmail(r));
+      sb, "email,receives_sales,receives_service,email_enabled,verified_at,subscriptions", (q) => q.eq("team_id", row.team_id));
+    const verifiedRecs = sendGates.eligibleRecipients(recs, row.department, row.email_type);
     const verifiedEmails = verifiedRecs.map((r) => String(r.email || "").trim()).filter(Boolean);
     const verifiedSet = new Set(verifiedEmails.map((e) => e.toLowerCase()));
     let requested = (Array.isArray(to) ? to : to ? [to] : []).map((s) => String(s || "").trim()).filter(Boolean);
@@ -2822,11 +2966,14 @@ app.post("/api/email/roi-event-send-now", requireTrackerAuth, async (req, res) =
     }
     const mj = await mailRes.json().catch(() => ({}));
     const messageId = mj.messageId ?? mj.id ?? null;
+    // roi_event_emails has no reason_detail/trigger columns: the reason field records that this was
+    // a manual send, and which gate (if any) the operator overrode.
     await sb.from("roi_event_emails").update({
-      status: "sent", reason: null, sent_at: new Date().toISOString(), message_id: messageId,
+      status: "sent", reason: verdict.overridden ? `manual_override:${verdict.overridden}` : "manual", sent_at: new Date().toISOString(), message_id: messageId,
       recipients: recipients.map((email) => ({ email, received: true })),
     }).eq("id", id);
-    return res.json({ ok: true, messageId, to: recipients });
+    console.log(`[roi-event-send-now] ${row.email_type} ${id} sent by ${actor}${verdict.overridden ? ` (override: ${verdict.overridden})` : ""}`);
+    return res.json({ ok: true, messageId, to: recipients, overridden: verdict.overridden });
   } catch (err) {
     console.error("POST /api/email/roi-event-send-now error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "send failed" });
@@ -2844,9 +2991,10 @@ const EVENT_SUBJECTS = {
 };
 app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, res) => {
   try {
-    const { teamId, enterpriseId, department, emailType, eventKey, rooftopName, tz, override } = req.body ?? {};
+    const { teamId, enterpriseId, department, emailType, eventKey, cronEventKey, cronEventKeys, rooftopName, tz, override, gateOverride, duplicateOverride } = req.body ?? {};
     if (!teamId || !emailType) return res.status(400).json({ error: "teamId and emailType required" });
     const dept = department === "service" ? "service" : "sales";
+    const actor = _actorOf(req);
     const EV = require("./roi-cron/emailValue.cjs");
     const force = EV.overrideOk(override);
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
@@ -2854,10 +3002,59 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
 
+    // GATE 0 (sendGates.canSendEvent): the events cron's own rules. The key-less "latest" path used
+    // to email a type the rooftop had switched off, and every path ignored churn and dry run.
+    const { cfg, live } = await _gateContext(sb, teamId, dept);
+    const gate = sendGates.canSendEvent({ cfg, live, emailType, localDate: _dealerToday(cfg?.timezone) });
+    const verdict = sendGates.decide(gate, gateOverride);
+    if (!verdict.send) return res.status(409).json(sendGates.refusalBody(gate));
+
+    // GATE 1 (already sent): the cron files this event's email under its own key (cronEventKey,
+    // from the drill-down row), not the ClickHouse id the row is listed by. When the cron (or an
+    // earlier manual send) already emailed it, sending again is a duplicate for the dealer, so it
+    // takes a typed DANGER duplicateOverride (A4 F13).
+    // The keys are derived on the server too (from the same ClickHouse listing the drawer uses), so a stale
+    // or wrong value from the browser can never hide an earlier send; the client keys stay as a fallback
+    // for events older than the lookup window.
+    let serverKeys = [];
+    if (eventKey) {
+      try {
+        const { listEventsCH } = await import("./roi-cron/eventPreviewCH.js");
+        const rows = await listEventsCH({ teamId, department: dept, emailType, tz: tz || null, sinceDays: 14, limit: 500 });
+        const hit = (Array.isArray(rows) ? rows : []).find((r) => String(r.eventKey) === String(eventKey));
+        if (hit) serverKeys = [hit.cronEventKey, ...(Array.isArray(hit.cronEventKeys) ? hit.cronEventKeys : [])];
+      } catch (e) { console.warn("[roi-event-generate-send] server-side key lookup failed, using the client keys:", String(e?.message ?? e).slice(0, 160)); }
+    }
+    const priorKeys = [...new Set([...serverKeys, ...(Array.isArray(cronEventKeys) ? cronEventKeys : []), cronEventKey, eventKey, `manual-${emailType}-${eventKey || "latest"}`].map((k) => String(k || "").trim()).filter(Boolean))].slice(0, 50);
+    const { data: prior, error: priorErr } = await sb.from("roi_event_emails")
+      .select("id,status,sent_at,created_at,event_key,reason").eq("team_id", teamId).eq("email_type", emailType)
+      .in("event_key", priorKeys).in("status", ["sent", "queued"]).order("created_at", { ascending: false }).limit(5);
+    if (priorErr) return res.status(500).json({ error: `duplicate check failed: ${priorErr.message}` });
+    const already = (prior ?? []).find((r) => !String(r.reason || "").startsWith("alias_of:")) || null;
+    const duplicateOk = EV.overrideOk(duplicateOverride);
+    if (already && !duplicateOk) {
+      const when = already.sent_at || already.created_at;
+      return res.status(409).json({
+        ok: false, gated: true, reason: "already_sent", overridable: true,
+        error: `This email already ${already.status === "sent" ? "went out" : "is being sent"}${when ? ` (${new Date(when).toUTCString()})` : ""}. Sending it again emails the dealer a duplicate.`,
+      });
+    }
+
     // 1) render the email from live ClickHouse data (same path as the preview)
     const { hasClickhouseCreds } = await import("./agentMetrics.js");
     if (!hasClickhouseCreds()) return res.status(500).json({ error: "ClickHouse not configured on this server" });
-    const { previewEventCH } = await import("./roi-cron/eventPreviewCH.js");
+    const { previewEventCH, meetingDeptCH } = await import("./roi-cron/eventPreviewCH.js");
+    // An appointment goes to ITS OWN department's recipients. `dept` is the tracker row the click came
+    // from, and recipients below are picked by it — so a service booking sent from the Sales row went
+    // to the sales team (Stillwell Ford, 2026-10-07, 5 emails). Refuse rather than re-route: a send
+    // should never land somewhere other than the row the CSM is looking at.
+    if (emailType === "post_appointment" && eventKey) {
+      const own = await meetingDeptCH(teamId, eventKey);
+      if (own && own !== dept) {
+        const Own = own === "service" ? "Service" : "Sales";
+        return res.status(409).json({ error: `This is a ${Own} appointment. Send it from the ${Own} row so it reaches the ${own} team.` });
+      }
+    }
     // strict:true — on the SEND path, if eventKey doesn't resolve to that exact item, refuse rather than
     // substitute the rooftop's most-recent customer (which would email a dealer another customer's PII).
     const cfgTemplate = await roiConfigTemplate(teamId); // NB: `template` below is the mail-proxy template
@@ -2866,14 +3063,13 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
 
     // 2) recipients — the dept's enabled, human-verified addresses
     const { data: recs } = await emailHealth.selectRecipients(
-      sb, "email,receives_sales,receives_service,email_enabled,verified_at", (q) => q.eq("team_id", teamId));
+      sb, "email,receives_sales,receives_service,email_enabled,verified_at,subscriptions", (q) => q.eq("team_id", teamId));
     // GATE 1 (r.verified_at): a rooftop only emails recipients a human verified for it (PR #27).
     // GATE 2 (canEmail): …and only addresses that can actually receive mail — malformed, mistyped
     // and already-bouncing addresses are held, because their bounces are scored against spyne.ai.
-    const recipients = (recs ?? [])
-      .filter((r) => r.verified_at && (dept === "sales" ? r.receives_sales : r.receives_service) && r.email_enabled && emailHealth.canEmail(r))
-      .map((r) => r.email);
-    if (!recipients.length) return res.status(400).json({ error: "no deliverable recipient configured for this rooftop/department" });
+    // GATE 3 (isSubscribed): …and only people subscribed to this type — the cron's full predicate.
+    const recipients = sendGates.eligibleRecipients(recs, dept, emailType).map((r) => r.email);
+    if (!recipients.length) return res.status(400).json({ error: "no eligible recipient for this rooftop/department (verified, deliverable, switched on and subscribed to this type)" });
 
     // 3) idempotency: a deterministic event_key + a recent-duplicate guard so a double-click or client
     // retry doesn't email the dealer twice (the old `manual-${type}-${Date.now()}` key never deduped).
@@ -2881,12 +3077,9 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     // the lead sheet the email actually is (and is what the cron sends them too).
     const subjectLabel = emailType === "post_conversation" && cfgTemplate === "lead_capture" ? "New lead" : (EVENT_SUBJECTS[emailType] || "Vini");
     const subject = `${subjectLabel} — ${rooftopName || teamId}`;
-    const evKey = `manual-${emailType}-${eventKey || "latest"}`;
-    const dupSince = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-    const { data: dup } = await sb.from("roi_event_emails")
-      .select("id,status").eq("team_id", teamId).eq("email_type", emailType).eq("event_key", evKey)
-      .gte("created_at", dupSince).in("status", ["queued", "sent"]).limit(1).maybeSingle();
-    if (dup) return res.json({ ok: true, deduped: true, id: dup.id, message: "this event was just sent — not re-sending" });
+    // A deliberate duplicate (duplicateOverride) gets its own key: the plain manual key may already
+    // hold the earlier send, and (team, type, event_key) is unique.
+    const evKey = already ? `manual-${emailType}-${eventKey || "latest"}-r${Date.now()}` : `manual-${emailType}-${eventKey || "latest"}`;
 
     // insert the row to get its id, so the open-tracking pixel can key to it.
     const { data: inserted, error: insErr } = await sb.from("roi_event_emails").insert({
@@ -2922,11 +3115,14 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
     const messageId = mj.messageId ?? mj.id ?? null;
 
     // 5) finalize the row → flips the cell from "—" to a count, email viewable + trackable
+    const overrides = [verdict.overridden, already ? "already_sent" : null].filter(Boolean);
     await sb.from("roi_event_emails").update({
       status: "sent", message_id: messageId, sent_at: new Date().toISOString(),
+      reason: overrides.length ? `manual_override:${overrides.join("+")}` : "manual",
       rendered_html: trackedHtml, recipients: recipients.map((email) => ({ email, received: true })),
     }).eq("id", id);
-    return res.json({ ok: true, messageId, to: recipients });
+    console.log(`[roi-event-generate-send] ${emailType} ${evKey} sent by ${actor}${overrides.length ? ` (override: ${overrides.join(", ")})` : ""}`);
+    return res.json({ ok: true, messageId, to: recipients, overridden: overrides });
   } catch (err) {
     console.error("POST /api/email/roi-event-generate-send error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "send failed" });
@@ -3031,55 +3227,70 @@ function isPlaceholderEmail(email) {
   return /@phone\.invalid$/i.test(String(email || ""));
 }
 
+// ── Recipient change log ─────────────────────────────────────────────────────
+// Every recipient mutation writes roi_config_audit_log with who did it (A5-19). Before this, the
+// subscription, toggle, verify and rename endpoints left no trace, so "who unsubscribed the GM" and
+// "who paused this person" could not be answered. Field = "recipient <email> · <what>". Best-effort:
+// a failed log never fails the change itself.
+async function _auditRecipient(sb, teamId, actor, email, changes) {
+  try {
+    const rows = Object.entries(changes)
+      .filter(([, [before, after]]) => String(before ?? "") !== String(after ?? ""))
+      .map(([what, [before, after]]) => ({
+        team_id: teamId, actor: actor || "unknown (tracker)", field: `recipient ${email} · ${what}`,
+        old_value: before == null ? null : String(before), new_value: after == null ? null : String(after), source: "tracker",
+      }));
+    if (!rows.length) return;
+    const { error } = await sb.from("roi_config_audit_log").insert(rows);
+    if (error) console.warn("[audit] recipient change log failed:", error.message);
+  } catch (e) {
+    console.warn("[audit] recipient change log failed:", e?.message ?? e);
+  }
+}
+const _subsOf = (r) => (r && r.subscriptions && typeof r.subscriptions === "object" ? r.subscriptions : {});
+
 // ── Add a recipient to a rooftop+department (tracker "Add recipient") ────────
-// Upserts roi_recipients with the department flag + email_enabled=true (service key, bypasses RLS).
+// New address → a row on this department's list (paused unless emailEnabled is true). Existing
+// address → ONLY this department's flag is set (sendGates.recipientAddPatch): adding a Sales
+// recipient to the Service list used to also write email_enabled=false and pause all of their
+// email (A4 F14). Matched by exact address (C21). The same route sets phone / SMS / role.
 app.post("/api/recipients", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, department, email, name, emailEnabled, phone, smsEnabled, role } = req.body ?? {};
     const dept = department === "service" ? "service" : "sales";
+    const actor = _actorOf(req);
     const rawEmail = String(email || "").trim();
     const rawPhone = phone === undefined ? undefined : String(phone || "").trim();
     if (!teamId) return res.status(400).json({ error: "teamId required" });
-    // Reject a bad address at the door. The old check was an UNANCHORED /\S+@\S+\.\S+/, so
-    // "Bob Smith <bob@x.com>", "a@x.com, b@y.com" and "john smith@dealer.com" all passed and then
-    // bounced on our domain for months. addressProblem() also catches @gmial.com-class typos.
+    // Reject a bad address at the door (addressProblem also catches @gmial.com-class typos).
     if (rawEmail) {
       const p = emailHealth.addressProblem(rawEmail);
       if (p) return res.status(400).json({ error: p.code === "typo" ? `${p.label} — check the spelling before adding it` : p.label });
     }
-    // A recipient needs at least ONE contact channel. When only a phone is given we synthesize a
-    // non-deliverable placeholder email (email is the row's identity key) — the sender skips it, so
-    // a phone-only recipient receives SMS only. Placeholder is derived from the phone's digits so
-    // it's stable for that person within the team.
+    // A phone-only recipient gets a non-deliverable placeholder email as its identity key; the
+    // sender skips it, so they receive SMS only.
     const addr = rawEmail || (rawPhone ? placeholderEmailForPhone(rawPhone) : "");
     if (!addr) return res.status(400).json({ error: "add an email or a phone" });
     if (role !== undefined && role !== null && !["salesperson", "bdc", "gm"].includes(role)) return res.status(400).json({ error: "role must be salesperson|bdc|gm|null" });
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
-    // preserve the other department's existing flag if the recipient already exists
-    const { data: existing, error: selErr } = await sb.from("roi_recipients")
-      .select("id,receives_sales,receives_service,email_enabled").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: matches, error: selErr } = await emailHealth.findRecipientsByEmail(sb, {
+      teamId, email: addr, cols: "id,email,receives_sales,receives_service,email_enabled,phone,sms_enabled,role",
+    });
     if (selErr) return res.status(500).json({ error: selErr.message });
-    const patch = {
-      receives_sales: dept === "sales" ? true : (existing?.receives_sales ?? false),
-      receives_service: dept === "service" ? true : (existing?.receives_service ?? false),
-      // email_enabled: honor explicit flag; else new rows default ON, existing rows keep their state.
-      email_enabled: typeof emailEnabled === "boolean" ? emailEnabled : (existing ? existing.email_enabled : true),
-    };
-    // SMS channel (optional): phone accepts common formats; "" clears it. Turning SMS on requires a phone.
-    if (phone !== undefined) patch.phone = phone ? String(phone).trim() : null;
-    if (typeof smsEnabled === "boolean") {
-      if (smsEnabled && !patch.phone && phone === undefined) return res.status(400).json({ error: "add a phone before enabling SMS" });
-      patch.sms_enabled = smsEnabled;
-    }
-    if (role !== undefined) patch.role = role || null; // '' / null clears the role (rooftop-wide fallback)
+    const existing = matches[0] ?? null;
+    const patch = sendGates.recipientAddPatch(existing, { dept, emailEnabled, phone: rawPhone, smsEnabled, role });
+    if (patch.sms_enabled === true && !(patch.phone ?? existing?.phone)) return res.status(400).json({ error: "add a phone before enabling SMS" });
     const q = existing
-      ? sb.from("roi_recipients").update(patch).eq("id", existing.id)
-      : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: name || null, ...patch });
+      // Case-duplicates (the same address twice with different capitals) all get the change.
+      ? sb.from("roi_recipients").update(patch).in("id", matches.map((m) => m.id)).select("id")
+      : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: name || null, ...patch }).select("id");
     const { error } = await q;
     if (error) return res.status(500).json({ error: error.message });
+    const changes = existing
+      ? Object.fromEntries(Object.keys(patch).map((k) => [k, [existing[k], patch[k]]]))
+      : { added: [null, `${dept} list${patch.email_enabled ? "" : " (paused)"}`] };
+    await _auditRecipient(sb, teamId, actor, addr, changes);
     return res.json({ ok: true, teamId, department: dept, email: addr, created: !existing });
   } catch (err) {
     console.error("POST /api/recipients error:", err?.message ?? err);
@@ -3096,12 +3307,11 @@ app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
   try {
     const { teamId, id, email, phone, name } = req.body ?? {};
     if (!teamId || !id) return res.status(400).json({ error: "teamId + id required" });
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const actor = _actorOf(req);
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const { data: row, error: selErr } = await sb.from("roi_recipients")
-      .select("id,email,phone").eq("team_id", teamId).eq("id", id).maybeSingle();
+      .select("id,email,phone,name").eq("team_id", teamId).eq("id", id).maybeSingle();
     if (selErr) return res.status(500).json({ error: selErr.message });
     if (!row) return res.status(404).json({ error: "recipient not found" });
 
@@ -3116,8 +3326,7 @@ app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
         if (p) return res.status(400).json({ error: p.code === "typo" ? `${p.label} — check the spelling` : p.label });
         patch.email = addr;
         // Fixing the address is what lifts a deliverability hold: the old address bounced, this
-        // one hasn't. Clearing it here is what makes the tracker's "fix the typo" flow actually
-        // restore the person's mail instead of leaving them silently held forever.
+        // one hasn't.
         if (addr.toLowerCase() !== String(row.email || "").toLowerCase()) {
           patch.suppressed_at = null; patch.suppression_reason = null; patch.bounce_count = 0;
         }
@@ -3129,11 +3338,10 @@ app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
     }
     if (Object.keys(patch).length === 0) return res.json({ ok: true, id, unchanged: true });
 
-    // Guard the unique(team_id, email) constraint with a friendly message.
+    // Guard the unique(team_id, email) constraint with a friendly message (exact match, C21).
     if (patch.email && patch.email.toLowerCase() !== String(row.email).toLowerCase()) {
-      const { data: clash } = await sb.from("roi_recipients")
-        .select("id").eq("team_id", teamId).ilike("email", patch.email).neq("id", id).maybeSingle();
-      if (clash) return res.status(409).json({ error: "another recipient already uses that email" });
+      const { data: clash } = await emailHealth.findRecipientsByEmail(sb, { teamId, email: patch.email });
+      if ((clash ?? []).some((c) => String(c.id) !== String(id))) return res.status(409).json({ error: "another recipient already uses that email" });
     }
     let { error } = await sb.from("roi_recipients").update(patch).eq("id", id).eq("team_id", teamId);
     // Tolerate a database that hasn't run migration 0023 yet — drop the hold-clearing fields and
@@ -3143,6 +3351,11 @@ app.post("/api/recipients/update", requireTrackerAuth, async (req, res) => {
       ({ error } = await sb.from("roi_recipients").update(rest).eq("id", id).eq("team_id", teamId));
     }
     if (error) return res.status(500).json({ error: error.message });
+    const changes = {};
+    if ("email" in patch) changes.email = [row.email, patch.email];
+    if ("phone" in patch) changes.phone = [row.phone, patch.phone];
+    if ("name" in patch) changes.name = [row.name, patch.name];
+    await _auditRecipient(sb, teamId, actor, row.email, changes);
     return res.json({ ok: true, id, email: patch.email ?? row.email, phone: patch.phone });
   } catch (err) {
     console.error("POST /api/recipients/update error:", err?.message ?? err);
@@ -3157,17 +3370,17 @@ app.post("/api/recipients/toggle", requireTrackerAuth, async (req, res) => {
     const addr = String(email || "").trim();
     if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
     const col = channel === "sms" ? "sms_enabled" : "email_enabled";
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
-    // Enabling SMS requires a phone on file — guard so we never flag a phoneless recipient as SMS-on.
-    if (col === "sms_enabled" && enabled) {
-      const { data: r } = await sb.from("roi_recipients").select("phone").eq("team_id", teamId).ilike("email", addr).maybeSingle();
-      if (!r?.phone) return res.status(400).json({ error: "add a phone before enabling SMS" });
-    }
-    const { error } = await sb.from("roi_recipients").update({ [col]: !!enabled }).eq("team_id", teamId).ilike("email", addr);
+    const actor = _actorOf(req);
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: rows, error: selErr } = await emailHealth.findRecipientsByEmail(sb, { teamId, email: addr, cols: `id,email,phone,${col}` });
+    if (selErr) return res.status(500).json({ error: selErr.message });
+    if (!rows.length) return res.status(404).json({ error: "recipient not found" });
+    // Enabling SMS requires a phone on file — never flag a phoneless recipient as SMS-on.
+    if (col === "sms_enabled" && enabled && !rows.some((r) => r.phone)) return res.status(400).json({ error: "add a phone before enabling SMS" });
+    const { error } = await sb.from("roi_recipients").update({ [col]: !!enabled }).in("id", rows.map((r) => r.id));
     if (error) return res.status(500).json({ error: error.message });
+    await _auditRecipient(sb, teamId, actor, rows[0].email, { [col]: [rows[0][col], !!enabled] });
     return res.json({ ok: true, teamId, email: addr, [col]: !!enabled });
   } catch (err) {
     console.error("POST /api/recipients/toggle error:", err?.message ?? err);
@@ -3262,13 +3475,16 @@ app.post("/api/recipients/verify", requireTrackerAuth, async (req, res) => {
     const { teamId, email, verified } = req.body ?? {};
     const addr = String(email || "").trim();
     if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const actor = _actorOf(req);
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: rows, error: selErr } = await emailHealth.findRecipientsByEmail(sb, { teamId, email: addr, cols: "id,email,verified_at" });
+    if (selErr) return res.status(500).json({ error: selErr.message });
+    if (!rows.length) return res.status(404).json({ error: "recipient not found" });
     const verified_at = verified === false ? null : new Date().toISOString();
-    const { error } = await sb.from("roi_recipients").update({ verified_at }).eq("team_id", teamId).ilike("email", addr);
+    const { error } = await sb.from("roi_recipients").update({ verified_at }).in("id", rows.map((r) => r.id));
     if (error) return res.status(500).json({ error: error.message });
+    await _auditRecipient(sb, teamId, actor, rows[0].email, { verified: [rows[0].verified_at ? "yes" : "no", verified_at ? "yes" : "no"] });
     return res.json({ ok: true, teamId, email: addr, verified_at });
   } catch (err) {
     console.error("POST /api/recipients/verify error:", err?.message ?? err);
@@ -3287,15 +3503,19 @@ app.post("/api/recipients/suppress", requireTrackerAuth, async (req, res) => {
     const { teamId, email, suppressed, reason } = req.body ?? {};
     const addr = String(email || "").trim();
     if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const actor = _actorOf(req);
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: before } = await emailHealth.findRecipientsByEmail(sb, { teamId, email: addr, cols: "id,email,suppression_reason,suppressed_at" });
     const r = suppressed === false
       ? await emailHealth.unsuppressAddress(sb, { teamId, email: addr })
       : await emailHealth.suppressAddress(sb, { teamId, email: addr, reason: reason || "Held by a CSM" });
     if (r.error) return res.status(500).json({ error: r.error.message || "could not update the hold" });
     if (!r.count) return res.status(404).json({ error: "recipient not found for this rooftop" });
+    const was = (before ?? [])[0];
+    await _auditRecipient(sb, teamId, actor, was?.email || addr, {
+      "deliverability hold": [was?.suppressed_at ? `held (${was.suppression_reason || "failed"})` : "none", suppressed === false ? "released" : `held (${reason || "Held by a CSM"})`],
+    });
     return res.json({ ok: true, teamId, email: addr, suppressed: suppressed !== false });
   } catch (err) {
     console.error("POST /api/recipients/suppress error:", err?.message ?? err);
@@ -3322,9 +3542,10 @@ app.post("/api/email/bounce", async (req, res) => {
     // FAIL CLOSED. This route writes suppression state — an open one lets anyone silence a
     // rooftop's email by POSTing a fake bounce for its GM.
     if (!secret) return res.status(500).json({ ok: false, error: "MAIL_WEBHOOK_SECRET not configured" });
+    // Header only. A ?secret= query parameter ends up in access logs and proxy logs (A5-21).
     const hdr = String(req.headers.authorization || "");
-    const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : String(req.query.secret || "");
-    if (token !== secret) return res.status(401).json({ ok: false, error: "Unauthorized" });
+    const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+    if (!token || token !== secret) return res.status(401).json({ ok: false, error: "Unauthorized" });
 
     const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
@@ -3371,19 +3592,21 @@ app.post("/api/recipients/subscription", requireTrackerAuth, async (req, res) =>
     if (!teamId || !addr) return res.status(400).json({ error: "teamId + email required" });
     if (!SUB_TYPES.has(type)) return res.status(400).json({ error: "invalid type" });
     if (channel !== "email" && channel !== "sms") return res.status(400).json({ error: "channel must be email|sms" });
-    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
-    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
-    if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
-    const { data: row, error: selErr } = await sb.from("roi_recipients")
-      .select("id,subscriptions,phone").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+    const actor = _actorOf(req);
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data: rows, error: selErr } = await emailHealth.findRecipientsByEmail(sb, { teamId, email: addr, cols: "id,email,subscriptions,phone" });
     if (selErr) return res.status(500).json({ error: selErr.message });
+    const row = rows[0];
     if (!row) return res.status(404).json({ error: "recipient not found" });
     if (channel === "sms" && enabled && !row.phone) return res.status(400).json({ error: "add a phone before enabling SMS" });
-    const subs = (row.subscriptions && typeof row.subscriptions === "object") ? { ...row.subscriptions } : {};
+    const { isSubscribed } = require("./roi-cron/subscriptions.cjs");
+    const wasOn = isSubscribed(row, type, channel);
+    const subs = { ..._subsOf(row) };
     subs[type] = { ...(subs[type] || {}), [channel]: !!enabled };
     const { error } = await sb.from("roi_recipients").update({ subscriptions: subs }).eq("id", row.id);
     if (error) return res.status(500).json({ error: error.message });
+    await _auditRecipient(sb, teamId, actor, row.email, { [`subscription ${type} ${channel}`]: [wasOn ? "on" : "off", enabled ? "on" : "off"] });
     return res.json({ ok: true, teamId, email: addr, type, channel, enabled: !!enabled });
   } catch (err) {
     console.error("POST /api/recipients/subscription error:", err?.message ?? err);
@@ -3428,7 +3651,13 @@ app.post("/api/rooftop-config", requireTrackerAuth, async (req, res) => {
     const patch = {};
     if (sendHour != null) { const h = Number(sendHour); if (!Number.isInteger(h) || h < 0 || h > 23) return res.status(400).json({ error: "sendHour must be 0–23" }); patch.digest_send_hour = h; }
     if (sendMinute != null) { const m = Number(sendMinute); if (!Number.isInteger(m) || m < 0 || m > 59) return res.status(400).json({ error: "sendMinute must be 0–59" }); patch.digest_send_minute = m; }
-    if (typeof timezone === "string" && timezone.trim()) patch.timezone = timezone.trim();
+    // Validated: one unusable zone ("America/NewYork", "Central") throws inside the hourly digest
+    // pass and stops it for every rooftop (A1 F6, A4 F4). US / Canadian IANA zones only.
+    if (timezone != null && timezone !== "") {
+      const problem = sendGates.timezoneProblem(timezone);
+      if (problem) return res.status(400).json({ error: problem });
+      patch.timezone = String(timezone).trim();
+    }
     if (weekly_send_dow != null) { const d = Number(weekly_send_dow); if (!Number.isInteger(d) || d < 0 || d > 6) return res.status(400).json({ error: "weekly_send_dow must be 0–6" }); patch.weekly_send_dow = d; }
     if (monthly_send_day != null) { const d = Number(monthly_send_day); if (!Number.isInteger(d) || d < 1 || d > 28) return res.status(400).json({ error: "monthly_send_day must be 1–28" }); patch.monthly_send_day = d; }
     // Email-type toggles: whitelist boolean columns only.
@@ -3542,17 +3771,27 @@ app.post("/api/csm", requireTrackerAuth, async (req, res) => {
     const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
     if (!sbUrl || !sbKey) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
-    const { data: beforeCfg } = await sb.from("roi_rooftop_config").select("csm_name").eq("team_id", teamId).maybeSingle();
-    const { error: cfgErr } = await sb.from("roi_rooftop_config").update({ csm_name: nm }).eq("team_id", teamId);
+    // The tracker shows a rooftop's CSM from cs_poc (the Metabase CSM sync writes it), so writing
+    // only csm_name changed nothing on screen (A4 F20). Write both: csm_name is the name, cs_poc the
+    // address the display reads. The nightly sync replaces cs_poc again if Metabase names a different
+    // CSM, so Metabase stays the source of truth.
+    const csmPatch = { csm_name: nm, cs_poc: addr.toLowerCase() };
+    const { data: beforeCfg } = await sb.from("roi_rooftop_config").select("csm_name,cs_poc").eq("team_id", teamId).maybeSingle();
+    const { data: wroteCfg, error: cfgErr } = await sb.from("roi_rooftop_config").update(csmPatch).eq("team_id", teamId).select("team_id");
     if (cfgErr) return res.status(500).json({ error: cfgErr.message });
-    await logConfigAudit(sb, teamId, actor, { csm_name: nm }, beforeCfg);
-    const { data: existing } = await sb.from("roi_recipients").select("id").eq("team_id", teamId).ilike("email", addr).maybeSingle();
+    if (!wroteCfg || wroteCfg.length === 0) return res.status(404).json({ error: `no roi_rooftop_config row for team ${teamId} — create the rooftop's config row before assigning a CSM` });
+    await logConfigAudit(sb, teamId, actor, csmPatch, beforeCfg);
+    const { data: found } = await emailHealth.findRecipientsByEmail(sb, { teamId, email: addr, cols: "id,email,receives_sales,receives_service,email_enabled,name" });
+    const existing = (found ?? [])[0] ?? null;
     const patch = { receives_sales: true, receives_service: true, email_enabled: true };
     const q = existing
       ? sb.from("roi_recipients").update({ ...patch, name: nm }).eq("id", existing.id)
       : sb.from("roi_recipients").insert({ team_id: teamId, email: addr, name: nm, ...patch });
     const { error } = await q;
     if (error) return res.status(500).json({ error: error.message });
+    await _auditRecipient(sb, teamId, actor || _actorOf(req), addr, existing
+      ? { receives_sales: [existing.receives_sales, true], receives_service: [existing.receives_service, true], email_enabled: [existing.email_enabled, true], name: [existing.name, nm] }
+      : { added: [null, "sales + service lists (as CSM)"] });
     return res.json({ ok: true, teamId, csm: nm, email: addr });
   } catch (err) {
     console.error("POST /api/csm error:", err?.message ?? err);
@@ -3618,19 +3857,22 @@ const _stripOverrideCols = (cols) =>
  * generated lifecycle_effective post-migration and plain lifecycle_status before it. */
 async function _roiCfgSelect(sb, cols, effectiveFilter) {
   const STAGES = ["onboarding", "contracting", "churn"];
-  const withNew = effectiveFilter
-    ? sb.from("roi_rooftop_config").select(cols).in(effectiveFilter, STAGES)
-    : sb.from("roi_rooftop_config").select(cols);
-  const res = await withNew;
+  // Paged (roi_rooftop_config is ~650 rows; an unpaged read stops silently at 1,000).
+  const read = (c, col) => emailHealth.selectTablePaged(sb, "roi_rooftop_config", c, {
+    filter: col ? (q) => q.in(col, STAGES) : undefined, order: ["team_id"],
+  });
+  const res = await read(cols, effectiveFilter);
   if (!res.error || res.error.code !== "42703") return res;
   console.warn("[tracker] lifecycle-override columns absent — falling back (run src/programs/schema-lifecycle-override.sql)");
-  const legacy = _stripOverrideCols(cols);
-  return effectiveFilter
-    ? sb.from("roi_rooftop_config").select(legacy).in("lifecycle_status", STAGES)
-    : sb.from("roi_rooftop_config").select(legacy);
+  return read(_stripOverrideCols(cols), effectiveFilter ? "lifecycle_status" : null);
 }
+/** roi_live_departments, paged in primary-key order. */
+const _liveDeptsPaged = (sb, cols, filter) =>
+  emailHealth.selectTablePaged(sb, "roi_live_departments", cols, { filter, order: ["team_id", "department"] });
 
-const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
+// The last six are read-only in the tracker (ConfigDrawer shows them): they change what the events
+// cron sends but have no editor, so a CSM could not see why a rooftop gets the emails it gets (A1 F11).
+const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc,chat_enabled,post_conversation_template,post_conversation_mode,post_conversation_outbound_requires_reply,sms_post_conversation_cadence,working_hours";
 const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
 // rendered_html and metrics are deliberately NOT here. Every sent and dry-run run stores its full
 // email HTML plus metricsFull (the rooftop's campaigns, appointment list, top vehicles and warm
@@ -3638,7 +3880,7 @@ const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name
 // of seconds, for fields only the cell drawer reads. The grid reads status, recipients and opens;
 // the drawer fetches one run's metrics + HTML by `id` from /api/tracker/digest-run when it opens.
 // Keeping them out also stops every rooftop's warm-lead names going to the browser in bulk.
-const _ROI_RUN_COLS = "id,team_id,enterprise_id,department,cadence,local_date,status,reason,recipients,message_id,sent_at,opened_at,open_count";
+const _ROI_RUN_COLS = "id,team_id,enterprise_id,department,cadence,local_date,status,reason,reason_detail,trigger,recipients,message_id,sent_at,opened_at,open_count";
 
 /** Shift an ISO "YYYY-MM-DD" by n days (UTC). */
 function _isoShiftDays(iso, n) {
@@ -3709,14 +3951,35 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
     // non-live teams never consume the read budget. Config + recipients don't gate the runs read,
     // so they run alongside it instead of in front of it.
     const cfgP = _roiCfgSelect(sb, _ROI_CFG_COLS);
-    const recP = emailHealth.selectRecipients(sb, "team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role");
-    const liveRes = await sb.from("roi_live_departments").select("team_id,department,is_live,dry_run");
+    // verified_at + subscriptions (+ the deliverability columns selectRecipients adds) let the server
+    // count each department's ELIGIBLE recipients with the cron's own predicate (sendGates); the
+    // grid used to count "enabled" people, which overstated the audience (A1 F15, A4 F16).
+    const recP = emailHealth.selectRecipients(sb, "id,team_id,email,name,receives_sales,receives_service,email_enabled,phone,sms_enabled,role,verified_at,subscriptions");
+    const liveRes = await _liveDeptsPaged(sb, "team_id,department,is_live,dry_run");
     if (liveRes.error) {
       cfgP.then(() => {}, () => {}); recP.then(() => {}, () => {}); // settle quietly; we're answering now
       return res.status(500).json({ error: liveRes.error.message });
     }
     const liveTeamIds = [...new Set((liveRes.data ?? []).filter((l) => l.is_live).map((l) => l.team_id))];
     const tMeta = Date.now();
+    // Paused vs Not started needs LIFETIME send history, not the loaded window: a department held in
+    // dry run that last sent 40 days ago read "Not started" (A4 F19). Only held departments ask.
+    const heldTeams = [...new Set((liveRes.data ?? []).filter((l) => l.is_live && l.dry_run === true).map((l) => l.team_id))];
+    // When each department went live (latest dry run → false) and when each digest type was switched
+    // on (latest *_enabled → true). The grid only calls an empty past cell "Missed" if the department
+    // was already expected to send then; judged by today's settings alone, every month before a
+    // go-live read "Missed". The audit log starts 2026-07-13; older history falls back to first runs.
+    const sinceP = liveTeamIds.length
+      ? emailHealth.selectTablePaged(sb, "roi_config_audit_log", "id,team_id,field,new_value,created_at", {
+        filter: (q) => q.in("team_id", liveTeamIds).in("field", ["dry_run (sales)", "dry_run (service)", "daily_enabled", "weekly_enabled", "monthly_enabled"]),
+        order: ["id"],
+      })
+      : Promise.resolve({ data: [], error: null });
+    const everSentP = heldTeams.length
+      ? emailHealth.selectTablePaged(sb, "roi_digest_runs", "id,team_id,department", {
+        filter: (q) => q.eq("status", "sent").in("team_id", heldTeams), order: ["id"],
+      })
+      : Promise.resolve({ data: [], error: null });
 
     // Windowed + paged runs read (see _fetchRoiRunsPaged). Anchor ceiling for the floors is the
     // explicit history anchor, else today — the client's default anchor (max of latest run /
@@ -3736,18 +3999,44 @@ app.get("/api/tracker/rooftops-data", requireTrackerAuth, async (req, res) => {
       console.error("GET /api/tracker/rooftops-data runs read error:", e?.message ?? e);
       return res.status(500).json({ error: e?.message ?? "runs read failed" });
     }
-    const [cfgRes, recRes] = await Promise.all([cfgP, recP]);
+    const [cfgRes, recRes, everRes, sinceRes] = await Promise.all([cfgP, recP, everSentP, sinceP]);
+    if (sinceRes.error) console.warn("[tracker] audit-log read failed (missed cells use first runs only):", sinceRes.error.message);
+    const since = {};
+    for (const a of sinceRes.error ? [] : (sinceRes.data ?? [])) {
+      const v = String(a.new_value ?? "").trim().toLowerCase();
+      const t = (since[a.team_id] ??= { live: {}, enabled: {} });
+      const m = /^dry_run \((sales|service)\)$/.exec(a.field || "");
+      if (m && v === "false") t.live[m[1]] = a.created_at > (t.live[m[1]] || "") ? a.created_at : t.live[m[1]];
+      const c = /^(daily|weekly|monthly)_enabled$/.exec(a.field || "");
+      if (c && v === "true") t.enabled[c[1]] = a.created_at > (t.enabled[c[1]] || "") ? a.created_at : t.enabled[c[1]];
+    }
     // CRITICAL: config/live define the rows themselves. recipients only enrich → degrade to [].
     if (cfgRes.error) return res.status(500).json({ error: cfgRes.error.message });
     if (recRes.error) console.warn("[tracker] recipients read failed (degrading to empty):", recRes.error.message);
+    if (everRes.error) console.warn("[tracker] lifetime-sent read failed (Paused/Not started from the window only):", everRes.error.message);
+    const recs = recRes.error ? [] : (recRes.data ?? []);
+    const recByTeam = new Map();
+    for (const r of recs) { const a = recByTeam.get(r.team_id) ?? []; a.push(r); recByTeam.set(r.team_id, a); }
+    const eligibility = (liveRes.data ?? []).filter((l) => l.is_live).map((l) => {
+      const list = recByTeam.get(l.team_id) ?? [];
+      const n = (type) => sendGates.eligibleRecipients(list, l.department, type).length;
+      return { team_id: l.team_id, department: l.department, daily: n("daily"), weekly: n("weekly"), monthly: n("monthly") };
+    });
+    const everSent = everRes.error ? null : [...new Set((everRes.data ?? []).map((r) => `${r.team_id}::${r.department}`))];
     // Visible in the browser's Network → Timing tab, so a slow load can be pinned on a stage.
     res.set("Server-Timing", `live;dur=${tMeta - t0}, runs;dur=${Date.now() - tMeta};desc="${runs.length} runs"`);
     return res.json({
       ok: true,
       runs,
       configs: cfgRes.data ?? [],
-      recipients: recRes.error ? [] : (recRes.data ?? []),
+      // Same columns the grid always got; the eligibility inputs stay on the server.
+      recipients: recs.map(({ team_id, email, name, receives_sales, receives_service, email_enabled, phone, sms_enabled, role }) =>
+        ({ team_id, email, name, receives_sales, receives_service, email_enabled, phone, sms_enabled, role })),
       lives: liveRes.data ?? [],
+      eligibility,
+      everSent,
+      since,
+      serverDryRun: sendGates.serverDryRun(),
     });
   } catch (err) {
     console.error("GET /api/tracker/rooftops-data error:", err?.message ?? err);
@@ -3764,10 +4053,18 @@ app.get("/api/tracker/lifecycle-rooftops", requireTrackerAuth, async (req, res) 
       // filter on lifecycle_effective (generated: override applied, churn always wins) so a rooftop a
       // human moved to Live drops out of this list and one they moved back to Onboarding appears.
       _roiCfgSelect(sb, _ROI_CFG_COLS_LIFECYCLE, "lifecycle_effective"),
-      sb.from("roi_live_departments").select("team_id"),
+      _liveDeptsPaged(sb, "team_id,department,is_live"),
     ]);
     if (cfgRes.error) return res.status(500).json({ error: cfgRes.error.message });
-    return res.json({ ok: true, configs: cfgRes.data ?? [], liveTeamIds: (liveRes.data ?? []).map((l) => l.team_id) });
+    if (liveRes.error) return res.status(500).json({ error: liveRes.error.message });
+    // Only a team with a LIVE department has a grid row. A team removed from the emailer keeps its
+    // roi_live_departments rows (is_live=false), and counting those made a removed rooftop vanish
+    // from every tab and from search (A4 F22). It is listed here, flagged removed.
+    const lives = liveRes.data ?? [];
+    const liveTeamIds = [...new Set(lives.filter((l) => l.is_live).map((l) => l.team_id))];
+    const liveSet = new Set(liveTeamIds);
+    const removedTeamIds = [...new Set(lives.filter((l) => !liveSet.has(l.team_id)).map((l) => l.team_id))];
+    return res.json({ ok: true, configs: cfgRes.data ?? [], liveTeamIds, removedTeamIds });
   } catch (err) {
     console.error("GET /api/tracker/lifecycle-rooftops error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
@@ -3797,9 +4094,21 @@ app.get("/api/tracker/event-counts", requireTrackerAuth, async (req, res) => {
   try {
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    const { data, error } = await sb.from("roi_event_email_counts").select("team_id,department,email_type,total,sent,not_sent,opened,last_at");
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json({ ok: true, rows: data ?? [] });
+    const [viewRes, aliasRes] = await Promise.all([
+      emailHealth.selectTablePaged(sb, "roi_event_email_counts", "team_id,department,email_type,total,sent,not_sent,opened,last_at", { order: ["team_id", "department", "email_type"] }),
+      // alias_of:<key> rows are bookkeeping duplicates (status suppressed), not emails: the view
+      // counts them in total / not_sent, so take them back out.
+      emailHealth.selectTablePaged(sb, "roi_event_emails", "id,team_id,department,email_type", { filter: (q) => q.like("reason", "alias_of:%"), order: ["id"] }),
+    ]);
+    if (viewRes.error) return res.status(500).json({ error: viewRes.error.message });
+    const alias = new Map();
+    if (aliasRes.error) console.warn("[tracker] alias rows read failed (counts include them):", aliasRes.error.message);
+    else for (const r of aliasRes.data ?? []) { const k = `${r.team_id}::${r.department}::${r.email_type}`; alias.set(k, (alias.get(k) || 0) + 1); }
+    const rows = (viewRes.data ?? []).map((r) => {
+      const n = alias.get(`${r.team_id}::${r.department}::${r.email_type}`) || 0;
+      return n ? { ...r, total: Math.max(0, r.total - n), not_sent: Math.max(0, r.not_sent - n) } : r;
+    });
+    return res.json({ ok: true, rows });
   } catch (err) {
     console.error("GET /api/tracker/event-counts error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
@@ -3842,31 +4151,142 @@ app.get("/api/tracker/event-emails", requireTrackerAuth, async (req, res) => {
       .range(offset, offset + limit - 1);
     const { data, error } = await q;
     if (error) return res.status(500).json({ error: error.message });
-    return res.json({ ok: true, rows: data ?? [] });
+    // alias_of:<key> rows are bookkeeping duplicates, never listed.
+    return res.json({ ok: true, rows: (data ?? []).filter((r) => !String(r.reason || "").startsWith("alias_of:")) });
   } catch (err) {
     console.error("GET /api/tracker/event-emails error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
   }
 });
 
-// 6) Every produced email of ONE type across teams (cross-rooftop analytics modal).
+// 6) Transactional analytics modal: ONE type across teams, by day. The old read was one
+//    `.limit(3000)` that PostgREST cut to 1,000 rows, about two days of post-conversation history
+//    (A4 F15). Now:
+//      · no `day` → per-day counts for the last `days` days, each an exact head count;
+//      · `day`    → that day's emails (light columns, paged, up to 2,000).
+//    Days are calendar days in `tz` (default America/New_York). Body: { teamIds, emailType,
+//    department?, metric: 'sent'|'opened', days?, tz?, day? }
+function _tzOffsetMs(date, tz) {
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(date);
+  const g = (t) => Number(p.find((x) => x.type === t)?.value);
+  return Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second")) - date.getTime();
+}
+/** UTC instant of local midnight starting `isoDay` in `tz`. */
+function _zonedDayStart(isoDay, tz) {
+  const [y, m, d] = isoDay.split("-").map(Number);
+  const guess = Date.UTC(y, m - 1, d);
+  return new Date(guess - _tzOffsetMs(new Date(guess), tz));
+}
+async function _mapLimit(items, n, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); }
+  }));
+  return out;
+}
 app.post("/api/tracker/event-emails-by-type", requireTrackerAuth, async (req, res) => {
   try {
-    const { teamIds, emailType, department, limit } = req.body ?? {};
+    const { teamIds, emailType, department, metric, days, tz, day } = req.body ?? {};
     if (!Array.isArray(teamIds) || teamIds.length === 0 || !emailType) return res.status(400).json({ error: "teamIds[] + emailType required" });
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
-    let q = sb.from("roi_event_emails")
-      .select("id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,rendered_html,event_key,message_id")
-      .in("team_id", teamIds).eq("email_type", emailType)
-      .order("created_at", { ascending: false })
-      .limit(Math.min(5000, Math.max(1, Number(limit) || 3000)));
-    if (department) q = q.eq("department", department);
-    const { data, error } = await q;
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json({ ok: true, rows: data ?? [] });
+    const zone = sendGates.ALLOWED_TIMEZONES.includes(tz) ? tz : "America/New_York";
+    const scope = (q) => {
+      q = q.in("team_id", teamIds).eq("email_type", emailType);
+      if (department) q = q.eq("department", department);
+      return metric === "opened" ? q.eq("status", "sent").not("opened_at", "is", null) : q.eq("status", "sent");
+    };
+    const shiftDay = (iso, n) => { const [y, m, d] = iso.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); };
+    if (day) {
+      if (!_ISO_DAY.test(String(day))) return res.status(400).json({ error: "day must be YYYY-MM-DD" });
+      const from = _zonedDayStart(day, zone).toISOString();
+      const to = _zonedDayStart(shiftDay(day, 1), zone).toISOString();
+      const { data, error } = await emailHealth.selectTablePaged(sb, "roi_event_emails",
+        "id,team_id,department,email_type,status,subject,recipients,sent_at,created_at,opened_at,open_count,reason,event_key,message_id", {
+          filter: (q) => scope(q).gte("created_at", from).lt("created_at", to), order: ["id"],
+        });
+      if (error) return res.status(500).json({ error: error.message });
+      const rows = (data ?? []).sort((a, b) => String(b.sent_at || b.created_at).localeCompare(String(a.sent_at || a.created_at)));
+      return res.json({ ok: true, day, tz: zone, total: rows.length, rows: rows.slice(0, 2000) });
+    }
+    const n = Math.min(90, Math.max(1, Number(days) || 30));
+    const today = _dealerToday(zone);
+    const keys = Array.from({ length: n }, (_, i) => shiftDay(today, -(n - 1 - i)));
+    const counts = await _mapLimit(keys, 6, async (k) => {
+      const { count, error } = await scope(sb.from("roi_event_emails").select("id", { count: "exact", head: true }))
+        .gte("created_at", _zonedDayStart(k, zone).toISOString()).lt("created_at", _zonedDayStart(shiftDay(k, 1), zone).toISOString());
+      if (error) throw error;
+      return count ?? 0;
+    });
+    return res.json({ ok: true, tz: zone, days: keys.map((k, i) => ({ day: k, count: counts[i] })) });
   } catch (err) {
     console.error("POST /api/tracker/event-emails-by-type error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+
+// 6b) Transactional KPI strip (C6): roi_event_emails rows by status for the selected teams over the
+//     last `sinceDays` days. Numerator and denominator come from this ONE ledger, at email grain, in
+//     ONE window. The old strip divided all-time ledger rows by 120 days of raw ClickHouse events in
+//     another unit, which read 205% for overdue (A4 F12). Body: { teamIds, department?, sinceDays? }
+//     → { types: { [email_type]: { sent, not_sent, error, suppressed, queued, opened } } }
+app.post("/api/tracker/event-status-counts", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamIds, department, sinceDays } = req.body ?? {};
+    const days = Math.min(365, Math.max(1, Number(sinceDays) || 30));
+    const types = sendGates.EVENT_TYPES;
+    const empty = () => ({ sent: 0, not_sent: 0, error: 0, suppressed: 0, queued: 0, opened: 0 });
+    if (!Array.isArray(teamIds) || teamIds.length === 0) return res.json({ ok: true, sinceDays: days, types: Object.fromEntries(types.map((t) => [t, empty()])) });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    // "alias" = alias_of:<key> bookkeeping duplicates (status suppressed): counted only to take them
+    // back out of `suppressed`.
+    const buckets = ["sent", "not_sent", "error", "suppressed", "queued", "opened", "alias"];
+    const chunks = [];
+    for (let i = 0; i < teamIds.length; i += 250) chunks.push(teamIds.slice(i, i + 250));
+    const jobs = types.flatMap((t) => buckets.flatMap((b) => chunks.map((ids) => ({ t, b, ids }))));
+    const results = await _mapLimit(jobs, 8, async ({ t, b, ids }) => {
+      let q = sb.from("roi_event_emails").select("id", { count: "exact", head: true })
+        .in("team_id", ids).eq("email_type", t).gte("created_at", since);
+      if (department) q = q.eq("department", department);
+      q = b === "opened" ? q.eq("status", "sent").not("opened_at", "is", null)
+        : b === "alias" ? q.like("reason", "alias_of:%")
+        : q.eq("status", b);
+      const { count, error } = await q;
+      if (error) throw error;
+      return count ?? 0;
+    });
+    const out = Object.fromEntries(types.map((t) => [t, { ...empty(), alias: 0 }]));
+    jobs.forEach((j, i) => { out[j.t][j.b] += results[i]; });
+    for (const t of types) { out[t].suppressed = Math.max(0, out[t].suppressed - out[t].alias); delete out[t].alias; }
+    return res.json({ ok: true, sinceDays: days, types: out });
+  } catch (err) {
+    console.error("POST /api/tracker/event-status-counts error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "count failed" });
+  }
+});
+
+// 6c) Who would actually get a (department, type) email: the cron's predicate per recipient, with
+//     the reason for everyone it holds. Powers the go-live modal ("Will start receiving") and the
+//     drawer's Generate & send, which used to list "enabled" people (A4 F16, F9).
+//     Query: ?teamId&department&type (daily|weekly|monthly|post_appointment|…)
+app.get("/api/tracker/eligible-recipients", requireTrackerAuth, async (req, res) => {
+  try {
+    const teamId = String(req.query.teamId || "").trim();
+    const department = String(req.query.department || "") === "service" ? "service" : "sales";
+    const type = String(req.query.type || "daily");
+    if (!teamId) return res.status(400).json({ error: "teamId required" });
+    if (!sendGates.TYPE_LABEL[type]) return res.status(400).json({ error: "unknown type" });
+    const sb = _trackerRoiSb();
+    if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
+    const { data, error } = await emailHealth.selectRecipients(
+      sb, "id,team_id,email,name,receives_sales,receives_service,email_enabled,verified_at,subscriptions", (q) => q.eq("team_id", teamId));
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true, teamId, department, type, ...sendGates.explainRecipients(data ?? [], department, type) });
+  } catch (err) {
+    console.error("GET /api/tracker/eligible-recipients error:", err?.message ?? err);
     return res.status(500).json({ error: err?.message ?? "load failed" });
   }
 });
@@ -3958,8 +4378,15 @@ app.post("/api/tracker/dry-run", requireTrackerAuth, async (req, res) => {
     const sb = _trackerRoiSb();
     if (!sb) return res.status(500).json({ error: "ROI_SUPABASE_SERVICE_KEY not set on server" });
     const { data: before } = await sb.from("roi_live_departments").select("dry_run").eq("team_id", teamId).eq("department", department).maybeSingle();
-    const { error } = await sb.from("roi_live_departments").update({ dry_run: dryRun }).eq("team_id", teamId).eq("department", department);
+    // Going live without a config row would email the dealer under a blank rooftop name, on default
+    // settings nobody chose (A1 F13). Hold until the rooftop is configured.
+    if (dryRun === false) {
+      const { data: cfgRow } = await sb.from("roi_rooftop_config").select("team_id").eq("team_id", teamId).maybeSingle();
+      if (!cfgRow) return res.status(409).json({ error: "This rooftop has no email configuration yet, so it can't go live. Ask product to set it up first." });
+    }
+    const { data: wrote, error } = await sb.from("roi_live_departments").update({ dry_run: dryRun }).eq("team_id", teamId).eq("department", department).select("team_id");
     if (error) return res.status(500).json({ error: error.message });
+    if (!wrote || wrote.length === 0) return res.status(404).json({ error: `no roi_live_departments row for ${teamId} ${department}` });
     try {
       if (!before || before.dry_run !== dryRun) {
         const { error: auditErr } = await sb.from("roi_config_audit_log").insert([{ team_id: teamId, actor: actor || null, field: `dry_run (${department})`, old_value: before ? String(before.dry_run) : null, new_value: String(dryRun), source: "tracker" }]);
@@ -3979,24 +4406,57 @@ app.post("/api/tracker/dry-run", requireTrackerAuth, async (req, res) => {
 // at each rooftop's local send-hour (idempotent: one send per rooftop per day).
 // Vercel sends `Authorization: Bearer <CRON_SECRET>` when CRON_SECRET is configured.
 app.get("/api/cron/roi-email", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: "roi-email-daily" });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   try {
-    const { runOnce, runCadence } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    const { runOnce } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
+    // Daily only. Weekly/monthly used to run here AFTER runOnce, in the same 300s function, so on
+    // every hour runOnce overran they never ran at all (2026-10-01 monthly: 41 rows stuck
+    // "scheduled", 0 sent; 2026-10-05 weekly: nothing written). They have their own route below.
     const summary = await runOnce();
-    // Weekly/monthly digests run in the same hourly pass; each is internally gated to
-    // its send-day (Mon / 1st) + send-hour, so off-day passes are cheap no-ops.
-    const weekly = await runCadence("weekly").catch((e) => ({ error: String(e).slice(0, 120) }));
-    const monthly = await runCadence("monthly").catch((e) => ({ error: String(e).slice(0, 120) }));
-    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary, weekly, monthly });
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
   } catch (err) {
     console.error("GET /api/cron/roi-email error:", err?.message ?? err);
     // A total crash of the digest cron writes no rows and would otherwise be invisible → alert loudly.
     try {
       const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
       await postSystemicAlert({ source: "Daily digest", title: "digest cron CRASHED", detail: `runOnce threw before completing: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: "hourly digest cron" });
+    } catch { /* best-effort */ }
+    return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
+  }
+});
+
+// ── Hourly weekly / monthly digest cron — one Vercel invocation per cadence ──────────────────
+// Each cadence gets its own function and its own 300s, so neither can be starved by the daily pass
+// or by the other. Off its send day a pass is a cheap no-op (gated on weekly_send_dow /
+// monthly_send_day + the send hour before any metrics are fetched).
+app.get("/api/cron/roi-digest/:cadence", async (req, res) => {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const cadence = req.params.cadence;
+  if (cadence !== "weekly" && cadence !== "monthly") return res.status(404).json({ error: "cadence must be weekly or monthly" });
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: `roi-digest-${cadence}` });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
+  const Cad = cadence === "weekly" ? "Weekly" : "Monthly";
+  try {
+    const { runCadence } = require("./roi-cron/runner.cjs");
+    const summary = await runCadence(cadence);
+    return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), cadence, summary });
+  } catch (err) {
+    console.error(`GET /api/cron/roi-digest/${cadence} error:`, err?.message ?? err);
+    try {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      await postSystemicAlert({ source: `${Cad} digest`, title: `${cadence} digest cron CRASHED`, detail: `runCadence threw before completing: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: `hourly ${cadence} digest cron` });
     } catch { /* best-effort */ }
     return res.status(500).json({ ok: false, error: err?.message ?? "cron failed" });
   }
@@ -4028,8 +4488,8 @@ app.get("/api/email/roi-render-preview", requireTrackerAuth, async (req, res) =>
 // write roi_digest_runs. Guarded by CRON_SECRET like the cron routes.
 //   GET /api/cron/roi-backfill?start=2026-06-23&end=2026-06-24
 app.get("/api/cron/roi-backfill", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   const { start, end } = req.query;
@@ -4038,6 +4498,10 @@ app.get("/api/cron/roi-backfill", async (req, res) => {
     return res.status(400).json({ ok: false, error: "start and end are required as YYYY-MM-DD (e.g. ?start=2026-06-23&end=2026-06-24)" });
   }
   if (start > end) return res.status(400).json({ ok: false, error: "start must be <= end" });
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: "roi-backfill" });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   try {
     const { backfill } = require("./roi-cron/runner.cjs"); // lazy: env is present at request time
     const summary = await backfill(start, end);
@@ -4051,14 +4515,22 @@ app.get("/api/cron/roi-backfill", async (req, res) => {
 // ── Transactional email poll (Vercel Cron → this route, ~every 15 min) ──────
 // Sends the per-event emails (post-appointment / post-conversation / action-item / overdue)
 // for rooftops that enabled them in roi_rooftop_config. Dedup via roi_event_emails.
-app.get("/api/cron/roi-events", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+app.get(["/api/cron/roi-events", "/api/cron/roi-events/shard/:shard/:shards"], async (req, res) => {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: (req.params.shards ? `roi-events-shard-${req.params.shard}-of-${req.params.shards}` : "roi-events") });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
   try {
     const { runOnce } = require("./roi-cron/eventRunner.cjs");
-    const summary = await runOnce();
+    // vercel.json runs this as N shards (/api/cron/roi-events/shard/<i>/<N>), each with its own
+    // function timeout — one pass over every live rooftop no longer fits in 300s. In the PATH, not a
+    // query string, because Vercel documents path-segment cron routes and not query strings. The bare
+    // path still runs the whole fleet, as before.
+    const summary = await runOnce({ shard: req.params.shard ?? req.query.shard, shards: req.params.shards ?? req.query.shards });
     return res.status(200).json({ ok: true, ranAt: new Date().toISOString(), summary });
   } catch (err) {
     console.error("GET /api/cron/roi-events error:", err?.message ?? err);
@@ -4071,13 +4543,41 @@ app.get("/api/cron/roi-events", async (req, res) => {
   }
 });
 
+// ── GET /api/cron/roi-watchdog — dead-man switch for the email tracker (every 30 min) ─────────
+// Independent of the send passes, so a pass killed at 300s (which never reaches its own end-of-pass
+// alerts) is still noticed: reads roi_digest_runs / roi_event_emails / roi_event_sms / roi_cron_runs
+// and posts ONE consolidated Slack alert of new problems (each problem at most once per 6h). Writes
+// nothing but its own roi_cron_runs row. See server/roi-cron/watchdog.cjs for the checks.
+app.get("/api/cron/roi-watchdog", async (req, res) => {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused.
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  // Preflight (env, schema, Twilio auth): checked once per 10 min per instance, alerted once per 6h.
+  // The pass continues on any problem except a fatal one (no Supabase credentials).
+  const pf = await require("./roi-cron/preflight.cjs").preflightGate({ source: "roi-watchdog" });
+  if (!pf.ok) return res.status(500).json({ ok: false, error: "preflight failed", problems: pf.problems.filter((p) => p.fatal).map((p) => p.detail) });
+  try {
+    const { runWatchdog } = require("./roi-cron/watchdog.cjs");
+    const out = await runWatchdog();
+    return res.status(200).json({ ranAt: new Date().toISOString(), ...out });
+  } catch (err) {
+    console.error("GET /api/cron/roi-watchdog error:", err?.message ?? err);
+    try {
+      const { postSystemicAlert } = require("./roi-cron/slackAlert.cjs");
+      await postSystemicAlert({ source: "Email tracker watchdog", title: "watchdog CRASHED", detail: `runWatchdog threw: ${String(err?.message ?? err).slice(0, 300)}`, windowLabel: "30-min email-tracker watchdog" });
+    } catch { /* best-effort */ }
+    return res.status(500).json({ ok: false, error: err?.message ?? "watchdog failed" });
+  }
+});
+
 // ── GET /api/cron/csm-sync — refresh the CSM (cs_poc) mapping ────────────────
 // Pulls Metabase Q12071's cs_poc_email per team_id and upserts it into
 // roi_rooftop_config.cs_poc — the authoritative CSM the Email Tracker reads.
 // Idempotent; safe on a schedule. Vercel sends Authorization: Bearer <secret>.
 app.get("/api/cron/csm-sync", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
@@ -4094,8 +4594,8 @@ app.get("/api/cron/csm-sync", async (req, res) => {
 // new ones to roi_live_departments (held: is_live=true, dry_run=true → no email).
 // Scheduled daily in vercel.json. Same CRON_SECRET auth as the send cron.
 app.get("/api/cron/sync-live", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
@@ -4112,8 +4612,8 @@ app.get("/api/cron/sync-live", async (req, res) => {
 // contracting / live / churn) from ClickHouse into roi_rooftop_config, so the tracker
 // can show rooftops that aren't technically live yet. Scheduled daily in vercel.json.
 app.get("/api/cron/sync-lifecycle", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
@@ -4145,8 +4645,8 @@ app.get("/api/cron/sync-lifecycle", async (req, res) => {
 //   run in this long; SYNC_DATA_STALE_DAYS (default 2) — newest aggregated day
 //   is this far behind today (the user-visible "reports frozen" symptom).
 app.get("/api/cron/sync-health", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   const alert = async (title, detail) => {
@@ -4339,8 +4839,8 @@ app.get("/api/metrics", async (req, res) => {
 // roi_cron_runs so "when did each tier last sync" is always answerable.
 function makeAgentsRefreshRoute(mode, { rooftop: rooftopFn, overall: overallFn }) {
   return async (req, res) => {
-    const secret = process.env.CRON_SECRET;
-    if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+    // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+    if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
       return res.status(401).json({ error: "unauthorized" });
     }
     const ranAt = new Date().toISOString();
@@ -4376,8 +4876,8 @@ function makeAgentsRefreshRoute(mode, { rooftop: rooftopFn, overall: overallFn }
 
 // Keeps the tracker's transactional event totals precomputed (see /api/email/roi-event-counts).
 app.get("/api/cron/tracker-counts", async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+  // Fails CLOSED: with CRON_SECRET unset every caller is refused (was: open to anyone).
+  if (!require("./roi-cron/preflight.cjs").cronAuthorized(req)) {
     return res.status(401).json({ error: "unauthorized" });
   }
   if (!hasClickhouseCreds()) return res.status(200).json({ ok: false, error: "ClickHouse creds not set" });
