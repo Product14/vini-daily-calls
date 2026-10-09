@@ -104,6 +104,30 @@ async function sendWithOverridePrompt(doPost: (o: Overrides) => Promise<Response
   return { ok: false, error: "Not sent." };
 }
 
+/** Speed to Lead EMAIL channel state for a rooftop — read live from conversational-ai (the same
+ * setting the Console's Speed to Lead > Email toggle writes), not Supabase. `available` is false
+ * until conversational-ai ships the email channel. */
+export type StlEmailState = {
+  available: boolean;
+  enabled: boolean;
+  smsEnabled: boolean;
+  /** Sending-mailbox status; null when conversational-ai doesn't report it. */
+  mailbox: { connected: boolean; email: string | null } | null;
+};
+export async function loadStlEmail(opts: { teamId?: string; enterpriseId?: string }): Promise<{ ok: true; state: StlEmailState } | { ok: false; error: string }> {
+  if (!opts.teamId || !opts.enterpriseId) return { ok: false, error: "This rooftop has no enterprise/team id." };
+  try {
+    const qs = new URLSearchParams({ teamId: opts.teamId, enterpriseId: opts.enterpriseId });
+    const res = await fetch(`/api/stl-email?${qs}`, { headers: trackerAuthHeaders() });
+    const j = (await res.json().catch(() => ({}))) as Partial<StlEmailState> & { ok?: boolean; error?: string };
+    if (!res.ok || !j.ok) return { ok: false, error: j.error || `Request failed (HTTP ${res.status})` };
+    return { ok: true, state: { available: j.available === true, enabled: j.enabled === true, smsEnabled: j.smsEnabled === true, mailbox: j.mailbox ?? null } };
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+/** Turn the rooftop's STL Email channel on/off. Takes effect for the next new lead. */
+export const setStlEmailNow = (opts: { teamId?: string; enterpriseId?: string; enabled: boolean }) =>
+  postJson("/api/stl-email", { teamId: opts.teamId, enterpriseId: opts.enterpriseId, enabled: opts.enabled });
+
 /** Toggle a recipient's email_enabled (default) or sms_enabled (channel:'sms'). Persist; does NOT send. */
 export const toggleRecipientNow = (opts: { teamId?: string; email: string; enabled: boolean; channel?: "email" | "sms" }) =>
   postJson("/api/recipients/toggle", { teamId: opts.teamId, email: opts.email, enabled: opts.enabled, channel: opts.channel });

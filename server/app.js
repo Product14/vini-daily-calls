@@ -3388,6 +3388,84 @@ app.post("/api/recipients/toggle", requireTrackerAuth, async (req, res) => {
   }
 });
 
+// ── Speed to Lead EMAIL channel (STL Email) — rooftop config drawer toggle ───
+// Unlike every other switch in the drawer this is NOT stored in Supabase: it is the same
+// conversational-ai setting the Console's Lead Engagements > Speed to Lead > Email toggle writes
+// (stl-follow-up-config → workflowConfig.stlChannels.email), so the two screens can never
+// disagree. config-hub reads that setting live from conversational-ai too.
+//   GET  /api/stl-email?teamId=&enterpriseId=   → { ok, available, enabled, smsEnabled, mailbox }
+//   POST /api/stl-email { teamId, enterpriseId, enabled }
+// Needs SPYNE_GATEWAY_BASE_URL (the API gateway in front of conversational-ai, e.g. the one
+// config-hub calls as https://${BASE_URL}/conversation/...) and SPYNE_API_TOKEN (a Spyne token
+// conversational-ai accepts — it validates bearer tokens against user-management).
+const STL_CONFIG_PATH = "/conversation/notifications/configs/stl-follow-up-config";
+function stlConfigTarget() {
+  const base = String(process.env.SPYNE_GATEWAY_BASE_URL || "").replace(/\/+$/, "");
+  const token = process.env.SPYNE_API_TOKEN || process.env.DIGEST_SPYNE_TOKEN || "";
+  return base && token ? { url: `${base}${STL_CONFIG_PATH}`, token } : null;
+}
+async function stlConfigCall(method, query, body) {
+  const target = stlConfigTarget();
+  if (!target) return { status: 503, json: { error: "STL Email isn't connected on this server (set SPYNE_GATEWAY_BASE_URL + SPYNE_API_TOKEN)." } };
+  const qs = query ? `?${new URLSearchParams(query)}` : "";
+  const res = await fetch(`${target.url}${qs}`, {
+    method,
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${target.token}` },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
+  });
+  const json = await res.json().catch(() => ({}));
+  return { status: res.status, json };
+}
+// conversational-ai returns validation messages as a string or string[] — surface the first.
+function stlConfigError(json, status) {
+  const m = json?.message;
+  return (Array.isArray(m) ? m[0] : m) || json?.error || `conversational-ai request failed (HTTP ${status})`;
+}
+app.get("/api/stl-email", requireTrackerAuth, async (req, res) => {
+  try {
+    const teamId = String(req.query.teamId || "").trim();
+    const enterpriseId = String(req.query.enterpriseId || "").trim();
+    if (!teamId || !enterpriseId) return res.status(400).json({ error: "teamId + enterpriseId required" });
+    const { status, json } = await stlConfigCall("GET", { enterpriseId, teamId });
+    if (status >= 400) return res.status(status === 503 ? 503 : 502).json({ error: stlConfigError(json, status) });
+    const data = json?.data ?? json;
+    // An older conversational-ai has no stlEmail block → the channel isn't available yet.
+    return res.json({
+      ok: true,
+      available: data?.stlEmail !== undefined,
+      enabled: data?.stlEmail?.enabled === true,
+      smsEnabled: data?.stl?.enabled === true,
+      // Whether the rooftop has a connected sending mailbox (null when conversational-ai
+      // doesn't report it yet). Email can't go out without one.
+      mailbox: data?.stlEmail?.mailbox
+        ? { connected: data.stlEmail.mailbox.connected === true, email: data.stlEmail.mailbox.email ?? null }
+        : null,
+    });
+  } catch (err) {
+    console.error("GET /api/stl-email error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "load failed" });
+  }
+});
+app.post("/api/stl-email", requireTrackerAuth, async (req, res) => {
+  try {
+    const { teamId, enterpriseId, enabled } = req.body ?? {};
+    if (!teamId || !enterpriseId || typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "teamId, enterpriseId and boolean enabled required" });
+    }
+    const { status, json } = await stlConfigCall("POST", null, { enterpriseId, teamId, stlEmail: { enabled } });
+    // 400s carry a CSM-actionable reason (e.g. "At least one lead type must be enabled when
+    // enabling STL") — pass it through as-is rather than masking it as a server error.
+    if (status >= 400) return res.status(status === 400 || status === 503 ? status : 502).json({ error: stlConfigError(json, status) });
+    const data = json?.data ?? json;
+    console.log(`[stl-email] team=${teamId} enterprise=${enterpriseId} enabled=${enabled}`);
+    return res.json({ ok: true, enabled: data?.stlEmail?.enabled === true });
+  } catch (err) {
+    console.error("POST /api/stl-email error:", err?.message ?? err);
+    return res.status(500).json({ error: err?.message ?? "save failed" });
+  }
+});
+
 // ── Verify / unverify a recipient for its rooftop (the cross-rooftop send gate) ──
 // A recipient is only ever emailed after a human confirms it belongs to THIS rooftop
 // (roi_recipients.verified_at). This is the guarantee against a wrong-rooftop address

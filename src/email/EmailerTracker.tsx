@@ -18,7 +18,7 @@ import { loadRooftops, loadLifecycleOnlyRooftops, loadConfigAuditLog, updateRoof
 import { RooftopCellDrawer, WEEKDAY_LABELS } from "./RooftopCellDrawer";
 import { columnDate, periodLabel } from "./periodBuckets";
 import { LifecycleList, LifecycleBadge } from "./LifecycleList";
-import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow } from "./sendDigest";
+import { reportMissingRooftopNow, generateSendEventNow, sendStoredEventNow, addRecipientNow, updateRecipientNow, toggleRecipientNow, setRecipientRoleNow, setRecipientSubscriptionNow, verifyRecipientNow, suppressRecipientNow, loadStlEmail, setStlEmailNow, type StlEmailState } from "./sendDigest";
 import { confirmDialog } from "../ui/dialogs";
 import {
   STATE_META, liveAnchor, latestDueKey, summarizeDue, columnStats, rooftopCounts, actionBoard, rowMatchesBoard, txKpi, neutralizeTracking, eventReasonLabel,
@@ -1404,6 +1404,12 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
   // Rooftop-level SMS master switch (roi_rooftop_config.sms_enabled) — SMS only sends when ON.
   const [smsMaster, setSmsMaster] = useState(false);
   const [smsBusy, setSmsBusy] = useState(false);
+  // Speed to Lead EMAIL channel — lives in conversational-ai (shared with the Console's Speed to
+  // Lead > Email toggle), not roi_rooftop_config, so it is loaded separately per drawer open.
+  // null = still loading; stlEmailErr = couldn't load (row shown disabled with the reason).
+  const [stlEmail, setStlEmail] = useState<StlEmailState | null>(null);
+  const [stlEmailErr, setStlEmailErr] = useState("");
+  const [stlEmailBusy, setStlEmailBusy] = useState(false);
   // Weekly/monthly digest send-day (roi_rooftop_config.weekly_send_dow/monthly_send_day) — same
   // fields as RooftopCellDrawer's ScheduleEditor, surfaced here too since this notifications
   // panel is the more discoverable entry point for "when does this rooftop's digest go out".
@@ -1422,6 +1428,16 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
     setErr("");
     void reloadRecips();
   }, [rooftop, reloadRecips]);
+  useEffect(() => {
+    let cancelled = false;
+    setStlEmail(null); setStlEmailErr("");
+    if (!rooftop) return;
+    void loadStlEmail({ teamId: rooftop.team_id, enterpriseId: rooftop.enterprise_id }).then((r) => {
+      if (cancelled) return;
+      if (r.ok) setStlEmail(r.state); else setStlEmailErr(r.error);
+    });
+    return () => { cancelled = true; };
+  }, [rooftop?.team_id, rooftop?.enterprise_id]);
   if (!rooftop || !cfg) return null;
 
   const saveWeeklyDow = async (next: number) => {
@@ -1529,6 +1545,22 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
       setErr(res.error || "Could not release the hold"); return;
     }
     onSaved();
+  };
+
+  // Speed to Lead EMAIL channel. Optimistic; a rejection from conversational-ai (e.g. no lead type
+  // enabled for Speed to Lead yet) is shown verbatim — it tells the CSM what to fix in the Console.
+  const toggleStlEmail = async () => {
+    if (!rooftop?.team_id || !stlEmail || stlEmailBusy) return;
+    const next = !stlEmail.enabled;
+    if (next && !(await confirmDialog({
+      title: `Turn on STL Email for ${rooftop.name}?`,
+      message: "Every new lead with an email address will get a first-touch email the moment it arrives, sent in this rooftop's name from a spyne.ai address (at most one per customer every 12 hours). Only turn this on after the rooftop has agreed.",
+      confirmLabel: "Turn on",
+    }))) return;
+    setStlEmail({ ...stlEmail, enabled: next }); setStlEmailBusy(true); setErr("");
+    const res = await setStlEmailNow({ teamId: rooftop.team_id, enterpriseId: rooftop.enterprise_id, enabled: next });
+    setStlEmailBusy(false);
+    if (!res.ok) { setStlEmail({ ...stlEmail, enabled: !next }); setErr(res.error || "Save failed"); return; }
   };
 
   // Rooftop SMS master switch.
@@ -1716,6 +1748,41 @@ function ConfigDrawer({ rooftop, onClose, onSaved }: { rooftop: RooftopRow | nul
               ) : null}
             </Fragment>
           ))}
+          {/* Speed to Lead EMAIL — customer-facing, unlike the staff emails above. Shared with the
+              Console's Speed to Lead > Email toggle (conversational-ai), not roi_rooftop_config. */}
+          <label className={`flex items-center justify-between border-b border-border-subtle py-2.5 ${stlEmail?.available ? "cursor-pointer" : ""}`}>
+            <span className="text-[13px] text-text-primary">
+              STL Email <span className="text-[10px] text-text-muted">· first-touch email to every new lead</span>
+              {stlEmailErr ? (
+                <span className="block text-[10px] text-warning">{stlEmailErr}</span>
+              ) : stlEmail && !stlEmail.available ? (
+                <span className="block text-[10px] text-text-muted">Not available for this rooftop yet.</span>
+              ) : stlEmail?.mailbox ? (
+                // Shown whether the switch is on or off, so it's clear why email can't go out before turning it on.
+                stlEmail.mailbox.connected ? (
+                  <span className="mt-1 block text-[10px] text-positive">
+                    ● Sending mailbox: {stlEmail.mailbox.email ? <b>{stlEmail.mailbox.email}</b> : "connected"}
+                    {stlEmail.mailbox.email ? " · connected" : ""}
+                  </span>
+                ) : (
+                  <span className="mt-1 block text-[10px] text-warning">
+                    ● No sending mailbox connected. Email can't go out until one is connected.
+                  </span>
+                )
+              ) : null}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={stlEmail?.enabled === true}
+              aria-label="STL Email"
+              disabled={!stlEmail?.available || stlEmailBusy}
+              onClick={() => void toggleStlEmail()}
+              className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${stlEmail?.enabled ? "bg-brand-primary" : "bg-border-subtle"} ${!stlEmail?.available || stlEmailBusy ? "opacity-60" : ""}`}
+            >
+              <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${stlEmail?.enabled ? "left-[18px]" : "left-0.5"}`} />
+            </button>
+          </label>
           {/* SMS channel master switch — texts appointment + action-item alerts to recipients with a phone + SMS on. */}
           <label className="flex items-center justify-between border-b border-border-subtle py-2.5 cursor-pointer">
             <span className="text-[13px] text-text-primary">SMS notifications <span className="text-[10px] text-text-muted">· texts appointment & action-item alerts</span></span>
