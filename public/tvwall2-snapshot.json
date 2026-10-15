@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-10-14T13:14:06.205Z",
+ "generatedAt": "2026-10-15T13:00:23.985Z",
  "source": "vini-success dataset files (see scripts/buildTvWall2Snapshot.mjs)",
  "rules": {
   "rag": {
@@ -26,7 +26,7 @@
    "side": "sales",
    "apptValue": 200,
    "reachLabel": "Leads reached",
-   "asOf": "2026-10-14",
+   "asOf": "2026-10-15",
    "proRata": true,
    "total": {
     "agents": 61,
@@ -165,28 +165,15 @@
     }
    ],
    "changes": {
-    "since": "2026-10-13",
+    "since": "2026-10-14",
     "sincePct": {
-     "red": 0.7049180327868853,
-     "amber": 0.14754098360655737,
+     "red": 0.7213114754098361,
+     "amber": 0.13114754098360656,
      "green": 0.14754098360655737
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "amber",
-      "to": "red",
-      "cause": "aged a day, so the pro-rata multiplier shrank",
-      "n": 2
-     },
-     {
-      "from": "red",
-      "to": "amber",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   },
   "salesOb": {
@@ -195,7 +182,7 @@
    "side": "sales",
    "apptValue": 300,
    "reachLabel": "Leads reached",
-   "asOf": "2026-10-13",
+   "asOf": "2026-10-14",
    "proRata": true,
    "total": {
     "agents": 51,
@@ -334,13 +321,13 @@
     }
    ],
    "changes": {
-    "since": "2026-10-12",
+    "since": "2026-10-13",
     "sincePct": {
-     "red": 0.72,
-     "amber": 0.12,
-     "green": 0.16
+     "red": 0.7254901960784313,
+     "amber": 0.11764705882352941,
+     "green": 0.1568627450980392
     },
-    "added": 1,
+    "added": 0,
     "removed": 0,
     "moved": []
    }
@@ -351,19 +338,19 @@
    "side": "service",
    "apptValue": 100,
    "reachLabel": "Conversations held",
-   "asOf": "2026-10-13",
+   "asOf": "2026-10-14",
    "proRata": false,
    "total": {
     "agents": 64,
     "arr": 526122,
-    "red": 36,
-    "amber": 8,
+    "red": 37,
+    "amber": 7,
     "green": 20,
     "dormant": 31,
     "unrateable": 2,
     "pct": {
-     "red": 0.5625,
-     "amber": 0.125,
+     "red": 0.578125,
+     "amber": 0.109375,
      "green": 0.3125
     }
    },
@@ -465,7 +452,7 @@
      "red": 4,
      "amber": 0,
      "green": 3,
-     "dormant": 4,
+     "dormant": 3,
      "unrateable": 0,
      "pct": {
       "red": 0.5714285714285714,
@@ -492,14 +479,14 @@
      "csm": "Puneet Sharma",
      "agents": 12,
      "arr": 97776,
-     "red": 4,
-     "amber": 3,
+     "red": 5,
+     "amber": 2,
      "green": 5,
-     "dormant": 2,
+     "dormant": 3,
      "unrateable": 0,
      "pct": {
-      "red": 0.3333333333333333,
-      "amber": 0.25,
+      "red": 0.4166666666666667,
+      "amber": 0.16666666666666666,
       "green": 0.4166666666666667
      }
     },
@@ -520,10 +507,10 @@
     }
    ],
    "changes": {
-    "since": "2026-10-12",
+    "since": "2026-10-13",
     "sincePct": {
-     "red": 0.546875,
-     "amber": 0.140625,
+     "red": 0.5625,
+     "amber": 0.125,
      "green": 0.3125
     },
     "added": 0,
@@ -698,22 +685,15 @@
     }
    ],
    "changes": {
-    "since": "2026-10-12",
+    "since": "2026-10-13",
     "sincePct": {
      "red": 0.8461538461538461,
-     "amber": 0.07692307692307693,
-     "green": 0.07692307692307693
+     "amber": 0.05128205128205128,
+     "green": 0.10256410256410256
     },
     "added": 0,
     "removed": 0,
-    "moved": [
-     {
-      "from": "amber",
-      "to": "green",
-      "cause": "the appointment count changed",
-      "n": 1
-     }
-    ]
+    "moved": []
    }
   }
  }
