@@ -1,12 +1,12 @@
 {
- "generatedAt": "2026-10-16T12:56:23.290Z",
+ "generatedAt": "2026-10-17T11:54:43.840Z",
  "products": {
   "salesIb": {
-   "asOf": "2026-10-16",
+   "asOf": "2026-10-17",
    "pct": {
     "red": 0.7166666666666667,
-    "amber": 0.13333333333333333,
-    "green": 0.15
+    "amber": 0.16666666666666666,
+    "green": 0.11666666666666667
    },
    "agents": {
     "fc77a480a81c": {
@@ -47,7 +47,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 1499,
-     "reach7": 23
+     "reach7": 27
     },
     "a762b9e14b28": {
      "band": "red",
@@ -67,7 +67,7 @@
      "factor": 1,
      "ratio": 0.57,
      "mrr": 1050,
-     "reach7": 59
+     "reach7": 58
     },
     "afa01fe02e0c": {
      "band": "red",
@@ -83,21 +83,21 @@
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 10,
+     "apptsRaw": 11,
      "factor": 1,
-     "ratio": 2,
+     "ratio": 2.2,
      "mrr": 1000,
-     "reach7": 409
+     "reach7": 410
     },
     "30f83bca5477": {
      "band": "red",
      "ratioBand": "red",
      "dormant": false,
-     "apptsRaw": 2,
+     "apptsRaw": 3,
      "factor": 1,
-     "ratio": 0.4,
+     "ratio": 0.6,
      "mrr": 1000,
-     "reach7": 42
+     "reach7": 34
     },
     "b3a2272226a8": {
      "band": "amber",
@@ -107,27 +107,27 @@
      "factor": 1,
      "ratio": 1.4,
      "mrr": 1000,
-     "reach7": 30
+     "reach7": 29
     },
     "7e8243b98737": {
      "band": "red",
      "ratioBand": "red",
      "dormant": false,
      "apptsRaw": 1,
-     "factor": 3.33,
-     "ratio": 0.67,
+     "factor": 3,
+     "ratio": 0.6,
      "mrr": 999,
-     "reach7": 19
+     "reach7": 23
     },
     "3f793a6b60c3": {
      "band": "red",
      "ratioBand": "red",
      "dormant": false,
      "apptsRaw": 1,
-     "factor": 3.33,
-     "ratio": 0.67,
+     "factor": 3,
+     "ratio": 0.6,
      "mrr": 999,
-     "reach7": 27
+     "reach7": 24
     },
     "072433a40bf5": {
      "band": "amber",
@@ -137,7 +137,7 @@
      "factor": 1,
      "ratio": 1.4,
      "mrr": 999,
-     "reach7": 161
+     "reach7": 158
     },
     "dee4e6598559": {
      "band": "red",
@@ -157,7 +157,7 @@
      "factor": 1,
      "ratio": 0.48,
      "mrr": 833,
-     "reach7": 1
+     "reach7": 0
     },
     "75edaf52eeed": {
      "band": "red",
@@ -167,7 +167,7 @@
      "factor": 1,
      "ratio": 0.25,
      "mrr": 800,
-     "reach7": 10
+     "reach7": 18
     },
     "388845ab3dda": {
      "band": "red",
@@ -177,7 +177,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 800,
-     "reach7": 11
+     "reach7": 16
     },
     "33f467a51db0": {
      "band": "red",
@@ -194,8 +194,8 @@
      "ratioBand": "red",
      "dormant": false,
      "apptsRaw": 1,
-     "factor": 1.03,
-     "ratio": 0.26,
+     "factor": 1,
+     "ratio": 0.25,
      "mrr": 800,
      "reach7": 11
     },
@@ -227,27 +227,27 @@
      "factor": 1,
      "ratio": 0.25,
      "mrr": 800,
-     "reach7": 1
+     "reach7": 2
     },
     "b0bccbebe548": {
-     "band": "red",
-     "ratioBand": "red",
+     "band": "amber",
+     "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 3,
+     "apptsRaw": 5,
      "factor": 1,
-     "ratio": 0.75,
+     "ratio": 1.25,
      "mrr": 799,
-     "reach7": 165
+     "reach7": 159
     },
     "ab6bdee0e8f4": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 63,
+     "apptsRaw": 64,
      "factor": 1,
-     "ratio": 16.8,
+     "ratio": 17.07,
      "mrr": 750,
-     "reach7": 635
+     "reach7": 647
     },
     "739bf08aa33b": {
      "band": "red",
@@ -257,27 +257,27 @@
      "factor": 1,
      "ratio": 0.27,
      "mrr": 750,
-     "reach7": 3
+     "reach7": 2
     },
     "ffba9dd38fce": {
      "band": "red",
      "ratioBand": "red",
      "dormant": true,
-     "apptsRaw": 1,
-     "factor": 1.2,
-     "ratio": 0.32,
+     "apptsRaw": 0,
+     "factor": 1.15,
+     "ratio": 0,
      "mrr": 750,
-     "reach7": 4
+     "reach7": 3
     },
     "36f77e940556": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 28,
+     "apptsRaw": 29,
      "factor": 1,
-     "ratio": 7.47,
+     "ratio": 7.73,
      "mrr": 750,
-     "reach7": 691
+     "reach7": 688
     },
     "dbf936d9766e": {
      "band": "amber",
@@ -287,7 +287,7 @@
      "factor": 1,
      "ratio": 1.6,
      "mrr": 750,
-     "reach7": 49
+     "reach7": 50
     },
     "a6a68ffb5e28": {
      "band": "red",
@@ -297,7 +297,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 700,
-     "reach7": 14
+     "reach7": 18
     },
     "0129baa39ba2": {
      "band": "red",
@@ -307,7 +307,7 @@
      "factor": 1,
      "ratio": 0.29,
      "mrr": 700,
-     "reach7": 25
+     "reach7": 27
     },
     "6ee27865f995": {
      "band": "red",
@@ -317,7 +317,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 700,
-     "reach7": 6
+     "reach7": 7
     },
     "767437354777": {
      "band": "red",
@@ -327,17 +327,17 @@
      "factor": 1,
      "ratio": 0.29,
      "mrr": 700,
-     "reach7": 17
+     "reach7": 13
     },
     "09f9a03b9cd6": {
      "band": "red",
      "ratioBand": "red",
-     "dormant": true,
+     "dormant": false,
      "apptsRaw": 2,
      "factor": 1,
      "ratio": 0.57,
      "mrr": 700,
-     "reach7": 9
+     "reach7": 12
     },
     "b690afdfeb2d": {
      "band": "red",
@@ -363,11 +363,11 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 85,
+     "apptsRaw": 79,
      "factor": 1,
-     "ratio": 24.32,
+     "ratio": 22.6,
      "mrr": 699,
-     "reach7": 868
+     "reach7": 875
     },
     "65212710b243": {
      "band": "red",
@@ -387,17 +387,17 @@
      "factor": 1,
      "ratio": 11.08,
      "mrr": 650,
-     "reach7": 83
+     "reach7": 61
     },
     "2476b5310e4a": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 35,
+     "apptsRaw": 33,
      "factor": 1,
-     "ratio": 10.77,
+     "ratio": 10.15,
      "mrr": 650,
-     "reach7": 61
+     "reach7": 50
     },
     "483af153da66": {
      "band": "green",
@@ -407,7 +407,7 @@
      "factor": 1,
      "ratio": 14.77,
      "mrr": 650,
-     "reach7": 40
+     "reach7": 34
     },
     "b63e55ee750d": {
      "band": "red",
@@ -430,32 +430,32 @@
      "reach7": 9
     },
     "dc51b18e771a": {
-     "band": "green",
-     "ratioBand": "green",
+     "band": "amber",
+     "ratioBand": "amber",
      "dormant": false,
      "apptsRaw": 5,
-     "factor": 1.88,
-     "ratio": 3.13,
+     "factor": 1.76,
+     "ratio": 2.94,
      "mrr": 600,
-     "reach7": 25
+     "reach7": 21
     },
     "8a9cee36fe46": {
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 2,
-     "factor": 1.88,
-     "ratio": 1.36,
+     "apptsRaw": 3,
+     "factor": 1.76,
+     "ratio": 1.93,
      "mrr": 550,
-     "reach7": 165
+     "reach7": 187
     },
     "b45182b76796": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 9,
+     "apptsRaw": 10,
      "factor": 1,
-     "ratio": 3.6,
+     "ratio": 4,
      "mrr": 500,
      "reach7": 85
     },
@@ -463,11 +463,11 @@
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 4,
+     "apptsRaw": 5,
      "factor": 1,
-     "ratio": 1.6,
+     "ratio": 2,
      "mrr": 500,
-     "reach7": 16
+     "reach7": 17
     },
     "896a10ea944c": {
      "band": "amber",
@@ -477,7 +477,7 @@
      "factor": 1,
      "ratio": 2.8,
      "mrr": 500,
-     "reach7": 24
+     "reach7": 25
     },
     "34c21c3b0c9d": {
      "band": "red",
@@ -487,7 +487,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 500,
-     "reach7": 3
+     "reach7": 2
     },
     "f47319f02077": {
      "band": "red",
@@ -497,7 +497,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 500,
-     "reach7": 1
+     "reach7": 0
     },
     "9b9c526f51db": {
      "band": "red",
@@ -507,7 +507,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 500,
-     "reach7": 3
+     "reach7": 2
     },
     "ae8371377001": {
      "band": "amber",
@@ -517,7 +517,7 @@
      "factor": 1,
      "ratio": 2,
      "mrr": 500,
-     "reach7": 23
+     "reach7": 21
     },
     "7ed503600929": {
      "band": "red",
@@ -567,7 +567,7 @@
      "factor": 1,
      "ratio": 0.67,
      "mrr": 300,
-     "reach7": 26
+     "reach7": 25
     },
     "2351fdd37dc9": {
      "band": "red",
@@ -580,14 +580,14 @@
      "reach7": 4
     },
     "72d1c06b0113": {
-     "band": "green",
+     "band": "red",
      "ratioBand": "green",
-     "dormant": false,
+     "dormant": true,
      "apptsRaw": 7,
      "factor": 1,
      "ratio": 4.67,
      "mrr": 300,
-     "reach7": 24
+     "reach7": 0
     },
     "dba51a807d22": {
      "band": "red",
@@ -612,11 +612,11 @@
    }
   },
   "salesOb": {
-   "asOf": "2026-10-15",
+   "asOf": "2026-10-16",
    "pct": {
-    "red": 0.72,
+    "red": 0.7,
     "amber": 0.12,
-    "green": 0.16
+    "green": 0.18
    },
    "agents": {
     "739bf08aa33b": {
@@ -647,7 +647,7 @@
      "factor": 1,
      "ratio": 6.9,
      "mrr": 1000,
-     "reach7": 698
+     "reach7": 700
     },
     "30f83bca5477": {
      "band": "red",
@@ -670,34 +670,34 @@
      "reach7": 0
     },
     "7e8243b98737": {
-     "band": "green",
+     "band": "red",
      "ratioBand": "green",
-     "dormant": false,
+     "dormant": true,
      "apptsRaw": 4,
-     "factor": 4.29,
-     "ratio": 5.15,
+     "factor": 3.75,
+     "ratio": 4.5,
      "mrr": 999,
-     "reach7": 13
+     "reach7": 5
     },
     "072433a40bf5": {
      "band": "red",
      "ratioBand": "red",
-     "dormant": false,
+     "dormant": true,
      "apptsRaw": 0,
      "factor": 1,
      "ratio": 0,
      "mrr": 999,
-     "reach7": 657
+     "reach7": 1
     },
     "3f793a6b60c3": {
-     "band": "red",
-     "ratioBand": "red",
+     "band": "green",
+     "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 0,
-     "factor": 15,
-     "ratio": 0,
+     "apptsRaw": 2,
+     "factor": 10,
+     "ratio": 6.01,
      "mrr": 999,
-     "reach7": 537
+     "reach7": 541
     },
     "dee4e6598559": {
      "band": "red",
@@ -707,15 +707,15 @@
      "factor": 1,
      "ratio": 0.3,
      "mrr": 999,
-     "reach7": 78
+     "reach7": 85
     },
     "13df00fa6fbc": {
      "band": "red",
      "ratioBand": "red",
      "dormant": true,
-     "apptsRaw": 2,
+     "apptsRaw": 1,
      "factor": 1,
-     "ratio": 0.71,
+     "ratio": 0.35,
      "mrr": 850,
      "reach7": 0
     },
@@ -737,17 +737,17 @@
      "factor": 1,
      "ratio": 0.38,
      "mrr": 800,
-     "reach7": 307
+     "reach7": 270
     },
     "185455929f16": {
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 5,
+     "apptsRaw": 6,
      "factor": 1,
-     "ratio": 1.88,
+     "ratio": 2.25,
      "mrr": 800,
-     "reach7": 249
+     "reach7": 272
     },
     "d16defd97bab": {
      "band": "red",
@@ -758,6 +758,16 @@
      "ratio": 0,
      "mrr": 800,
      "reach7": 277
+    },
+    "33f467a51db0": {
+     "band": "red",
+     "ratioBand": "red",
+     "dormant": false,
+     "apptsRaw": 1,
+     "factor": 1,
+     "ratio": 0.38,
+     "mrr": 800,
+     "reach7": 218
     },
     "75edaf52eeed": {
      "band": "red",
@@ -777,7 +787,7 @@
      "factor": 1,
      "ratio": 0.38,
      "mrr": 800,
-     "reach7": 68
+     "reach7": 123
     },
     "388845ab3dda": {
      "band": "red",
@@ -788,16 +798,6 @@
      "ratio": 0,
      "mrr": 800,
      "reach7": 72
-    },
-    "33f467a51db0": {
-     "band": "red",
-     "ratioBand": "red",
-     "dormant": true,
-     "apptsRaw": 1,
-     "factor": 1,
-     "ratio": 0.38,
-     "mrr": 800,
-     "reach7": 0
     },
     "b0bccbebe548": {
      "band": "red",
@@ -817,34 +817,34 @@
      "factor": 1,
      "ratio": 2.8,
      "mrr": 750,
-     "reach7": 931
+     "reach7": 824
     },
     "36f77e940556": {
-     "band": "amber",
-     "ratioBand": "amber",
+     "band": "green",
+     "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 7,
+     "apptsRaw": 9,
      "factor": 1,
-     "ratio": 2.8,
+     "ratio": 3.6,
      "mrr": 750,
-     "reach7": 1258
+     "reach7": 1242
     },
     "dbf936d9766e": {
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 3,
+     "apptsRaw": 4,
      "factor": 1,
-     "ratio": 1.2,
+     "ratio": 1.6,
      "mrr": 750,
-     "reach7": 411
+     "reach7": 89
     },
     "ffba9dd38fce": {
      "band": "red",
      "ratioBand": "red",
      "dormant": false,
      "apptsRaw": 0,
-     "factor": 1.25,
+     "factor": 1.2,
      "ratio": 0,
      "mrr": 750,
      "reach7": 11
@@ -857,7 +857,7 @@
      "factor": 1,
      "ratio": 2.57,
      "mrr": 700,
-     "reach7": 0
+     "reach7": 1
     },
     "72d1c06b0113": {
      "band": "green",
@@ -867,7 +867,7 @@
      "factor": 1,
      "ratio": 4.71,
      "mrr": 700,
-     "reach7": 1806
+     "reach7": 1819
     },
     "09f9a03b9cd6": {
      "band": "green",
@@ -907,14 +907,14 @@
      "factor": 1,
      "ratio": 1.71,
      "mrr": 700,
-     "reach7": 226
+     "reach7": 214
     },
     "767437354777": {
      "band": "red",
      "ratioBand": "red",
      "dormant": true,
      "apptsRaw": 0,
-     "factor": 1.76,
+     "factor": 1.67,
      "ratio": 0,
      "mrr": 700,
      "reach7": 0
@@ -924,7 +924,7 @@
      "ratioBand": "red",
      "dormant": true,
      "apptsRaw": 0,
-     "factor": 1.43,
+     "factor": 1.36,
      "ratio": 0,
      "mrr": 700,
      "reach7": 0
@@ -947,27 +947,27 @@
      "factor": 1,
      "ratio": 4.62,
      "mrr": 650,
-     "reach7": 270
+     "reach7": 268
     },
     "483af153da66": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 14,
+     "apptsRaw": 13,
      "factor": 1,
-     "ratio": 6.46,
+     "ratio": 6,
      "mrr": 650,
-     "reach7": 398
+     "reach7": 414
     },
     "2476b5310e4a": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 10,
+     "apptsRaw": 9,
      "factor": 1,
-     "ratio": 4.62,
+     "ratio": 4.15,
      "mrr": 650,
-     "reach7": 264
+     "reach7": 258
     },
     "6b1cc419dfc6": {
      "band": "red",
@@ -982,32 +982,32 @@
     "65212710b243": {
      "band": "red",
      "ratioBand": "red",
-     "dormant": true,
+     "dormant": false,
      "apptsRaw": 1,
      "factor": 1,
      "ratio": 0.46,
      "mrr": 650,
-     "reach7": 0
+     "reach7": 21
     },
     "b63e55ee750d": {
      "band": "red",
      "ratioBand": "red",
-     "dormant": true,
+     "dormant": false,
      "apptsRaw": 0,
      "factor": 1,
      "ratio": 0,
      "mrr": 650,
-     "reach7": 0
+     "reach7": 11
     },
     "dc51b18e771a": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
      "apptsRaw": 7,
-     "factor": 2,
-     "ratio": 7,
+     "factor": 1.88,
+     "ratio": 6.56,
      "mrr": 600,
-     "reach7": 1085
+     "reach7": 257
     },
     "df211d707e90": {
      "band": "red",
@@ -1027,7 +1027,7 @@
      "factor": 1,
      "ratio": 1.8,
      "mrr": 500,
-     "reach7": 647
+     "reach7": 660
     },
     "896a10ea944c": {
      "band": "red",
@@ -1037,24 +1037,24 @@
      "factor": 1,
      "ratio": 0.6,
      "mrr": 500,
-     "reach7": 162
+     "reach7": 160
     },
     "ae8371377001": {
-     "band": "red",
-     "ratioBand": "red",
+     "band": "amber",
+     "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 1,
+     "apptsRaw": 2,
      "factor": 1,
-     "ratio": 0.6,
+     "ratio": 1.2,
      "mrr": 500,
-     "reach7": 117
+     "reach7": 121
     },
     "f47319f02077": {
      "band": "red",
      "ratioBand": "red",
      "dormant": false,
      "apptsRaw": 0,
-     "factor": 1.76,
+     "factor": 1.67,
      "ratio": 0,
      "mrr": 500,
      "reach7": 52
@@ -1064,7 +1064,7 @@
      "ratioBand": "red",
      "dormant": false,
      "apptsRaw": 0,
-     "factor": 1.76,
+     "factor": 1.67,
      "ratio": 0,
      "mrr": 500,
      "reach7": 40
@@ -1122,22 +1122,22 @@
    }
   },
   "serviceIb": {
-   "asOf": "2026-10-15",
+   "asOf": "2026-10-16",
    "pct": {
-    "red": 0.546875,
-    "amber": 0.140625,
+    "red": 0.53125,
+    "amber": 0.15625,
     "green": 0.3125
    },
    "agents": {
     "b3a2272226a8": {
      "band": "red",
      "ratioBand": "red",
-     "dormant": true,
+     "dormant": false,
      "apptsRaw": 2,
      "factor": 1,
      "ratio": 0.1,
      "mrr": 2000,
-     "reach7": 1
+     "reach7": 12
     },
     "a762b9e14b28": {
      "band": "red",
@@ -1193,39 +1193,39 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 274,
+     "apptsRaw": 278,
      "factor": 1,
-     "ratio": 27.43,
+     "ratio": 27.83,
      "mrr": 999,
-     "reach7": 284
+     "reach7": 298
     },
     "8791bf40b149": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 202,
+     "apptsRaw": 203,
      "factor": 1,
-     "ratio": 20.22,
+     "ratio": 20.32,
      "mrr": 999,
-     "reach7": 233
+     "reach7": 257
     },
     "072433a40bf5": {
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 18,
+     "apptsRaw": 19,
      "factor": 1,
-     "ratio": 1.8,
+     "ratio": 1.9,
      "mrr": 999,
-     "reach7": 51
+     "reach7": 40
     },
     "dee4e6598559": {
      "band": "red",
      "ratioBand": "amber",
      "dormant": true,
-     "apptsRaw": 13,
+     "apptsRaw": 12,
      "factor": 1,
-     "ratio": 1.3,
+     "ratio": 1.2,
      "mrr": 999,
      "reach7": 0
     },
@@ -1243,11 +1243,11 @@
      "band": "red",
      "ratioBand": "red",
      "dormant": true,
-     "apptsRaw": 2,
+     "apptsRaw": 3,
      "factor": 1,
-     "ratio": 0.24,
+     "ratio": 0.36,
      "mrr": 833,
-     "reach7": 4
+     "reach7": 5
     },
     "577d7cd4041e": {
      "band": "green",
@@ -1257,17 +1257,17 @@
      "factor": 1,
      "ratio": 17.13,
      "mrr": 800,
-     "reach7": 495
+     "reach7": 488
     },
     "8b9cde8f4860": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 31,
+     "apptsRaw": 30,
      "factor": 1,
-     "ratio": 3.88,
+     "ratio": 3.75,
      "mrr": 800,
-     "reach7": 53
+     "reach7": 59
     },
     "d16defd97bab": {
      "band": "amber",
@@ -1277,7 +1277,7 @@
      "factor": 1,
      "ratio": 1,
      "mrr": 800,
-     "reach7": 31
+     "reach7": 19
     },
     "33f467a51db0": {
      "band": "red",
@@ -1287,7 +1287,7 @@
      "factor": 1,
      "ratio": 0.75,
      "mrr": 800,
-     "reach7": 17
+     "reach7": 16
     },
     "86a663feca65": {
      "band": "red",
@@ -1297,7 +1297,7 @@
      "factor": 1,
      "ratio": 0.38,
      "mrr": 800,
-     "reach7": 1
+     "reach7": 2
     },
     "e79e259aecaf": {
      "band": "red",
@@ -1307,15 +1307,15 @@
      "factor": 1,
      "ratio": 0.25,
      "mrr": 800,
-     "reach7": 6
+     "reach7": 5
     },
     "2d461b9d6f9b": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 101,
+     "apptsRaw": 99,
      "factor": 1,
-     "ratio": 13.47,
+     "ratio": 13.2,
      "mrr": 750,
      "reach7": 203
     },
@@ -1323,21 +1323,31 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 87,
+     "apptsRaw": 86,
      "factor": 1,
-     "ratio": 11.6,
+     "ratio": 11.47,
      "mrr": 750,
-     "reach7": 74
+     "reach7": 78
     },
     "542bf4ecd8d4": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 74,
+     "apptsRaw": 73,
      "factor": 1,
-     "ratio": 9.87,
+     "ratio": 9.73,
      "mrr": 750,
-     "reach7": 104
+     "reach7": 113
+    },
+    "fa8910834d46": {
+     "band": "green",
+     "ratioBand": "green",
+     "dormant": false,
+     "apptsRaw": 56,
+     "factor": 1,
+     "ratio": 7.47,
+     "mrr": 750,
+     "reach7": 495
     },
     "dbf936d9766e": {
      "band": "green",
@@ -1347,25 +1357,15 @@
      "factor": 1,
      "ratio": 7.47,
      "mrr": 750,
-     "reach7": 144
-    },
-    "fa8910834d46": {
-     "band": "green",
-     "ratioBand": "green",
-     "dormant": false,
-     "apptsRaw": 54,
-     "factor": 1,
-     "ratio": 7.2,
-     "mrr": 750,
-     "reach7": 424
+     "reach7": 145
     },
     "3646e1741839": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 26,
+     "apptsRaw": 25,
      "factor": 1,
-     "ratio": 3.47,
+     "ratio": 3.33,
      "mrr": 750,
      "reach7": 17
     },
@@ -1387,17 +1387,17 @@
      "factor": 1,
      "ratio": 2.67,
      "mrr": 750,
-     "reach7": 10
+     "reach7": 14
     },
     "f5dfc69786f7": {
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 12,
+     "apptsRaw": 10,
      "factor": 1,
-     "ratio": 1.6,
+     "ratio": 1.33,
      "mrr": 750,
-     "reach7": 17
+     "reach7": 18
     },
     "44e457b0d702": {
      "band": "amber",
@@ -1407,17 +1407,17 @@
      "factor": 1,
      "ratio": 1.07,
      "mrr": 750,
-     "reach7": 24
+     "reach7": 26
     },
     "ffba9dd38fce": {
-     "band": "red",
-     "ratioBand": "red",
-     "dormant": true,
-     "apptsRaw": 6,
+     "band": "amber",
+     "ratioBand": "amber",
+     "dormant": false,
+     "apptsRaw": 8,
      "factor": 1,
-     "ratio": 0.8,
+     "ratio": 1.07,
      "mrr": 750,
-     "reach7": 4
+     "reach7": 10
     },
     "36f77e940556": {
      "band": "red",
@@ -1427,7 +1427,7 @@
      "factor": 1,
      "ratio": 0.13,
      "mrr": 750,
-     "reach7": 13
+     "reach7": 14
     },
     "3f3ab80d48cc": {
      "band": "red",
@@ -1453,29 +1453,29 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 197,
+     "apptsRaw": 207,
      "factor": 1,
-     "ratio": 28.14,
+     "ratio": 29.57,
      "mrr": 700,
-     "reach7": 237
+     "reach7": 218
     },
     "0129baa39ba2": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 128,
+     "apptsRaw": 129,
      "factor": 1,
-     "ratio": 18.29,
+     "ratio": 18.43,
      "mrr": 700,
-     "reach7": 111
+     "reach7": 106
     },
     "6ee27865f995": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 33,
+     "apptsRaw": 35,
      "factor": 1,
-     "ratio": 4.71,
+     "ratio": 5,
      "mrr": 700,
      "reach7": 91
     },
@@ -1483,11 +1483,11 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 29,
+     "apptsRaw": 32,
      "factor": 1,
-     "ratio": 4.14,
+     "ratio": 4.57,
      "mrr": 700,
-     "reach7": 85
+     "reach7": 82
     },
     "09f9a03b9cd6": {
      "band": "green",
@@ -1497,27 +1497,27 @@
      "factor": 1,
      "ratio": 3.43,
      "mrr": 700,
-     "reach7": 26
+     "reach7": 25
     },
     "a6a68ffb5e28": {
      "band": "amber",
      "ratioBand": "amber",
      "dormant": false,
-     "apptsRaw": 11,
+     "apptsRaw": 10,
      "factor": 1,
-     "ratio": 1.57,
+     "ratio": 1.43,
      "mrr": 700,
-     "reach7": 41
+     "reach7": 36
     },
     "9226f97fa665": {
      "band": "red",
      "ratioBand": "red",
-     "dormant": false,
+     "dormant": true,
      "apptsRaw": 4,
      "factor": 1,
      "ratio": 0.57,
      "mrr": 700,
-     "reach7": 11
+     "reach7": 7
     },
     "7ed73c36049c": {
      "band": "red",
@@ -1527,7 +1527,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 649,
-     "reach7": 17
+     "reach7": 18
     },
     "df211d707e90": {
      "band": "green",
@@ -1543,9 +1543,9 @@
      "band": "red",
      "ratioBand": "red",
      "dormant": true,
-     "apptsRaw": 3,
+     "apptsRaw": 2,
      "factor": 1,
-     "ratio": 0.53,
+     "ratio": 0.36,
      "mrr": 563,
      "reach7": 4
     },
@@ -1563,9 +1563,9 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 173,
+     "apptsRaw": 175,
      "factor": 1,
-     "ratio": 34.6,
+     "ratio": 35,
      "mrr": 500,
      "reach7": 287
     },
@@ -1577,17 +1577,7 @@
      "factor": 1,
      "ratio": 2.6,
      "mrr": 500,
-     "reach7": 31
-    },
-    "36b3dec42092": {
-     "band": "red",
-     "ratioBand": "amber",
-     "dormant": true,
-     "apptsRaw": 10,
-     "factor": 1,
-     "ratio": 2,
-     "mrr": 500,
-     "reach7": 0
+     "reach7": 29
     },
     "3c23ec21a681": {
      "band": "amber",
@@ -1597,17 +1587,7 @@
      "factor": 1,
      "ratio": 2,
      "mrr": 500,
-     "reach7": 25
-    },
-    "896a10ea944c": {
-     "band": "red",
-     "ratioBand": "amber",
-     "dormant": true,
-     "apptsRaw": 7,
-     "factor": 1,
-     "ratio": 1.4,
-     "mrr": 500,
-     "reach7": 5
+     "reach7": 26
     },
     "34c21c3b0c9d": {
      "band": "amber",
@@ -1617,17 +1597,37 @@
      "factor": 1,
      "ratio": 1.2,
      "mrr": 500,
-     "reach7": 22
+     "reach7": 21
     },
     "769e1cfc5cff": {
      "band": "red",
      "ratioBand": "amber",
      "dormant": true,
-     "apptsRaw": 5,
+     "apptsRaw": 6,
      "factor": 1,
-     "ratio": 1,
+     "ratio": 1.2,
+     "mrr": 500,
+     "reach7": 9
+    },
+    "896a10ea944c": {
+     "band": "red",
+     "ratioBand": "amber",
+     "dormant": true,
+     "apptsRaw": 6,
+     "factor": 1,
+     "ratio": 1.2,
      "mrr": 500,
      "reach7": 7
+    },
+    "36b3dec42092": {
+     "band": "red",
+     "ratioBand": "red",
+     "dormant": true,
+     "apptsRaw": 4,
+     "factor": 1,
+     "ratio": 0.8,
+     "mrr": 500,
+     "reach7": 0
     },
     "ae8371377001": {
      "band": "red",
@@ -1637,17 +1637,17 @@
      "factor": 1,
      "ratio": 0.6,
      "mrr": 500,
-     "reach7": 14
+     "reach7": 17
     },
     "ec84a0bbaeea": {
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 46,
+     "apptsRaw": 45,
      "factor": 1,
-     "ratio": 9.94,
+     "ratio": 9.72,
      "mrr": 463,
-     "reach7": 113
+     "reach7": 117
     },
     "21a09fc085d1": {
      "band": "red",
@@ -1683,11 +1683,11 @@
      "band": "green",
      "ratioBand": "green",
      "dormant": false,
-     "apptsRaw": 66,
+     "apptsRaw": 65,
      "factor": 1,
-     "ratio": 22,
+     "ratio": 21.67,
      "mrr": 300,
-     "reach7": 138
+     "reach7": 136
     },
     "00466f7434af": {
      "band": "red",
@@ -1697,7 +1697,7 @@
      "factor": 1,
      "ratio": 0.67,
      "mrr": 300,
-     "reach7": 11
+     "reach7": 13
     },
     "72d1c06b0113": {
      "band": "red",
@@ -1717,7 +1717,7 @@
      "factor": 1,
      "ratio": 0,
      "mrr": 300,
-     "reach7": 0
+     "reach7": 1
     },
     "5ce7c412d539": {
      "band": "red",
@@ -1757,7 +1757,7 @@
      "factor": 1,
      "ratio": null,
      "mrr": 0,
-     "reach7": 7
+     "reach7": 6
     },
     "dba51a807d22": {
      "band": "red",
