@@ -74,6 +74,7 @@ type ConfigRow = { team_id: string; enterprise_id: string | null; rooftop_name: 
   contracted_date: string | null; onboarding_date: string | null; ob_live_date: string | null; live_date: string | null; churn_date: string | null;
   calls_30d: number | null; sms_30d: number | null; last_activity_at: string | null;
   ae_poc: string | null; ob_poc: string | null;
+  needs_attention_enabled?: boolean | null;
   chat_enabled?: boolean | null; post_conversation_template?: string | null; post_conversation_mode?: string | null;
   post_conversation_outbound_requires_reply?: boolean | null; sms_post_conversation_cadence?: string | null; working_hours?: unknown };
 
@@ -291,6 +292,8 @@ export async function loadRooftops(opts: { anchor?: string } = {}): Promise<Load
         post_conversation_enabled: cfg?.post_conversation_enabled === true,
         action_item_enabled: cfg?.action_item_enabled === true,
         action_item_overdue_enabled: cfg?.action_item_overdue_enabled === true,
+        // opt-OUT, like daily_enabled: default ON, off only on an explicit false
+        needs_attention_enabled: cfg?.needs_attention_enabled !== false,
         daily_template: (cfg?.daily_template === "v1" ? "v1" : "v2") as DailyTemplate,   // default v2 (new) — go-live Jul 2026
         digest_focus: ((cfg?.digest_focus === "conversation" || cfg?.digest_focus === "appointment") ? cfg.digest_focus : "auto") as DigestFocus,   // default auto (→ conversation)
       },
@@ -375,6 +378,8 @@ export async function loadLifecycleOnlyRooftops(): Promise<RooftopRow[]> {
         post_conversation_enabled: c.post_conversation_enabled === true,
         action_item_enabled: c.action_item_enabled === true,
         action_item_overdue_enabled: c.action_item_overdue_enabled === true,
+        // opt-OUT, like daily_enabled: default ON, off only on an explicit false
+        needs_attention_enabled: c.needs_attention_enabled !== false,
         daily_template: (c.daily_template === "v1" ? "v1" : "v2") as DailyTemplate,
         digest_focus: ((c.digest_focus === "conversation" || c.digest_focus === "appointment") ? c.digest_focus : "auto") as DigestFocus,
       },
