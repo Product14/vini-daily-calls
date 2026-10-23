@@ -610,6 +610,135 @@ function renderPostConversationBatch(opts) {
   return stampValue(shell(opts, isChatBatch ? "Chat digest" : isSmsBatch ? "SMS digest" : "Conversation digest", convos.length + " " + noun + " — " + (opts.rooftopName || "your rooftop"), body), true);
 }
 
+// ── NEEDS ATTENTION ──────────────────────────────────────────────────────────────────────────
+// Why Vini stopped. Free text from the caller is humanized like an intent key, so an unknown
+// reason still reads as English rather than SCREAMING_SNAKE.
+var NEEDS_ATTENTION_REASONS = {
+  unanswered_question: "Vini had no answer for what the customer asked",
+  no_knowledge: "Not in Vini's knowledge base for this rooftop",
+  out_of_scope: "Outside what Vini is allowed to answer",
+  low_confidence: "Vini wasn't confident enough to answer",
+  pricing_negotiation: "Customer is negotiating price",
+  trade_valuation: "Customer wants a number on their trade",
+  human_requested: "Customer asked for a person",
+  repeat_question: "Customer asked the same thing again",
+  escalation: "Escalation phrase in the thread",
+};
+function fmtNeedsAttentionReason(reason) {
+  var k = String(reason || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!k) return "";
+  return NEEDS_ATTENTION_REASONS[k] || humanizeIntent(k);
+}
+// "asked 6 min ago" / "asked 2 h 10 m ago" — the age of the OPEN loop, which is the whole urgency
+// of this email. Absent when the caller sends no timestamp (never guessed).
+function waitingFor(sinceISO) {
+  var d = asDate(sinceISO);
+  if (!d || isNaN(d.getTime())) return "";
+  var mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 0 || mins > 60 * 24 * 7) return ""; // clock skew / stale replay — say nothing
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + " min ago";
+  var h = Math.floor(mins / 60), m = mins % 60;
+  return h + " h" + (m ? " " + m + " m" : "") + " ago";
+}
+
+/**
+ * NEEDS-ATTENTION email — fires when the customer asked something the AI could not answer and the
+ * thread is sitting OPEN, waiting on a human. Source: the Sales Inbox needs-attention event
+ * (POST /api/notify/needs-attention), not a poll of the conversation feed.
+ *
+ * This is deliberately NOT renderPostConversation. That email is a retrospective ("here is what
+ * happened"); this one is an open loop with a deadline, so the hierarchy inverts: the QUESTION
+ * Vini couldn't answer leads, verbatim, and there is exactly ONE action — take the chat over. No
+ * MTD strip, no AI score, no copy-into-CRM block: anything that isn't the question, the thread, or
+ * the handover button is competing with the only thing the reader has to do.
+ *
+ * opts: { rooftopName, dept, tz, links, pixelUrl, takeControlUrl, event:{
+ *   conversationId, channel('chat'|'sms'|'call'), customer, phone, at, waitingSince,
+ *   question   — the customer's words, VERBATIM (required; no question ⇒ no-value ⇒ not sent),
+ *   reason     — why Vini stopped (see NEEDS_ATTENTION_REASONS; free text tolerated),
+ *   attempts   — how many times the customer has asked (shown only when > 1),
+ *   intent, sentiment, sentimentScore, frustrated, vehicle, vin, stockNumber,
+ *   messages:[{direction,authorType,body,status,at}] — the tail of the thread,
+ *   transcript — calls only } }
+ */
+function renderNeedsAttention(opts) {
+  opts = opts || {};
+  var e = opts.event || {};
+  var L = opts.links || {};
+  var channel = String(e.channel || "chat").toLowerCase();
+  var isChat = channel === "chat", isSms = channel === "sms", isCall = channel === "call";
+  // The handover link is the caller's to give — it owns the inbox route. Falling back to the
+  // conversations list is a degraded but honest link; it never pretends to hand over control.
+  var takeUrl = opts.takeControlUrl || L.takeControl || L.conversations || L.console || "https://console.spyne.ai/converse-ai";
+  var tz = opts.tz;
+
+  var when = "";
+  try { if (e.at) when = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true, timeZone: tz || "America/New_York" }).format(asDate(e.at)); } catch (err) { when = ""; }
+
+  var headRow =
+    '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+      '<td valign="middle">' + avatar(e.customer, 40) +
+        '<span style="display:inline-block;vertical-align:middle;margin-left:10px;">' +
+          '<span style="display:block;font-size:15px;font-weight:800;color:' + INK + ';">' + esc(e.customer || (isChat ? "Website visitor" : "Customer")) + "</span>" +
+          (e.phone ? '<span style="display:block;font-size:12px;color:' + MUTE + ';margin-top:1px;">' + esc(formatPhone(e.phone)) + "</span>" : "") +
+        "</span></td>" +
+      (when ? '<td align="right" valign="top" style="font-size:11px;color:' + MUTE + ';white-space:nowrap;">' + esc(when) + "</td>" : "") +
+    "</tr></table>";
+
+  var chips = "";
+  chips += pill(isChat ? "Web chat" : isSms ? "SMS" : "Call", MUTE, WASH);
+  chips += sentimentChip(e.sentiment, e.sentimentScore);
+  if (e.frustrated) chips += pill("&#9888; Customer frustrated", NEG, NEG_BG);
+  if (Number(e.attempts) > 1) chips += pill("Asked " + fmtInt(e.attempts) + "&times;", NEG, NEG_BG);
+  if (e.intent) chips += pill(esc(humanizeIntent(e.intent)), BRAND, "#EDE9FE");
+
+  // THE QUESTION — verbatim, on a red rail, first thing under the header. Everything else on this
+  // card exists to give it context.
+  var question = String(e.question == null ? "" : e.question).trim();
+  var questionBlock = question
+    ? '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;background:' + NEG_BG + ';border-left:3px solid ' + NEG + ';border-radius:6px;"><tr><td style="padding:12px 14px;">' +
+        '<div style="font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:' + NEG + ';">The customer asked</div>' +
+        '<div style="font-size:14px;line-height:1.6;color:' + INK + ';font-weight:700;margin-top:5px;">&ldquo;' + esc(question) + '&rdquo;</div>' +
+      "</td></tr></table>"
+    : "";
+
+  var reason = fmtNeedsAttentionReason(e.reason);
+  var reasonRow = reason
+    ? '<div style="font-size:12px;color:' + MUTE + ';margin-top:10px;"><b style="color:' + INK + ';">Why it came to you:</b> ' + esc(reason) + "</div>"
+    : "";
+
+  var card =
+    '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;background:' + CARD + ';"><tr><td style="padding:18px 20px;">' +
+      headRow +
+      '<div style="margin-top:12px;">' + chips + "</div>" +
+      questionBlock +
+      reasonRow +
+      // on a service thread the customer owns the vehicle — it is not one they're shopping for
+      vehicleSection(e.vehicle, e.vin, e.stockNumber, opts.dept === "service" ? "Their vehicle" : null) +
+      smsThread(e.messages, 0, 8, isChat ? "Chat thread" : isSms ? "Text thread" : "Thread") +
+      (isCall ? transcriptBlock(e.transcript, 4000) : "") +
+    "</td></tr></table>" +
+    '<div style="margin-top:18px;">' + btnPrimary(isChat ? "Take over this chat" : isSms ? "Take over this thread" : "Open this conversation", takeUrl) + "</div>" +
+    // Only a LIVE thread can be taken over. A call has already ended by the time this email lands,
+    // so promising the reader they'll be "put in it" would be a lie about a finished call.
+    (isCall ? "" : '<div style="font-size:11px;color:' + FAINT + ';margin-top:8px;">Taking over pauses Vini on this thread and puts you in it.</div>');
+
+  var waited = waitingFor(e.waitingSince || e.at);
+  var banner =
+    '<table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;background:' + NEG_BG + ';margin-bottom:14px;"><tr><td style="padding:12px 16px;">' +
+      '<div style="font-size:14px;font-weight:800;color:' + NEG + ';">&#9873; Waiting on a person' + (waited ? ' &middot; asked ' + esc(waited) : "") + "</div>" +
+      '<div style="font-size:12px;color:' + BODY + ';margin-top:3px;">Vini could not answer this one. The customer is still in the thread.</div>' +
+    "</td></tr></table>";
+
+  // No-value = no question. The question IS the payload of this email; without it the dealer gets
+  // "something needs attention" and no way to act, which is the churn email this gate exists for.
+  return stampValue(
+    shell(opts, "Needs attention", esc("Vini couldn't answer " + (e.customer || "a customer")), banner + card),
+    !!question
+  );
+}
+
 // ── LEAD-CAPTURE email (per-rooftop custom format) ───────────────────────────────────────────
 // A labelled lead field. Unlike detail(), a MISSING value renders as an explicit "not captured"
 // placeholder instead of vanishing — for a lead sheet the BDC has to know which field to ask for
@@ -1462,6 +1591,10 @@ module.exports = {
   renderOverdueActionItemsDigestSms: renderOverdueActionItemsDigestSms,
   renderPostConversationBatch: renderPostConversationBatch,
   renderPostConversationBatchSms: renderPostConversationBatchSms,
+  renderNeedsAttention: renderNeedsAttention,
+  // exported so the API layer can validate a caller's `reason` against the same vocabulary the
+  // email renders, instead of two lists drifting apart
+  NEEDS_ATTENTION_REASONS: NEEDS_ATTENTION_REASONS,
   renderLeadCapture: renderLeadCapture,
   formatPhone: formatPhone,
   _shell: shell,

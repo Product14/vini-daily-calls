@@ -3129,6 +3129,81 @@ app.post("/api/email/roi-event-generate-send", requireTrackerAuth, async (req, r
   }
 });
 
+// ── Needs attention → email (PUSH, from the Sales Inbox backend) ─────────────
+// The only push-driven transactional type. Every other one is discovered by the poll
+// (eventRunner.cjs reading a feed); a poll would be wrong here, because the whole value of this
+// email is arriving while the customer is still in the thread, and a 4-15 minute poll gap is most
+// of that window.
+//
+// This route is TRANSPORT ONLY. All eight gates — rooftop known, churn, per-rooftop opt-out, dry
+// run, cooldown, dedupe, verified recipients, value — live in needsAttention.cjs, so a push can
+// never reach an inbox the poll wouldn't. Contract and status vocabulary: docs/needs-attention/API.md.
+//
+// Auth is a SHARED SERVICE SECRET, deliberately NOT requireTrackerAuth: the caller is the Sales
+// Inbox backend, which has no tracker session and must not be issued one.
+function requireNeedsAttentionAuth(req, res, next) {
+  // Read at request time, like MAIL_TOKEN — env is populated by the platform, not at import.
+  const secret = String(process.env.NEEDS_ATTENTION_SECRET || "");
+  // Fail CLOSED and loudly: an unset secret is a misconfigured deploy, not an open door. 500 rather
+  // than 401 because the fault is ours, and the caller's documented retry rule treats 5xx as
+  // "retry with the same eventId" — which the dedupe claim makes free.
+  if (!secret) {
+    console.error("POST /api/notify/needs-attention refused: NEEDS_ATTENTION_SECRET is not set on this deploy");
+    return res.status(500).json({ ok: false, error: "notification secret not configured on the server" });
+  }
+  const hdr = String(req.headers.authorization || "");
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+  // sha256 both sides so timingSafeEqual always gets equal-length buffers, whatever the caller sent.
+  const ok = !!token && _crypto.timingSafeEqual(
+    _crypto.createHash("sha256").update(token).digest(),
+    _crypto.createHash("sha256").update(secret).digest(),
+  );
+  if (!ok) return res.status(401).json({ ok: false, error: "bad or missing bearer token" });
+  next();
+}
+
+app.post("/api/notify/needs-attention", requireNeedsAttentionAuth, async (req, res) => {
+  const body = req.body ?? {};
+  // ?dryRun=1 as well as body.dryRun — the integrating team reaches for the query string first.
+  const dryRun = body.dryRun === true || ["1", "true"].includes(String(req.query.dryRun ?? "").toLowerCase());
+  try {
+    const sbUrl = process.env.ROI_SUPABASE_URL || process.env.VITE_ROI_SUPABASE_URL;
+    const sbKey = process.env.ROI_SUPABASE_SERVICE_KEY;
+    if (!sbUrl || !sbKey) return res.status(500).json({ ok: false, error: "ROI_SUPABASE_SERVICE_KEY not set" });
+    const sb = createSbClient(sbUrl, sbKey, { auth: { persistSession: false } });
+    const { deliverNeedsAttention } = require("./roi-cron/needsAttention.cjs");
+
+    // The mail client is INJECTED rather than reimplemented — same proxy and the same retry policy
+    // as every other send path in this file. Throwing on a non-ok response is what makes the module
+    // write status=error on the ledger row and answer 502.
+    const sendMail = async ({ to, subject, html }) => {
+      const mailUrl = process.env.MAIL_PROXY_URL || process.env.EMAIL_PROXY_URL || "https://mail.spyne.ai/api/v1/send-template-email";
+      const template = process.env.MAIL_TEMPLATE || "email-control-tower-report";
+      const mailRes = await postMailWithRetry(mailUrl, {
+        to: (Array.isArray(to) ? to : [to]).join(","), subject, template, templateData: { HTMLdata: html },
+      });
+      if (!mailRes.ok) {
+        const t = await mailRes.text().catch(() => "");
+        throw new Error(`mail proxy ${mailRes.status}: ${t.slice(0, 200)}`);
+      }
+      const mj = await mailRes.json().catch(() => ({}));
+      return { messageId: mj.messageId ?? mj.id ?? null };
+    };
+
+    const { httpStatus, payload } = await deliverNeedsAttention({
+      sb, body, sendMail,
+      withPixel: (html, id) => injectPixel(html, eventPixel(id)),
+      opts: { dryRun },
+    });
+    return res.status(httpStatus).json(payload);
+  } catch (err) {
+    // A throw that reaches here is OUR fault (Supabase unreachable, bad config): 500, so the caller
+    // retries the same eventId rather than minting a new one and defeating the dedupe.
+    console.error("POST /api/notify/needs-attention error:", err?.message ?? err);
+    return res.status(500).json({ ok: false, error: err?.message ?? "needs-attention delivery failed" });
+  }
+});
+
 // ── Open-rate tracking pixel ─────────────────────────────────────────────────
 // The digest embeds <img src=".../api/email/track-open?t=<team>&d=<dept>&dt=<date>&r=<email>">.
 // On first load we stamp roi_digest_runs.opened_at and flip recipients[].opened for
