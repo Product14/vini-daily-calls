@@ -16,6 +16,13 @@
 const DIGEST_TYPES = ["daily", "weekly", "monthly"];
 const TRANSACTIONAL_TYPES = ["post_appointment", "post_conversation", "action_item", "action_item_overdue"];
 const ALL_TYPES = [...DIGEST_TYPES, ...TRANSACTIONAL_TYPES];
+// EMAIL-ONLY subscription keys — types that have an email renderer and no SMS body. A new key
+// otherwise inherits defaultSub's "transactional SMS is ON", which would text recipients who never
+// opted into it. Listed here so defaultSub returns false for SMS until someone writes an SMS body
+// AND makes it an explicit opt-in. 'chat' and 'needs_attention' are also NOT in the lists above:
+// nothing that iterates the notification types should treat them as separate types (chat stores as
+// email_type=post_conversation; needs_attention is pushed in by the Sales Inbox, not the poll).
+const EMAIL_ONLY_TYPES = ["chat", "needs_attention"];
 const CHANNELS = ["email", "sms"];
 // Role fallback order for transactional routing: prefer the salesperson, escalate to the "parent".
 const ROLE_TIERS = ["salesperson", "bdc", "gm"];
@@ -25,11 +32,11 @@ const isDigest = (type) => DIGEST_TYPES.includes(type);
 /** Default subscription when a recipient has no explicit cell for (type, channel).
  * email: every type ON (preserves "email_enabled person receives every rooftop-enabled type").
  * sms:   transactional ON (preserves current transactional SMS); digests OFF (opt-in only);
- *        'chat' OFF — chat is email-only today (no smsBody is ever built), and if that changes
- *        it must be an explicit opt-in, never a new key silently defaulting SMS on. */
+ *        EMAIL_ONLY_TYPES OFF — those have no smsBody today, and if that changes it must be an
+ *        explicit opt-in, never a new key silently defaulting SMS on. */
 function defaultSub(type, channel) {
   if (channel === "email") return true;
-  if (channel === "sms") return !isDigest(type) && type !== "chat"; // digests + chat default off
+  if (channel === "sms") return !isDigest(type) && !EMAIL_ONLY_TYPES.includes(type); // digests + email-only keys default off
   return false;
 }
 
@@ -92,6 +99,6 @@ function pickTieredRecipients(recips) {
 }
 
 module.exports = {
-  DIGEST_TYPES, TRANSACTIONAL_TYPES, ALL_TYPES, CHANNELS, ROLE_TIERS,
+  DIGEST_TYPES, TRANSACTIONAL_TYPES, ALL_TYPES, EMAIL_ONLY_TYPES, CHANNELS, ROLE_TIERS,
   isDigest, defaultSub, isSubscribed, pickTieredRecipients, isChurned,
 };
