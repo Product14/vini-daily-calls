@@ -66,7 +66,7 @@ async function postBreakageAlert({ source, failures, sentOk, windowLabel }) {
 //   • the pipeline is STALE (a heartbeat saw no events in far too long) → cron likely not firing
 // Always CRITICAL with an @channel ping — a silent systemic failure (like the 13-day transactional
 // gap) is exactly what must never pass unnoticed. Best-effort: no token → log-only; never throws.
-async function postSystemicAlert({ source, title, detail, windowLabel }) {
+async function postSystemicAlert({ source, title, detail, windowLabel, impact }) {
   const token = process.env.SLACK_BOT_TOKEN;
   const channel = process.env.SLACK_ALERT_CHANNEL || "vini-alerts-and-monitoring";
   const ranAt = new Date().toISOString();
@@ -74,7 +74,7 @@ async function postSystemicAlert({ source, title, detail, windowLabel }) {
   const text =
     `:rotating_light: *[${source} · CRITICAL] ${title}*\n<!channel>\n\n` +
     `*What:* ${detail}\n` +
-    `*Impact:* no ${source.toLowerCase()} sent this pass — failing SILENTLY (no per-row errors to report).\n` +
+    `*Impact:* ${impact || `no ${source.toLowerCase()} sent this pass — failing SILENTLY (no per-row errors to report).`}\n` +
     `*Window:* ${windowLabel || "pass"}  ·  *env:* ${env}  ·  *ran:* ${ranAt}`;
   if (!token) { console.log(`  ⚠ SLACK_BOT_TOKEN not set — ${source} systemic alert not posted. Would post to #${channel}:\n${text}`); return; }
   const res = await fetch("https://slack.com/api/chat.postMessage", {

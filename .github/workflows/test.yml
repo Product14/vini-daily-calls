@@ -1,0 +1,73 @@
+name: Tests
+
+# Every push and every PR runs the offline test suites, a type check and the production build.
+#
+# WHY. Fixes shipped without tests and broke silently: a block comment swallowed three functions and
+# every post_conversation email threw (`node -c` passed it), dead gates shipped, and the Vercel build
+# never loads the server CommonJS, so a green deploy proved nothing about the send path.
+#
+# WHAT RUNS.
+#   npm test       node --test over server/roi-cron/__tests__ (except *.live.test.mjs, which need
+#                  production ClickHouse: run those locally with `npm run test:live`) + src/email tests.
+#   tsc --noEmit   a RATCHET, not a gate on zero: the codebase carries a known error count, committed
+#                  in .github/tsc-baseline.txt. The job fails only if the count RISES. When it falls,
+#                  lower the baseline in the same PR so it can never climb back.
+#   vite build     the SPA build Vercel runs.
+on:
+  pull_request:
+  push:
+    branches: ["**"]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # puppeteer's postinstall downloads Chromium; nothing here renders, so skip it.
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Offline tests
+        run: npm test
+
+      - name: Type check (ratchet against .github/tsc-baseline.txt)
+        run: |
+          set +e
+          npx -y -p typescript@5.6 tsc --noEmit -p tsconfig.json > tsc.log 2>&1
+          rc=$?
+          set -e
+          count=$(grep -c "error TS" tsc.log || true)
+          baseline=$(tr -dc '0-9' < .github/tsc-baseline.txt)
+          echo "tsc exit=$rc errors=$count baseline=$baseline"
+          if [ "$rc" -ne 0 ] && [ "$count" -eq 0 ]; then
+            echo "::error::tsc failed without reporting type errors (could not run?)"
+            cat tsc.log
+            exit 1
+          fi
+          if [ "$count" -gt "$baseline" ]; then
+            echo "::error::TypeScript errors rose from $baseline to $count. Fix the new ones (full list below)."
+            grep "error TS" tsc.log
+            exit 1
+          fi
+          if [ "$count" -lt "$baseline" ]; then
+            echo "::notice::TypeScript errors fell to $count (baseline $baseline). Lower .github/tsc-baseline.txt to $count to lock it in."
+          fi
+
+      - name: Build
+        run: npx vite build

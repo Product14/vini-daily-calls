@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { toPng } from "html-to-image";
 import { getProgramsClient, PROGRAMS_DB_CONFIGURED } from "./supabaseClient";
+import { alertDialog } from "../ui/dialogs";
+import { trackerAuthHeaders } from "../email/dataSource";
 import { OWNER_NAMES, teamForOwner, canonicalOwnerName } from "./owners";
 
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
@@ -2429,12 +2431,13 @@ function EmailReportView({ accounts, state, overall }: {
     try {
       const res = await fetch(`${API_BASE}/api/programs/send-report`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           payload: buildPayload(),
           dashboardUrl: typeof window !== "undefined" ? `${window.location.origin}/programs` : null,
         }),
       });
+      if (res.status === 401) throw new Error("Sign in to the email tracker first, then send the report from here.");
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error ?? "send failed");
       setSendMsg({ ok: true, text: `Sent to ${json.sent} recipient${json.sent === 1 ? "" : "s"} ✓` });
@@ -2450,7 +2453,7 @@ function EmailReportView({ accounts, state, overall }: {
     try {
       const res = await fetch(`${API_BASE}/api/programs/send-report?preview=1`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...trackerAuthHeaders() },
         body: JSON.stringify({
           payload: buildPayload(),
           recipientsOverride: ["preview@local"],   // satisfies recipient gate
@@ -2504,7 +2507,7 @@ function EmailReportView({ accounts, state, overall }: {
       link.click();
     } catch (e) {
       console.error("[report] image export failed:", e);
-      alert("Couldn't generate image. See console for details.");
+      void alertDialog({ title: "Couldn't generate the image", message: "Exporting the report failed. The browser console has the details." });
     } finally {
       setSavingImg(false);
     }

@@ -125,20 +125,74 @@ function isMissingColumnError(err) {
   return code === "42703" || code === "PGRST204" || /column .* does not exist/i.test(msg);
 }
 
+/* PostgREST caps every response at db-max-rows (1000 here) and supabase-js truncates silently, so
+ * one unpaged read of a table past 1000 rows just loses the tail. roi_recipients is at ~740 and is
+ * read by every sender: at 1,001 rows arbitrary rooftops would drop to recipients_missing with no
+ * error (A1 F14, A4 F15). Page in a fixed order until a short page comes back. Rows are de-duplicated
+ * by `id` when it is selected, so a row written mid-read can't appear twice. */
+const PAGE_SIZE = 1000;
+async function selectAllPaged(build, { pageSize = PAGE_SIZE, maxRows = 200000 } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (let from = 0; from < maxRows; from += pageSize) {
+    const res = await build(from, from + pageSize - 1);
+    if (res.error) return { data: null, error: res.error };
+    const rows = res.data || [];
+    for (const r of rows) {
+      const k = r && r.id != null ? String(r.id) : null;
+      if (k !== null) { if (seen.has(k)) continue; seen.add(k); }
+      out.push(r);
+    }
+    if (rows.length < pageSize) break;
+  }
+  return { data: out, error: null };
+}
+
+/** Every row of `table` matching `filter`, paged in `order` (columns that make the order total). */
+function selectTablePaged(sb, table, cols, { filter, order = ["id"] } = {}) {
+  return selectAllPaged((from, to) => {
+    let q = sb.from(table).select(cols);
+    if (filter) q = filter(q);
+    for (const c of order) q = q.order(c, { ascending: true });
+    return q.range(from, to);
+  });
+}
+
 /* select() on roi_recipients WITH the deliverability columns, falling back to the caller's own
  * column list if the migration hasn't been applied. Without this a deploy that lands before the
  * migration would 400 every recipient read and take the whole digest cron down — the gate is
- * supposed to stop bad addresses, not stop the mail. */
+ * supposed to stop bad addresses, not stop the mail. Paged (see selectAllPaged). */
 async function selectRecipients(sb, baseCols, filter) {
-  const run = (cols) => {
-    let q = sb.from("roi_recipients").select(cols);
-    if (filter) q = filter(q);
-    return q;
-  };
+  const run = (cols) => selectTablePaged(sb, "roi_recipients", cols, { filter, order: ["id"] });
   const withCols = await run(`${baseCols},${DELIVERABILITY_COLS}`);
   if (!withCols.error || !isMissingColumnError(withCols.error)) return withCols;
   console.warn("[emailHealth] roi_recipients is missing the deliverability columns — apply migration 0023_recipient_deliverability.sql. Falling back to the structural gate only.");
   return run(baseCols);
+}
+
+// ── Matching a recipient by address ───────────────────────────────────────────────────────
+
+/* roi_recipients has no case-normalised email column, so a lookup by address is an ILIKE. In a
+ * LIKE pattern `_` and `%` are wildcards: "a_b@x.com" also matched "axb@x.com", so a bounce or a
+ * toggle on one address could land on another (A5-20). Escape them (backslash is Postgres' default
+ * LIKE escape) so the pattern only ever matches the address itself, case-insensitively. */
+function escapeLike(s) {
+  return String(s == null ? "" : s).replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/** The team's recipient rows whose address equals `email` (trimmed, case-insensitive). Exact on the
+ * server (escaped ILIKE) and again here, so even PostgREST's `*` wildcard alias can't widen it.
+ * Returns { data: rows[], error }. More than one row = a case-duplicate the caller must handle. */
+async function findRecipientsByEmail(sb, { teamId, email, cols = "id,email" }) {
+  const addr = normalizeEmail(email);
+  if (!addr) return { data: [], error: null };
+  const withId = /(^|,)\s*id\s*(,|$)/.test(cols) ? cols : `id,${cols}`;
+  const withEmail = /(^|,)\s*email\s*(,|$)/.test(withId) ? withId : `${withId},email`;
+  let q = sb.from("roi_recipients").select(withEmail);
+  if (teamId) q = q.eq("team_id", teamId);
+  const { data, error } = await q.ilike("email", escapeLike(addr));
+  if (error) return { data: [], error };
+  return { data: (data || []).filter((r) => normalizeEmail(r.email) === addr), error: null };
 }
 
 // ── Classifying a send failure ────────────────────────────────────────────────────────────
@@ -186,8 +240,9 @@ const SOFT_BOUNCE_LIMIT = Number(process.env.SOFT_BOUNCE_LIMIT || 3);
 
 function matchEmail(q, email) {
   // roi_recipients has no case-normalised email column, and addresses were entered by hand over
-  // two years — match case-insensitively or half the suppressions silently miss their row.
-  return q.ilike("email", String(email || "").trim());
+  // two years — match case-insensitively or half the suppressions silently miss their row. The
+  // pattern is escaped: an unescaped `_` or `%` made a suppression hit other addresses (A5-20).
+  return q.ilike("email", escapeLike(String(email || "").trim()));
 }
 
 /* Put an address on hold. teamId omitted → every rooftop that has this address, which is the
@@ -358,6 +413,7 @@ module.exports = {
   isolateAndSuppress,
   isSuppressed, emailBlock, canEmail,
   DELIVERABILITY_COLS, selectRecipients, isMissingColumnError,
+  selectAllPaged, selectTablePaged, escapeLike, findRecipientsByEmail,
   classifySendFailure, extractAddresses, parseBounceEvents,
   suppressAddress, unsuppressAddress, recordFailure,
   SOFT_BOUNCE_LIMIT, DOMAIN_TYPOS, UNROUTABLE_TLDS,

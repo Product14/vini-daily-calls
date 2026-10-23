@@ -1,15 +1,37 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, Suspense, lazy, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
-import Dashboard from "../inventory-dashboard.tsx";
-import AgentsDashboard from "./agents/AgentsDashboard.tsx";
-import DreamDashboard from "./dream/DreamDashboard.tsx";
-import ProgramsDashboard from "./programs/ProgramsDashboard.tsx";
+// The email tracker stays in the entry bundle: it is the page CSMs keep open, and loading it
+// lazily would add a second serial round-trip (entry, then chunk) before its data can render.
+// Every other dashboard is split into its own chunk, so the tracker no longer downloads them.
 import { EmailerTracker } from "./email/EmailerTracker.tsx";
-import { RealtimeLog } from "./email/RealtimeLog.tsx";
 import { TrackerAuthGate } from "./email/TrackerAuthGate.tsx";
-import TvWall2View from "./tvwall2/TvWall2View.tsx";
 import { Analytics } from "@vercel/analytics/react";
+
+// A tab opened before a deploy (the TV walls stay open for days) still knows the old build's chunk
+// names, which the new deploy no longer serves, so its next route change would fail to import and
+// blank the page. Reload once to pick up the new build; a second failure is a real error.
+const CHUNK_RELOAD_KEY = "vini-chunk-reload";
+function lazyRoute(load) {
+  return lazy(() =>
+    load()
+      .then((m) => { try { sessionStorage.removeItem(CHUNK_RELOAD_KEY); } catch { /* ignore */ } return m; })
+      .catch((err) => {
+        let reloaded = true;
+        try { reloaded = sessionStorage.getItem(CHUNK_RELOAD_KEY) === "1"; if (!reloaded) sessionStorage.setItem(CHUNK_RELOAD_KEY, "1"); } catch { /* no storage: don't loop */ }
+        if (reloaded) throw err;
+        window.location.reload();
+        return new Promise(() => {}); // the reload replaces this page
+      }),
+  );
+}
+
+const Dashboard = lazyRoute(() => import("../inventory-dashboard.tsx"));
+const AgentsDashboard = lazyRoute(() => import("./agents/AgentsDashboard.tsx"));
+const DreamDashboard = lazyRoute(() => import("./dream/DreamDashboard.tsx"));
+const ProgramsDashboard = lazyRoute(() => import("./programs/ProgramsDashboard.tsx"));
+const RealtimeLog = lazyRoute(() => import("./email/RealtimeLog.tsx").then((m) => ({ default: m.RealtimeLog })));
+const TvWall2View = lazyRoute(() => import("./tvwall2/TvWall2View.tsx"));
 
 function Router() {
   const [path, setPath] = useState(() => window.location.pathname);
@@ -76,7 +98,9 @@ function Router() {
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
-    <Router />
+    <Suspense fallback={null}>
+      <Router />
+    </Suspense>
     <Analytics />
   </StrictMode>
 );

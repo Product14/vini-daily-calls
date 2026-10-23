@@ -226,13 +226,20 @@ function buildCommentary(m, mode, pn) {
   pn = pn || "yesterday";
   if (m && typeof m.commentary === "string" && m.commentary.trim()) return m.commentary.trim();
   var d = (m && m.deltas) || {};
-  var leadsD = num(d.leadsAttempted), apptD = num(d.appointments), abrD = num(d.abr), qualD = num(d.leadsQualified);
+  // Rooftop-level deltas (the KPI chips') when the run carries them; the inbound agent's otherwise. A delta
+  // with no prior basis is null and is left out of the sentence rather than printed as "+0%".
+  var kd = m && m.kpiDeltas;
+  var raw = kd
+    ? { leads: kd.leads, appt: kd.appointments, abr: null, qual: kd.qualified }
+    : { leads: d.leadsAttempted, appt: d.appointments, abr: d.abr, qual: d.leadsQualified };
+  var leadsD = num(raw.leads), apptD = num(raw.appt), abrD = num(raw.abr), qualD = num(raw.qual);
   var leads = num(m.totalLeads != null ? m.totalLeads : m.inboundUniqueLeads), appts = num(m.appointmentsYesterday);
   var pct = function (v) { return (v > 0 ? "+" : "") + v + "%"; };
+  var vsPrior = function (v) { return v == null || v === "" ? "" : " (" + pct(num(v)) + " vs prior)"; };
   if (leads === 0 && appts === 0) return "Quiet day — no new lead activity captured. Agents stayed live and ready for inbound.";
-  if (mode === "warm") return "No appointments booked " + pn + ", but " + fmtInt(num(m.warmCount)) + " " + plural(num(m.warmCount), "lead was", "leads were") + " warmed and kept moving (" + pct(leadsD) + " vs prior). The pipeline is alive — the gap is in closing, not volume.";
-  if (mode === "qual") return "No appointments booked " + pn + ", but " + fmtInt(num(m.qualifiedLeads)) + " " + plural(num(m.qualifiedLeads), "lead", "leads") + " qualified (" + pct(qualD) + " vs prior). Turn qualified into booked with fast follow-ups.";
-  if (mode === "reached" || mode === "leads") return "No appointments or qualified leads " + pn + " — agents stayed live and worked " + fmtInt(leads) + " " + plural(leads, "lead", "leads") + " (" + pct(leadsD) + " vs prior). Keep the follow-ups moving.";
+  if (mode === "warm") return "No appointments booked " + pn + ", but " + fmtInt(num(m.warmCount)) + " " + plural(num(m.warmCount), "lead was", "leads were") + " warmed and kept moving" + vsPrior(raw.leads) + ". The pipeline is alive — the gap is in closing, not volume.";
+  if (mode === "qual") return "No appointments booked " + pn + ", but " + fmtInt(num(m.qualifiedLeads)) + " " + plural(num(m.qualifiedLeads), "lead", "leads") + " qualified" + vsPrior(raw.qual) + ". Turn qualified into booked with fast follow-ups.";
+  if (mode === "reached" || mode === "leads") return "No appointments or qualified leads " + pn + " — agents stayed live and worked " + fmtInt(leads) + " " + plural(leads, "lead", "leads") + vsPrior(raw.leads) + ". Keep the follow-ups moving.";
   if (leadsD > 5 && abrD < -5) return "Lead volume grew strongly (" + pct(leadsD) + "), but booking rate slipped " + Math.abs(abrD) + "% versus the prior period. Volume is healthy — the gap is in closing.";
   if (apptD > 5) return "Strong day — appointments up " + pct(apptD) + " vs prior on " + fmtInt(leads) + " leads worked. Momentum is building.";
   if (apptD < -5) return "Appointments dipped " + pct(apptD) + " vs prior. " + fmtInt(leads) + " " + plural(leads, "lead was", "leads were") + " still engaged" + (qualD > 0 ? " and qualification held up" : "") + " — focus follow-ups to recover the booking rate.";
@@ -286,16 +293,24 @@ function renderDigestHtml(metrics, opts) {
   // and combined Appointments — an impossible funnel (0 qualified yet N booked). warmCount = ibf.qualified +
   // obf.qualified (the combined funnel qualified stage), matching how the hero ladder + outbound section
   // already count qualified. The inbound SECTION keeps `qualified` (inbound-only) — it's inbound-scoped.
-  var qualifiedAll = Math.max(num(m.warmCount), qualified);
+  // Sales on the rooftop's DISTINCT rungs (runner rooftopRungsFor): warmCount IS the rooftop figure.
+  var qualifiedAll = m.rooftopRungs ? num(m.warmCount) : Math.max(num(m.warmCount), qualified);
   var callsHandled = num(m.callsHandled != null ? m.callsHandled : m.conversationsCall);
   var convHandled = num(m.conversationsHandled) || callsHandled;
   var dollarRate = num(opts.dollarRate != null ? opts.dollarRate : m.dollarRate);
-  var apptMTD = num(m.appointmentsYesterdayMTD), leadsMTD = num(m.inboundUniqueLeadsMTD);
+  // Leads MTD on the SAME basis as the combined daily "Leads touched" figure it sits under (older stored
+  // runs only carried the inbound-only MTD, which read smaller than a single day; those show no MTD).
+  var apptMTD = num(m.appointmentsYesterdayMTD), leadsMTD = m.totalLeadsMTD != null ? num(m.totalLeadsMTD) : 0;
+  // Delta chips. kd = the rooftop's own period-over-period (the Overview's), di/dob = each agent's. A
+  // conversation count is never chipped with a calls delta, and an absent delta renders no chip.
+  var kd = m.kpiDeltas || {};
+  var di = m.inboundDeltas || { appointments: d.appointments, leadsQualified: d.leadsQualified, leadsAttempted: d.leadsAttempted };
+  var dob = m.outboundDeltas || {};
 
   // Period-aware wording: daily → "yesterday", weekly → "this week", monthly → "this month".
   var period = opts.period === "weekly" || opts.period === "monthly" ? opts.period : "daily";
   var pn = period === "weekly" ? "this week" : period === "monthly" ? "this month" : "yesterday";
-  var nextReport = period === "weekly" ? "next Monday · 7:00 AM" : period === "monthly" ? "1st of next month · 7:00 AM" : "tomorrow · 7:00 AM";
+  var nextReport = opts.nextReportLabel || (period === "weekly" ? "next Monday · 7:00 AM" : period === "monthly" ? "1st of next month · 7:00 AM" : "tomorrow · 7:00 AM");
   var primary = primaryMetric(m, leads, pn);
 
   // ── FOCUS — stable per-rooftop content strategy (set by digest_focus / the resolver, threaded via
@@ -357,8 +372,16 @@ function renderDigestHtml(metrics, opts) {
   // (past-due) shown as context WHEN available. Elevated to the KPI row per Jul-2026 feedback. Headlines
   // the OPEN count (actionItemsTotal — always populated) rather than overdue (actionItemsOverdue is not
   // yet wired in the digest pipeline, so it would read 0), so the card is real, not a hardcoded zero.
-  var openAI = num(m.actionItemsTotal), overdueAI = num(m.actionItemsOverdue);
-  var dueCard = kpiCard("Due action items", fmtInt(openAI), "", null, overdueAI > 0 ? fmtInt(overdueAI) + " overdue" : "");
+  // "Action items created" = items created in the period (the Overview's label for the same figure). It
+  // used to say "Due action items" over a created count that includes completed ones. The sub-line is the
+  // current open / overdue state from the scoreboard, omitted (never a false 0) when that call failed.
+  var createdAI = num(m.actionItemsTotal), overdueAI = num(m.actionItemsOverdue);
+  var openNow = m.actionItemStatsDegraded ? null : (m.actionItemsOpen != null ? num(m.actionItemsOpen) : null);
+  var aiCreatedStr = fmtInt(createdAI) + (m.actionItemsTruncated ? "+" : "");
+  var aiSubBits = [];
+  if (openNow != null) aiSubBits.push(fmtInt(openNow) + " still open");
+  if (!m.actionItemStatsDegraded && overdueAI > 0) aiSubBits.push(fmtInt(overdueAI) + " overdue");
+  var dueCard = kpiCard("Action items created", aiCreatedStr, "", null, aiSubBits.join(" · "));
   // canonical: AI-assisted (CRM) appointments are SECONDARY — shown as a small sub under the AI-booked
   // headline, NEVER folded into it. Only surfaced when there are any (field mapped in runner apiMetrics).
   var assisted = num(m.assistedAppointments);
@@ -367,16 +390,16 @@ function renderDigestHtml(metrics, opts) {
   if (focus === "conversation") {
     // canonical glance funnel: Real conversations → Qualified leads → Appointments (AI-booked) → Due action items.
     cardList = [
-      kpiCard("Real conversations", fmtInt(convHero), "", d.totalCalls, ""),
-      kpiCard("Qualified leads", fmtInt(qualifiedAll), "", d.leadsQualified, ""),
+      kpiCard("Real conversations", fmtInt(convHero), "", kd.conversations, ""),
+      kpiCard("Qualified leads", fmtInt(qualifiedAll), "", kd.qualified, ""),
       kpiCard("Appointments — AI-booked", fmtInt(apptsAny), "", null, apptSub),
       dueCard,
     ];
   } else {
     cardList = [
-      kpiCard("Leads touched", fmtInt(leads), "", d.leadsAttempted, leadsMTD ? fmtInt(leadsMTD) + " MTD" : ""),
-      kpiCard("Real conversations", fmtInt(convHero), "", d.totalCalls, ""),
-      kpiCard("Qualified leads", fmtInt(qualifiedAll), "", d.leadsQualified, ""),
+      kpiCard("Leads touched", fmtInt(leads), "", kd.leads, leadsMTD ? fmtInt(leadsMTD) + " MTD" : ""),
+      kpiCard("Real conversations", fmtInt(convHero), "", kd.conversations, ""),
+      kpiCard("Qualified leads", fmtInt(qualifiedAll), "", kd.qualified, ""),
       kpiCard("Appointments — AI-booked", fmtInt(apptsAny), "", null, apptSub),
     ];
   }
@@ -384,16 +407,49 @@ function renderDigestHtml(metrics, opts) {
   cards = cardList.join("").replace(/width="25%"/g, 'width="' + Math.floor(100 / cardList.length) + '%"');
   kpiRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' + cards + "</tr></table></td></tr>";
 
-  // ── SECONDARY canonical strip — the three metrics the Overview headlines that the glance cards don't:
-  //   Hand-offs to team (= transfers + callbacks) · Turn rate (qualified ÷ conversations) · Close rate
-  //   (appointments ÷ qualified). Fraction-aware; inbound-consistent basis (matches the Qualified card).
+  // ── SECONDARY canonical strip: Hand-offs to team · Turn rate · Close rate.
+  //   Hand-offs = transfers + callbacks across BOTH agents (callFlow.transferred + callFlow.callbacks), the
+  //   Overview's own figure. Older stored runs fall back to the inbound transfers + legacy callback intents.
   var CB_KEYS = { requestcallback: 1, callbackrequest: 1 };
-  var sTransfers = num(m.inboundTransfers != null ? m.inboundTransfers : m.warmTransfers);
-  var sCallbacks = num(m.inboundCallbacks) || arr(m.actionItems).reduce(function (s, it) { return s + (CB_KEYS[normKey(it.intent)] ? num(it.count) : 0); }, 0);
+  var hasHandoffs = m.handoffTransfers != null || m.handoffCallbacks != null;
+  var sTransfers = hasHandoffs ? num(m.handoffTransfers) : num(m.inboundTransfers != null ? m.inboundTransfers : m.warmTransfers);
+  var sCallbacks = hasHandoffs ? num(m.handoffCallbacks) : (num(m.inboundCallbacks) || arr(m.actionItems).reduce(function (s, it) { return s + (CB_KEYS[normKey(it.intent)] ? num(it.count) : 0); }, 0));
   var sHandoffs = sTransfers + sCallbacks;
   var sConvos = num(m.conversationsInbound != null ? m.conversationsInbound : m.conversationsReached) || convHero;
+  // Turn rate = qualified ÷ real conversations, only where qualified is nested inside conversations. On
+  // SALES INBOUND qualified is the AI's own verdict, not a transcript test, so it is NOT nested and the
+  // ratio can pass 100% (it printed 120%): Sales shows the outbound agent's turn rate or none at all.
+  // Service: both agents' qualified over both agents' real conversations, the two KPI figures above.
+  var ibF = m.inboundFunnel || null, obF = m.outboundFunnel || null, hasAgentFunnels = !!(ibF || obF);
+  var turnTile = null;
+  if (dept === "sales") {
+    if (obF && num(obF.connected) > 0) turnTile = { v: rateFrac(obF.qualified, obF.connected), sub: "outbound: " + fmtInt(obF.qualified) + " qualified of " + fmtInt(obF.connected) + " conversations" };
+  } else if (hasAgentFunnels) {
+    var tq = num(ibF && ibF.qualified) + num(obF && obF.qualified), tc = num(ibF && ibF.connected) + num(obF && obF.connected);
+    if (tc > 0) turnTile = { v: rateFrac(tq, tc), sub: fmtInt(tq) + " qualified of " + fmtInt(tc) + " conversations" };
+  } else if (sConvos > 0) {
+    turnTile = { v: rateFrac(qualified, sConvos), sub: "qualified ÷ conversations" };
+  }
+  // Close rate = AI-booked ÷ qualified on ONE basis: each agent's own bookings over its own qualified
+  // leads, the Overview agent card's set rate (agent appointments ÷ agent qualified). Both agents → the
+  // combined ratio with each agent's rate beside it. The fraction is always shown, so a small base reads
+  // as "2 of 6" rather than as a bare percentage.
+  var closeTile;
+  if (hasAgentFunnels) {
+    var cb = num(ibF && ibF.appt) + num(obF && obF.appt), cq = num(ibF && ibF.qualified) + num(obF && obF.qualified);
+    var both = ibF && obF && num(ibF.qualified) > 0 && num(obF.qualified) > 0;
+    closeTile = cq > 0
+      ? { v: rateFrac(cb, cq), sub: both ? "inbound " + fmtInt(ibF.appt) + "/" + fmtInt(ibF.qualified) + " · outbound " + fmtInt(obF.appt) + "/" + fmtInt(obF.qualified) : fmtInt(cb) + " booked of " + fmtInt(cq) + " qualified" }
+      : { v: "—", sub: cb > 0 ? fmtInt(cb) + " booked, none qualified yet" : "no qualified leads yet" };
+  } else {
+    closeTile = { v: apptsAny > 0 ? rateFrac(apptsAny, qualified) : "—", sub: apptsAny > 0 ? "appointments ÷ qualified" : (qualified > 0 ? fmtInt(qualified) + " qualified to close" : "no bookings yet") };
+  }
+  var rateTiles = [["Hand-offs to team", fmtInt(sHandoffs), fmtInt(sTransfers) + " transfers · " + fmtInt(sCallbacks) + " callbacks"]];
+  if (turnTile) rateTiles.push(["Turn rate", turnTile.v, turnTile.sub]);
+  rateTiles.push(["Close rate", closeTile.v, closeTile.sub]);
+  var rateW = Math.floor(100 / rateTiles.length) + "%";
   var rateTile = function (label, value, sub) {
-    return '<td class="col" width="33%" valign="top" style="padding:6px;">' +
+    return '<td class="col" width="' + rateW + '" valign="top" style="padding:6px;">' +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-left:3px solid ' + VIOLET + ';border-radius:12px;background:' + CARD + ';"><tr><td style="padding:13px 15px;">' +
       '<div style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:800;">' + esc(label) + '</div>' +
       '<div style="font-size:20px;font-weight:900;color:' + INK + ';margin-top:6px;line-height:1;">' + esc(value) + '</div>' +
@@ -401,9 +457,7 @@ function renderDigestHtml(metrics, opts) {
       '</td></tr></table></td>';
   };
   var rateRow = '<tr><td class="pad" style="padding:14px 21px 4px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' +
-    rateTile("Hand-offs to team", fmtInt(sHandoffs), fmtInt(sTransfers) + " transfers · " + fmtInt(sCallbacks) + " callbacks") +
-    rateTile("Turn rate", rateFrac(qualified, sConvos), "qualified ÷ conversations") +
-    rateTile("Close rate", apptsAny > 0 ? rateFrac(apptsAny, qualified) : "—", apptsAny > 0 ? "appointments ÷ qualified" : (qualified > 0 ? fmtInt(qualified) + " qualified to close" : "no bookings yet")) +
+    rateTiles.map(function (t) { return rateTile(t[0], t[1], t[2]); }).join("") +
     "</tr></table></td></tr>";
 
   // ── UPSELL banner — WEEKLY/MONTHLY ONLY. The daily report is "just the day's work":
@@ -429,10 +483,18 @@ function renderDigestHtml(metrics, opts) {
   // canonical: the AI-booked appointments themselves — WHO booked, the vehicle, WHEN, and the reason
   // (intent). Sourced scope=window (booked in the report period) so the list reconciles with the
   // "Appointments — AI-booked" headline count. Section omits itself when there are none.
-  var apptAll = arr(opts.appointments), appointments = apptAll.slice(0, 6), apptSection = "";
-  if (appointments.length) {
-    var apptTotal = num(m.appointmentsUpcomingTotal) || apptAll.length;
-    var rows = appointments.map(function (a) {
+  // The lists come from the SAME /api/reports response as the KPI (runner → digestEnrich): AI-booked rows
+  // under the AI-booked heading, AI-assisted (CRM) rows in their own sub-list, never mixed. The footer
+  // states the KPI's own numbers, not the list length (it said "7 AI-booked" under a KPI of 0 when all
+  // seven were dealer-booked CRM appointments).
+  var apptAll = arr(opts.appointments);
+  var bookedList = apptAll.filter(function (a) { return !a.assisted; });
+  var assistedList = arr(opts.assistedAppointments).concat(apptAll.filter(function (a) { return a.assisted; }));
+  var appointments = bookedList.slice(0, 6), assistedShown = assistedList.slice(0, 4), apptSection = "";
+  if (appointments.length || assistedShown.length) {
+    var apptTotal = m.appointmentsYesterday != null ? num(m.appointmentsYesterday) : bookedList.length;
+    var assistedTotal = m.assistedAppointments != null ? num(m.assistedAppointments) : assistedList.length;
+    var apptRow = function (a) {
       // the "reason" this column header promises: the work the customer actually asked for
       // (digestEnrich → fmtServiceReason). Booking intent is the fallback, not the answer.
       var why = a.reason ? a.reason : (a.intent ? humanize(a.intent) : "");
@@ -440,12 +502,18 @@ function renderDigestHtml(metrics, opts) {
       return '<tr>' +
         '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;color:' + INK + ';"><span style="font-weight:700;">' + esc(a.customer || "Customer") + "</span>" + (sub ? '<div style="font-size:11px;color:' + MUTE + ';margin-top:2px;">' + sub + "</div>" : "") + "</td>" +
         '<td align="right" style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:600;color:' + BODY + ';white-space:nowrap;">' + esc(a.sched || "") + "</td></tr>";
-    }).join("");
+    };
+    var apptHead = function (label) {
+      return '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">' + esc(label) + '</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">When</td></tr>';
+    };
+    var apptTable = function (rows, label) {
+      return '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' + apptHead(label) + rows.map(apptRow).join("") + "</table>";
+    };
     apptSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Appointments booked · " + pn, L.appointments || consoleUrl) +
-      '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' +
-      '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Customer · vehicle · reason</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">When</td></tr>' +
-      rows + "</table>" +
-      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(apptTotal) + "</span> AI-booked " + esc(pn) + " &nbsp;·&nbsp; " +
+      (appointments.length ? apptTable(appointments, "AI-booked · customer · vehicle · reason") : "") +
+      (assistedShown.length ? '<div style="margin-top:' + (appointments.length ? "14px" : "0") + ';">' + apptTable(assistedShown, "AI-assisted (CRM) · booked by your team after an AI conversation") + "</div>" : "") +
+      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(apptTotal) + "</span> AI-booked " + esc(pn) +
+      (assistedTotal > 0 ? ' &nbsp;·&nbsp; <span style="font-weight:800;color:' + INK + ';">' + fmtInt(assistedTotal) + "</span> AI-assisted (CRM)" : "") + " &nbsp;·&nbsp; " +
       '<a href="' + esc(L.appointments || consoleUrl) + '" target="_blank" rel="noopener noreferrer" style="color:' + BRAND + ';font-weight:700;text-decoration:none;">View all &#8594;</a></div></td></tr>';
   }
 
@@ -473,13 +541,13 @@ function renderDigestHtml(metrics, opts) {
   // Default: pending priority cards. Happy-note when none open but some closed
   // yesterday. Section omits itself when there's nothing at all.
   var items = arr(m.actionItems).filter(function (it) { return num(it.count) > 0; });
-  var closedYesterday = num(m.actionItemsClosedYesterday);
+  var closedYesterday = m.actionItemStatsDegraded ? 0 : num(m.actionItemsClosedYesterday);
   var fuSection = "";
   if (items.length) {
     // Dense TABLE grouped by intent (most action items first) — what the GM cares about.
     var sorted = items.slice().sort(function (a, b) { return num(b.count) - num(a.count); });
     var aiTotal = sorted.reduce(function (s, it) { return s + num(it.count); }, 0) || 1;
-    var overdue = num(m.actionItemsOverdue);
+    var overdue = m.actionItemStatsDegraded ? 0 : num(m.actionItemsOverdue);
     var aiRows = sorted.slice(0, 6).map(function (it) {
       // Numeric count only — percent share removed per Jun-2026 review.
       return '<tr><td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:600;color:' + INK + ';">' + esc(humanize(it.intent)) + "</td>" +
@@ -489,7 +557,7 @@ function renderDigestHtml(metrics, opts) {
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:12px;border-collapse:separate;overflow:hidden;">' +
       '<tr><td style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Intent</td><td align="right" style="padding:8px 12px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;">Count</td></tr>' +
       aiRows + "</table>" +
-      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(aiTotal) + "</span> open" + (overdue > 0 ? ' &nbsp;·&nbsp; <span style="font-weight:800;color:' + NEG + ';">' + fmtInt(overdue) + " overdue</span>" : "") + (closedYesterday > 0 ? ' &nbsp;·&nbsp; ' + fmtInt(closedYesterday) + " closed " + pn : "") +
+      '<div style="margin-top:8px;font-size:12px;color:' + MUTE + ';"><span style="font-weight:800;color:' + INK + ';">' + fmtInt(aiTotal) + (m.actionItemsTruncated ? "+" : "") + "</span> created " + esc(pn) + (openNow != null ? ' &nbsp;·&nbsp; <span style="font-weight:800;color:' + INK + ';">' + fmtInt(openNow) + "</span> still open" : "") + (overdue > 0 ? ' &nbsp;·&nbsp; <span style="font-weight:800;color:' + NEG + ';">' + fmtInt(overdue) + " overdue</span>" : "") + (closedYesterday > 0 ? ' &nbsp;·&nbsp; ' + fmtInt(closedYesterday) + " closed " + pn : "") +
       "</div></td></tr>"; // "Take action →" link removed per Jun-2026 review
   } else if (closedYesterday > 0) {
     fuSection = '<tr><td class="pad" style="padding:24px 28px 4px;">' + eyebrow("Action items") +
@@ -505,7 +573,9 @@ function renderDigestHtml(metrics, opts) {
   if (tv.length) {
     // Dense TABLE (per review: not chip-pills / not bars — show 6–8 rows of real data).
     var tvLabel = (tv[0] && tv[0].label) || (dept === "service" ? "appts" : "leads");
-    var tvTitle = dept === "service" ? "Top services" : "Top vehicles of interest";
+    // A trailing window from today, not the report period: say which.
+    var tvDays = num(opts.topVehiclesDays || m.topVehiclesDays) || 30;
+    var tvTitle = (dept === "service" ? "Top services" : "Top vehicles of interest") + " · last " + tvDays + " days";
     var tvRows = tv.slice(0, 8).map(function (v, i) {
       return '<tr><td width="34" align="center" style="padding:9px 6px;border-top:1px solid ' + LINE + ';font-size:12px;font-weight:800;color:' + BRAND + ';">' + (i + 1) + "</td>" +
         '<td style="padding:9px 12px;border-top:1px solid ' + LINE + ';font-size:13px;font-weight:700;color:' + INK + ';">' + esc(v.name) + "</td>" +
@@ -547,9 +617,11 @@ function renderDigestHtml(metrics, opts) {
   var hasInAppts = focus !== "conversation" && inAppts > 0;
   // mini metrics under the inbound big number — canonical wordings (Leads reached / Real conversations /
   // Qualified leads). conversation-focus already leads with conversations, so its minis carry reach + qualified.
+  // "Leads reached" here is the INBOUND agent's (it printed the inbound + outbound total).
+  var inboundReached = m.inboundFunnel ? num(m.inboundFunnel.contacted) : num(m.inboundUniqueLeads);
   var inboundMinis = focus === "conversation"
-    ? miniMetric("Leads reached", fmtInt(leads), d.leadsAttempted, "50%") + miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "50%")
-    : miniMetric("Real conversations", fmtInt(inboundConv), d.totalCalls, "50%") + miniMetric("Qualified leads", fmtInt(qualified), d.leadsQualified, "50%");
+    ? miniMetric("Leads reached", fmtInt(inboundReached), di.leadsAttempted, "50%") + miniMetric("Qualified leads", fmtInt(qualified), di.leadsQualified, "50%")
+    : miniMetric("Real conversations", fmtInt(inboundConv), di.conversations, "50%") + miniMetric("Qualified leads", fmtInt(qualified), di.leadsQualified, "50%");
   // Two-column layout (Jun-2026 review): LEFT = the appointment-booked numbers; RIGHT = channel
   // engaged + during/after hours (moved over from the full-width strip). The "VINI" agent device
   // card was removed; booking-rate mini metric dropped along with the KPI card.
@@ -573,7 +645,7 @@ function renderDigestHtml(metrics, opts) {
   var CALLBACK_KEYS = { requestcallback: 1, callbackrequest: 1 };
   var inTransfers = num(m.inboundTransfers != null ? m.inboundTransfers : m.warmTransfers);
   var callbacksArranged = num(m.inboundCallbacks);
-  if (!callbacksArranged) callbacksArranged = arr(m.actionItems).reduce(function (s, it) { return s + (CALLBACK_KEYS[normKey(it.intent)] ? num(it.count) : 0); }, 0);
+  if (m.inboundCallbacks == null) callbacksArranged = arr(m.actionItems).reduce(function (s, it) { return s + (CALLBACK_KEYS[normKey(it.intent)] ? num(it.count) : 0); }, 0);
   var qTot = queries.reduce(function (s, q) { return s + num(q.total); }, 0);
   var qRes = queries.reduce(function (s, q) { return s + num(q.resolved); }, 0);
   var qResPct = qTot > 0 ? Math.round((qRes / qTot) * 100) : 0;
@@ -642,7 +714,7 @@ function renderDigestHtml(metrics, opts) {
     // LEFT — appointment-booked numbers
     '<td class="col" width="50%" valign="top" style="padding-right:16px;">' +
     '<div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(inboundBig.label) + (hasInAppts ? " " + pn : "") + "</div>" +
-    '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(inboundBig.n) + "</span> &nbsp;" + (inboundBig.n > 0 ? (hasInAppts ? deltaChip(d.appointments) : (focus === "conversation" ? deltaChip(d.totalCalls) : "")) : "") + "</div>" +
+    '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(inboundBig.n) + "</span> &nbsp;" + (inboundBig.n > 0 ? (hasInAppts ? deltaChip(di.appointments) : (focus === "conversation" ? deltaChip(di.conversations) : "")) : "") + "</div>" +
     '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
     inboundMinis +
     "</tr></table></td>" +
@@ -666,12 +738,17 @@ function renderDigestHtml(metrics, opts) {
   var outboundSection = "";
   if (hasOutbound) {
     var obAppts = num(m.outboundAppointmentsSet);
-    var obWarm = num((m.leadFunnel || {}).qualified) || num(m.warmCount);
+    // The OUTBOUND agent's own funnel (contacted/connected/qualified/appt). It used to read m.leadFunnel,
+    // which is the INBOUND funnel, and printed inbound qualified under "Outbound … performance". Stored
+    // runs from before outboundFunnel existed keep the old read.
+    var obFunnel = m.outboundFunnel !== undefined ? m.outboundFunnel : (m.leadFunnel || null);
+    var obWarm = m.outboundFunnel !== undefined ? num((m.outboundFunnel || {}).qualified) : (num((m.leadFunnel || {}).qualified) || num(m.warmCount));
+    var obConv = m.outboundFunnel ? num(m.outboundFunnel.connected) : num(m.outboundUniqueReached);
     var obBig = obAppts > 0 ? { n: obAppts, label: "Appointments — AI-booked" } : { n: obWarm, label: "Qualified leads" };
-    var outcomes = arr(m.outcomes).filter(function (o) { return num(o.value) > 0; }), funnel = m.leadFunnel || null, outcomesHtml = "";
+    var outcomes = arr(m.outcomes).filter(function (o) { return num(o.value) > 0; }), funnel = obFunnel, outcomesHtml = "";
     if (outcomes.length) {
       var maxO = outcomes.reduce(function (mx, o) { return Math.max(mx, num(o.value)); }, 0);
-      outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes") + panel('<div style="font-size:11px;color:' + MUTE + ';margin:0 0 10px;">How outbound conversations ended</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
+      outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound outcomes · all time") + panel('<div style="font-size:11px;color:' + MUTE + ';margin:0 0 10px;">Where each campaign lead stands now, across every outbound campaign to date (not just ' + esc(pn) + ')</div><table width="100%" cellpadding="0" cellspacing="0">' + outcomes.slice(0, 7).map(function (o, i) { return barRow(o.label, o.value, maxO, o.color || DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
     } else if (funnel) {
       var fr = [["Leads dialed", funnel.contacted], ["Real conversations", funnel.connected], ["Qualified leads", funnel.qualified], ["Appointments — AI-booked", funnel.appt]], maxF = fr.reduce(function (mx, r) { return Math.max(mx, num(r[1])); }, 0);
       outcomesHtml = '<div style="margin-top:24px;">' + eyebrow("Outbound funnel") + panel('<table width="100%" cellpadding="0" cellspacing="0">' + fr.map(function (r, i) { return barRow(r[0], r[1], maxF, DONUT[i % DONUT.length]); }).join("") + "</table>") + "</div>";
@@ -679,9 +756,9 @@ function renderDigestHtml(metrics, opts) {
     outboundSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Outbound " + Dept.toLowerCase() + " performance") +
       panel('<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       '<td valign="top"><div style="font-size:11px;color:' + MUTE + ';font-weight:700;">' + esc(obBig.label) + "</div>" +
-      '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(obBig.n) + "</span> &nbsp;" + (obBig.n > 0 ? deltaChip(d.appointments) : "") + "</div>" +
+      '<div style="margin-top:4px;line-height:1;"><span style="font-size:46px;font-weight:900;color:' + INK + ';">' + fmtInt(obBig.n) + "</span> &nbsp;" + (obBig.n > 0 ? deltaChip(obAppts > 0 ? dob.appointments : dob.leadsQualified) : "") + "</div>" +
       '<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;"><tr>' +
-      miniMetric("Real conversations", fmtInt(m.outboundUniqueReached), d.totalCalls, "34%") +
+      miniMetric("Real conversations", fmtInt(obConv), dob.conversations, "34%") +
       miniMetric("Connect rate", Math.round(num(m.outboundConnectRate)) + "%", null, "33%") +
       miniMetric(obAppts > 0 ? "Appointments — AI-booked" : "Qualified leads", obAppts > 0 ? fmtInt(obAppts) : fmtInt(obWarm), null, "33%") +
       "</tr></table></td>" +
@@ -700,7 +777,7 @@ function renderDigestHtml(metrics, opts) {
     var img = campImgs[0];
     var stat = function (val, lbl, col) { return '<td width="33%" valign="top"><div style="font-size:19px;font-weight:800;color:' + (col || INK) + ';">' + esc(val) + '</div><div style="font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:' + MUTE + ';font-weight:700;margin-top:3px;">' + esc(lbl) + "</div></td>"; };
     var imgCell = img ? '<td class="col" width="190" valign="top" style="font-size:0;line-height:0;"><img src="' + esc(img) + '" width="190" alt="" style="display:block;width:190px;max-width:190px;height:auto;border-radius:12px;" /></td><td width="16" class="col" style="font-size:0;">&nbsp;</td>' : "";
-    campSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Top campaign", consoleUrl) +
+    campSection = '<tr><td class="pad" style="padding:26px 28px 4px;">' + eyebrow("Top campaign · last 120 days", consoleUrl) +
       '<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid ' + LINE + ';border-radius:14px;"><tr><td style="padding:16px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>' +
       imgCell +
       '<td valign="middle"><div><span style="font-size:9px;font-weight:800;letter-spacing:.06em;color:' + POS + ";background:" + POS_BG + ';border-radius:6px;padding:2px 8px;">ACTIVE</span></div>' +
