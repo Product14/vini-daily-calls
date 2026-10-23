@@ -3618,6 +3618,9 @@ const ROOFTOP_BOOL_COLS = new Set([
   "daily_enabled", "weekly_enabled", "monthly_enabled",
   "post_appointment_enabled", "post_conversation_enabled",
   "action_item_enabled", "action_item_overdue_enabled",
+  // Opt-OUT toggle: the column is NOT NULL DEFAULT true and needsAttention.cjs disables only on an
+  // explicit false, so switching this off is the write that matters, not switching it on.
+  "needs_attention_enabled",
   "sms_enabled",
 ]);
 // Best-effort config-change audit log — never lets a logging failure fail the actual save.
@@ -3869,7 +3872,7 @@ const _liveDeptsPaged = (sb, cols, filter) =>
 
 // The last six are read-only in the tracker (ConfigDrawer shows them): they change what the events
 // cron sends but have no editor, so a CSM could not see why a rooftop gets the emails it gets (A1 F11).
-const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc,chat_enabled,post_conversation_template,post_conversation_mode,post_conversation_outbound_requires_reply,sms_post_conversation_cadence,working_hours";
+const _ROI_CFG_COLS = "team_id,enterprise_id,rooftop_name,timezone,csm_name,cs_poc,digest_send_hour,digest_send_minute,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,needs_attention_enabled,daily_template,digest_focus,sms_enabled,weekly_send_dow,monthly_send_day,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,enterprise_name,team_name,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc,chat_enabled,post_conversation_template,post_conversation_mode,post_conversation_outbound_requires_reply,sms_post_conversation_cadence,working_hours";
 const _ROI_CFG_COLS_LIFECYCLE = "team_id,enterprise_id,enterprise_name,team_name,rooftop_name,csm_name,cs_poc,timezone,digest_send_hour,digest_send_minute,weekly_send_dow,monthly_send_day,daily_enabled,weekly_enabled,monthly_enabled,post_appointment_enabled,post_conversation_enabled,action_item_enabled,action_item_overdue_enabled,daily_template,digest_focus,sms_enabled,lifecycle_status,lifecycle_status_override,lifecycle_effective,lifecycle_override_at,lifecycle_override_by,arr_bucket,contracted_date,onboarding_date,ob_live_date,live_date,churn_date,calls_30d,sms_30d,last_activity_at,ae_poc,ob_poc";
 // rendered_html and metrics are deliberately NOT here. Every sent and dry-run run stores its full
 // email HTML plus metricsFull (the rooftop's campaigns, appointment list, top vehicles and warm
